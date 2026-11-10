@@ -179,7 +179,18 @@ fn error(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-async fn handle(udid: &str, msg: &Value) -> Option<Value> {
+/// Tools this server offers: all of them, or the ones named with `--tools`.
+fn offered(only: &[String]) -> Vec<Value> {
+    tools()
+        .into_iter()
+        .filter(|t| {
+            let name = t["name"].as_str().unwrap_or("");
+            only.is_empty() || only.iter().any(|o| o == name || format!("iph_{o}") == name)
+        })
+        .collect()
+}
+
+async fn handle(udid: &str, only: &[String], msg: &Value) -> Option<Value> {
     let method = msg.get("method").and_then(|m| m.as_str())?;
     // Notifications carry no id and get no answer.
     let id = msg.get("id")?;
@@ -205,11 +216,14 @@ async fn handle(udid: &str, msg: &Value) -> Option<Value> {
             )
         }
         "ping" => response(id, json!({})),
-        "tools/list" => response(id, json!({ "tools": tools() })),
+        "tools/list" => response(id, json!({ "tools": offered(only) })),
         "tools/call" => {
             let Some(name) = params.get("name").and_then(|n| n.as_str()) else {
                 return Some(error(id, -32602, "tools/call needs a tool name"));
             };
+            if !offered(only).iter().any(|t| t["name"] == name) {
+                return Some(error(id, -32602, "this server does not offer that tool"));
+            }
             let args = params.get("arguments").cloned().unwrap_or(Value::Null);
             let result = call(udid, name, args).await;
             let is_error = result["ok"] != true;
@@ -227,7 +241,8 @@ async fn handle(udid: &str, msg: &Value) -> Option<Value> {
     })
 }
 
-pub async fn serve(udid: String) -> Result<()> {
+/// Serve MCP on stdio. `only` limits the tools on offer (empty = all).
+pub async fn serve(udid: String, only: Vec<String>) -> Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
     while let Some(line) = lines.next_line().await? {
@@ -236,7 +251,7 @@ pub async fn serve(udid: String) -> Result<()> {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(line) {
-            Ok(msg) => handle(&udid, &msg).await,
+            Ok(msg) => handle(&udid, &only, &msg).await,
             Err(_) => Some(error(&Value::Null, -32700, "parse error")),
         };
         if let Some(reply) = reply {
@@ -272,12 +287,29 @@ mod tests {
     #[tokio::test]
     async fn initialize_and_notifications() {
         let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}});
-        let r = handle("X", &init).await.unwrap();
+        let r = handle("X", &[], &init).await.unwrap();
         assert_eq!(r["result"]["protocolVersion"], "2024-11-05");
         assert_eq!(r["result"]["serverInfo"]["name"], "iph");
         let note = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
-        assert!(handle("X", &note).await.is_none());
+        assert!(handle("X", &[], &note).await.is_none());
         let unknown = json!({"jsonrpc":"2.0","id":2,"method":"nope"});
-        assert_eq!(handle("X", &unknown).await.unwrap()["error"]["code"], -32601);
+        assert_eq!(handle("X", &[], &unknown).await.unwrap()["error"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn tools_can_be_limited() {
+        let only = vec!["read".to_string(), "iph_find".to_string()];
+        let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+        let r = handle("X", &only, &list).await.unwrap();
+        let names: Vec<&str> = r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["iph_read", "iph_find"]);
+        // A tool that is not on offer cannot be called either.
+        let call = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"iph_tap","arguments":{"target":"x"}}});
+        assert_eq!(handle("X", &only, &call).await.unwrap()["error"]["code"], -32602);
     }
 }

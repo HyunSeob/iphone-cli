@@ -299,11 +299,18 @@ impl Session {
             .screen(Fresh::Force, sel.needs_identifier(), Self::build_opts(args.all, false))
             .await?;
         let matches = sel.find(&screen);
-        Ok(fields! {
+        let mut out = fields! {
             "selector": sel.describe(),
             "count": matches.len(),
             "elements": matches.iter().map(|e| (*e).clone()).collect::<Vec<_>>(),
-        })
+        };
+        if sel.needs_identifier() && screen.elements.iter().all(|e| e.identifier.is_none()) {
+            out.insert(
+                "note".into(),
+                json!("this reading came without identifiers, so id= could not match; try again"),
+            );
+        }
+        Ok(out)
     }
 
     /// Read the screen after an input: wait `delay` for it to react, then ask
@@ -921,40 +928,31 @@ impl Session {
         };
         let before_value = field.value.clone().unwrap_or_default();
         self.check_front_allowed(&screen).await?;
-
-        // Remember what the user had on the clipboard.
         trace(|| "type: focused field found".into());
-        let mut clip = self.pasteboard().await?;
-        let general = idevice::core_device::GENERAL_PASTEBOARD;
-        let saved = tokio::time::timeout(Duration::from_secs(8), clip.get(general)).await;
-        let (saved_text, saved_image, snapshot_ok) = match saved {
-            Ok(Ok(snap)) => {
-                let text = snap.text();
-                let image = snap.image().map(|(uti, bytes)| (uti.to_string(), bytes));
-                let restorable = text.is_some() || image.is_some() || snap.items.is_empty();
-                (text, image, restorable)
-            }
-            _ => (None, None, false),
-        };
-        trace(|| "type: clipboard saved".into());
-        // A fresh connection for writing, so a late answer to the read above
-        // cannot be mistaken for the answer to the write.
-        let mut clip = self.pasteboard().await?;
-        if !args.text.is_empty() {
-            clip.set_text(&args.text, general)
-                .await
-                .map_err(|e| Fail::not_sent("clipboard_failed", format!("{e:?}")))?;
-        }
 
-        trace(|| "type: clipboard set".into());
-        let input = match self.ensure_input().await {
-            Ok(i) => i,
-            Err(e) => {
-                self.restore_clipboard(&saved_text, &saved_image, snapshot_ok, &args.text).await;
-                return Err(e);
+        // The input session first: if it cannot be had, nothing has been
+        // touched yet, the clipboard included.
+        self.ensure_input().await?;
+        let (adapter, port) = self.service_port(PASTEBOARD_SERVICE).await?;
+
+        // Remember what the user had on the clipboard and, meanwhile, register
+        // the temporary keyboard (no key goes out yet).
+        let input = self.ensure_input().await?;
+        let (saved, attached) = tokio::join!(Clipboard::save(&adapter, port), input.keyboard_attach());
+        trace(|| "type: clipboard saved, keyboard attached".into());
+        if let Err(e) = attached {
+            // Nothing has been touched: the clipboard still holds the user's content.
+            return Err(Fail::not_sent("keyboard_failed", format!("{e:#}")));
+        }
+        if !args.text.is_empty() {
+            if let Err(e) = Clipboard::set_text(&adapter, port, &args.text).await {
+                let _ = input.keyboard_detach().await;
+                self.invalidate_readings();
+                return Err(Fail::not_sent("clipboard_failed", e));
             }
-        };
-        trace(|| "type: input ready".into());
+        }
+        trace(|| "type: clipboard set".into());
+
         let cmd = vec![crate::keys::MOD_COMMAND];
         let mut combos: Vec<(u64, Vec<u64>)> = Vec::new();
         if args.clear {
@@ -964,13 +962,13 @@ impl Session {
         if !args.text.is_empty() {
             combos.push((crate::keys::usage('v').unwrap(), cmd.clone()));
         }
-        let step = input.keys(&combos).await;
+        let pressed = input.keyboard_press(&combos).await;
         trace(|| "type: keys sent".into());
-        if let Err(e) = step {
+        if let Err(e) = pressed {
+            let _ = input.keyboard_detach().await;
             self.input = None;
-            let restored = self
-                .restore_clipboard(&saved_text, &saved_image, snapshot_ok, &args.text)
-                .await;
+            self.invalidate_readings();
+            let restored = saved.restore(&adapter, port, &args.text).await;
             return Err(Fail::unknown("input_failed", format!("{e:#}"))
                 .hint(t(
                     "입력이 나갔을 수 있습니다. 다시 보내지 말고 `iph read`로 화면을 확인하세요.",
@@ -979,39 +977,60 @@ impl Session {
                 .with("clipboard_restored", restored));
         }
 
-        // The field must now hold the text.
+        // The paste has happened by now, so the clipboard can go back while
+        // the field is being checked. The temporary keyboard stays attached
+        // meanwhile: the screen holds still and Return can follow at once.
         let want = nfc(&args.text);
         let expected_full = if args.clear {
             want.clone()
         } else {
             format!("{}{}", nfc(&before_value), want)
         };
-        let mut value = None;
-        let mut verified = false;
-        for attempt in 0..3 {
-            let delay = if attempt == 0 { AFTER_PASTE } else { Duration::from_millis(400) };
-            let Some((_, screen)) = self.observe(delay).await else { continue };
-            let now = Self::focused_field(&screen)
-                .or_else(|| screen.by_id(&field.id))
-                .and_then(|e| e.value.clone())
-                .unwrap_or_default();
-            let now_n = nfc(&now);
-            verified = if want.is_empty() {
-                now_n.is_empty() || now_n != nfc(&before_value)
-            } else {
-                now_n == expected_full || now_n.contains(&want)
-            };
-            value = Some(now);
-            if verified {
-                break;
+        let restoring = saved.restore(&adapter, port, &args.text);
+        let checking = async {
+            let mut value = None;
+            let mut verified = false;
+            for attempt in 0..3 {
+                let delay = if attempt == 0 { AFTER_PASTE } else { Duration::from_millis(400) };
+                let Some((_, screen)) = self.observe(delay).await else { continue };
+                let now = Self::focused_field(&screen)
+                    .or_else(|| screen.by_id(&field.id))
+                    .and_then(|e| e.value.clone())
+                    .unwrap_or_default();
+                let now_n = nfc(&now);
+                verified = if want.is_empty() {
+                    now_n.is_empty() || now_n != nfc(&before_value)
+                } else {
+                    now_n == expected_full || now_n.contains(&want)
+                };
+                value = Some(now);
+                if verified {
+                    break;
+                }
+            }
+            (value, verified)
+        };
+        let (restored, (value, verified)) = tokio::join!(restoring, checking);
+        trace(|| format!("type: verified={verified} clipboard_restored={restored}"));
+
+        let mut submitted = false;
+        let mut submit_error = None;
+        if verified && args.submit {
+            if let Some(input) = self.input.as_mut() {
+                match input.keyboard_press(&[(crate::keys::KEY_RETURN, vec![])]).await {
+                    Ok(()) => submitted = true,
+                    Err(e) => submit_error = Some(format!("{e:#}")),
+                }
             }
         }
-
-        trace(|| format!("type: verified={verified}"));
-        let restored = self
-            .restore_clipboard(&saved_text, &saved_image, snapshot_ok, &args.text)
-            .await;
-        trace(|| "type: clipboard restored".into());
+        if let Some(input) = self.input.as_mut() {
+            if input.keyboard_detach().await.is_err() {
+                self.input = None;
+            }
+        }
+        // The on-screen keyboard comes back now; readings from before show
+        // the screen without it.
+        self.invalidate_readings();
 
         if !verified {
             return Err(Fail::unknown(
@@ -1026,17 +1045,11 @@ impl Session {
             .with("value", value.clone().map(Value::String).unwrap_or(Value::Null))
             .with("clipboard_restored", restored));
         }
-
-        let mut submitted = false;
-        if args.submit {
-            let input = self.ensure_input().await?;
-            if let Err(e) = input.key(crate::keys::KEY_RETURN, &[]).await {
-                self.input = None;
-                return Err(Fail::unknown("input_failed", format!("{e:#}"))
-                    .with("text_verified", true)
-                    .with("clipboard_restored", restored));
-            }
-            submitted = true;
+        if let Some(e) = submit_error {
+            self.input = None;
+            return Err(Fail::unknown("input_failed", e)
+                .with("text_verified", true)
+                .with("clipboard_restored", restored));
         }
         Ok(fields! {
             "sent": true,
@@ -1049,53 +1062,114 @@ impl Session {
             "screen_changed": true,
         })
     }
+}
 
-    /// Put the user's clipboard back. Returns true when the clipboard is known
-    /// to hold what it held before.
-    async fn restore_clipboard(
-        &mut self,
-        text: &Option<String>,
-        image: &Option<(String, Vec<u8>)>,
-        snapshot_ok: bool,
-        typed: &str,
-    ) -> bool {
+const PASTEBOARD_SERVICE: &str = "com.apple.coredevice.pasteboardservice";
+
+/// What the user had on the phone's clipboard before `iph type` borrowed it.
+struct Clipboard {
+    text: Option<String>,
+    image: Option<(String, Vec<u8>)>,
+    /// False when the old content could not be read completely; then it
+    /// cannot be put back.
+    restorable: bool,
+}
+
+impl Clipboard {
+    /// Every call uses its own connection, so a late answer to one request
+    /// cannot be taken for the answer to the next.
+    async fn connect(
+        adapter: &idevice::tcp::handle::AdapterHandle,
+        port: u16,
+    ) -> Result<idevice::core_device::PasteboardServiceClient<Box<dyn idevice::ReadWrite>>, String> {
+        use idevice::RsdService;
+        let mut adapter = adapter.clone();
+        let stream = tokio::time::timeout(Duration::from_secs(8), adapter.connect(port))
+            .await
+            .map_err(|_| "clipboard service: no answer".to_string())?
+            .map_err(|e| format!("clipboard service: {e}"))?;
+        idevice::core_device::PasteboardServiceClient::from_stream(Box::new(stream))
+            .await
+            .map_err(|e| format!("clipboard service: {e:?}"))
+    }
+
+    async fn get_text(adapter: &idevice::tcp::handle::AdapterHandle, port: u16) -> Option<Option<String>> {
+        let mut clip = Self::connect(adapter, port).await.ok()?;
+        let general = idevice::core_device::GENERAL_PASTEBOARD;
+        match tokio::time::timeout(Duration::from_secs(8), clip.get(general)).await {
+            Ok(Ok(snapshot)) => Some(snapshot.text()),
+            _ => None,
+        }
+    }
+
+    async fn set_text(adapter: &idevice::tcp::handle::AdapterHandle, port: u16, text: &str) -> Result<(), String> {
+        let mut clip = Self::connect(adapter, port).await?;
+        let general = idevice::core_device::GENERAL_PASTEBOARD;
+        match tokio::time::timeout(Duration::from_secs(8), clip.set_text(text, general)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(format!("set clipboard: {e:?}")),
+            Err(_) => Err("set clipboard: no answer".into()),
+        }
+    }
+
+    async fn save(adapter: &idevice::tcp::handle::AdapterHandle, port: u16) -> Clipboard {
+        let general = idevice::core_device::GENERAL_PASTEBOARD;
+        let snapshot = match Self::connect(adapter, port).await {
+            Ok(mut clip) => tokio::time::timeout(Duration::from_secs(8), clip.get(general))
+                .await
+                .ok()
+                .and_then(|r| r.ok()),
+            Err(_) => None,
+        };
+        match snapshot {
+            Some(snap) => {
+                let text = snap.text();
+                let image = snap.image().map(|(uti, bytes)| (uti.to_string(), bytes));
+                let restorable = text.is_some() || image.is_some() || snap.items.is_empty();
+                Clipboard { text, image, restorable }
+            }
+            None => Clipboard { text: None, image: None, restorable: false },
+        }
+    }
+
+    /// Put the old content back. True when the clipboard is known to hold
+    /// what it held before.
+    async fn restore(&self, adapter: &idevice::tcp::handle::AdapterHandle, port: u16, typed: &str) -> bool {
         if typed.is_empty() {
             return true;
         }
-        if !snapshot_ok {
+        if !self.restorable {
+            return false;
+        }
+        // Give the paste a moment to read the clipboard.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Only touch the clipboard if it still holds what we put there; the
+        // user may have copied something else meanwhile.
+        if Self::get_text(adapter, port).await != Some(Some(typed.to_string())) {
             return false;
         }
         let general = idevice::core_device::GENERAL_PASTEBOARD;
-        let Ok(mut clip) = self.pasteboard().await else {
-            return false;
-        };
-        // Only touch the clipboard if it still holds what we put there; the
-        // user may have copied something else meanwhile.
-        match tokio::time::timeout(Duration::from_secs(5), clip.get(general)).await {
-            Ok(Ok(now)) if now.text().as_deref() == Some(typed) => {}
-            _ => return false,
-        }
-        let Ok(mut clip) = self.pasteboard().await else {
-            return false;
-        };
-        let wrote = match (text, image) {
-            (Some(t), _) => clip.set_text(t, general).await.is_ok(),
-            (None, Some((uti, bytes))) => clip.set_image(bytes, uti, general).await.is_ok(),
+        let wrote = match (&self.text, &self.image) {
+            (Some(text), _) => Self::set_text(adapter, port, text).await.is_ok(),
+            (None, Some((uti, bytes))) => match Self::connect(adapter, port).await {
+                Ok(mut clip) => {
+                    matches!(
+                        tokio::time::timeout(Duration::from_secs(8), clip.set_image(bytes, uti, general)).await,
+                        Ok(Ok(()))
+                    )
+                }
+                Err(_) => false,
+            },
             // The clipboard was empty: leave it without our text.
-            (None, None) => clip.set_text("", general).await.is_ok(),
+            (None, None) => Self::set_text(adapter, port, "").await.is_ok(),
         };
         if !wrote {
             return false;
         }
-        let Ok(mut clip) = self.pasteboard().await else {
-            return false;
-        };
-        match tokio::time::timeout(Duration::from_secs(5), clip.get(general)).await {
-            Ok(Ok(now)) => match text {
-                Some(t) => now.text().as_deref() == Some(t.as_str()),
-                None => now.text().as_deref() != Some(typed),
-            },
-            _ => false,
+        match (Self::get_text(adapter, port).await, &self.text) {
+            (Some(now), Some(old)) => now.as_deref() == Some(old.as_str()),
+            (Some(now), None) => now.as_deref() != Some(typed),
+            (None, _) => false,
         }
     }
 }

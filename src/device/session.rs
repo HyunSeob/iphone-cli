@@ -62,7 +62,7 @@ const ASK_AGAIN: Duration = Duration::from_millis(6500);
 /// The phone never answers a request sooner than this (about 1.1 s typical).
 const ANSWER_AT_LEAST: Duration = Duration::from_millis(700);
 const READ_TIMEOUT: Duration = Duration::from_secs(14);
-const SECOND_PASS_WAIT: Duration = Duration::from_millis(1500);
+const SECOND_PASS_WAIT: Duration = Duration::from_millis(2500);
 
 pub struct Session {
     pub udid: String,
@@ -75,6 +75,9 @@ pub struct Session {
     apps: Option<Vec<AppListEntry>>,
     /// Logical screen size from the last complete reading.
     screen_size: Option<(f64, f64)>,
+    /// Readings that arrived before this moment no longer describe the
+    /// screen (something changed it after they were taken).
+    stale_before: Option<Instant>,
     /// pid → bundle id of processes seen in front (None = not an installed app).
     bundles: std::collections::HashMap<i64, Option<String>>,
     /// Counts tunnel (re)connections, for `iph doctor` and logs.
@@ -165,9 +168,27 @@ impl Session {
             input_used: Instant::now(),
             apps: None,
             screen_size: None,
+            stale_before: None,
             bundles: std::collections::HashMap::new(),
             connects: 0,
         }
+    }
+
+    /// Mark every reading taken so far as out of date.
+    pub fn invalidate_readings(&mut self) {
+        self.stale_before = Some(Instant::now());
+    }
+
+    /// Port of an RSD service, for connections made outside `&mut self`.
+    pub async fn service_port(&mut self, name: &str) -> Res<(idevice::tcp::handle::AdapterHandle, u16)> {
+        let tunnel = self.ensure_tunnel().await?;
+        let port = tunnel
+            .rsd
+            .services
+            .get(name)
+            .map(|s| s.port)
+            .ok_or_else(|| Fail::not_sent("service_unavailable", format!("{name} is not on offer")))?;
+        Ok((tunnel.adapter.clone(), port))
     }
 
     /// Drop every connection. The next request builds them again.
@@ -235,16 +256,21 @@ impl Session {
     pub async fn dump(&mut self, fresh: Fresh, full: bool) -> Res<(u64, Arc<Dump>)> {
         let started = Instant::now();
         let mut reconnects = 0;
+        let mut second_pass_retries = 0;
         let mut fresh = fresh;
         loop {
             self.ensure_ax().await?;
             let ax = self.ax.as_mut().unwrap();
+            let usable = match (self.stale_before, ax.latest_arrival()) {
+                (Some(limit), Some(arrived)) => arrived >= limit,
+                _ => true,
+            };
             let cached = match fresh {
-                Fresh::MaxAge(max) => ax
+                Fresh::MaxAge(max) if usable => ax
                     .latest()
                     .filter(|(_, _, age)| *age <= max)
                     .map(|(seq, dump, _)| (seq, dump)),
-                Fresh::Force => None,
+                _ => None,
             };
             let got = match cached {
                 Some(c) => Some(c),
@@ -311,8 +337,14 @@ impl Session {
                         fresh = Fresh::MaxAge(Duration::from_secs(5));
                         continue;
                     }
-                    // No second pass (it does not always come): go on without
-                    // identifiers rather than fail.
+                    // The second pass sometimes stays away (seen right after
+                    // an input). Ask once more before going on without
+                    // identifiers.
+                    if second_pass_retries < 1 && started.elapsed() < READ_TIMEOUT {
+                        second_pass_retries += 1;
+                        fresh = Fresh::Force;
+                        continue;
+                    }
                     return Ok((seq, dump));
                 }
             }

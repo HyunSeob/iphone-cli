@@ -225,6 +225,11 @@ impl AxSub {
         Some((s.seq, s.initial.clone()?, s.initial_at?.elapsed()))
     }
 
+    /// When the latest first-pass dump arrived.
+    pub fn latest_arrival(&self) -> Option<Instant> {
+        self.state.lock().unwrap().initial_at
+    }
+
     /// Latest dump with second-pass attributes, if it belongs to reading `seq`.
     pub fn full(&self, seq: u64) -> Option<Arc<Dump>> {
         let s = self.state.lock().unwrap();

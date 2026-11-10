@@ -143,7 +143,11 @@ enum Cmd {
     /// Look up what happened to a confirmed operation.
     Op { op_id: String },
     /// Serve the same commands as MCP tools over stdio.
-    Mcp,
+    Mcp {
+        /// Offer only these tools (comma separated, e.g. read,find,run).
+        #[arg(long, value_delimiter = ',')]
+        tools: Vec<String>,
+    },
     /// Stop the background daemon for this phone.
     Stop,
     /// Internal: the resident process.
@@ -267,8 +271,8 @@ async fn run(cli: Cli) -> i32 {
                 }
             };
         }
-        Cmd::Mcp => {
-            return match mcp::serve(udid).await {
+        Cmd::Mcp { tools } => {
+            return match mcp::serve(udid, tools).await {
                 Ok(()) => 0,
                 Err(e) => {
                     eprintln!("iph mcp: {e:#}");

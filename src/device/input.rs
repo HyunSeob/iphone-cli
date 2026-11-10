@@ -23,8 +23,8 @@ use idevice::{
         CallInfoBlob, DisplayServiceClient, build_screen_audio_offer, build_screen_video_offer,
         build_start_audio_parameters, build_start_video_parameters,
         hid::{
-            ButtonState, IndigoHidClient, KeyboardUsage, TOUCHSCREEN_STATE_CONTACT,
-            TOUCHSCREEN_STATE_RELEASE, UniversalHidServiceClient,
+            ButtonState, IndigoHidClient, KeyboardUsage, MainKeyboardService,
+            TOUCHSCREEN_STATE_CONTACT, TOUCHSCREEN_STATE_RELEASE, UniversalHidServiceClient,
         },
     },
     rsd::RsdHandshake,
@@ -115,6 +115,8 @@ pub struct InputSession {
     /// A second connection for the keyboard, so its request/response traffic
     /// stays off the touch connection.
     keyboard: UniversalHidServiceClient<Box<dyn ReadWrite>>,
+    /// The temporary keyboard while it is registered.
+    board: Option<MainKeyboardService>,
     indigo: Option<IndigoHidClient<Box<dyn ReadWrite>>>,
     drain: Drain,
     pub started: Instant,
@@ -203,6 +205,7 @@ impl InputSession {
             display,
             hid,
             keyboard,
+            board: None,
             indigo,
             drain,
             started: Instant::now(),
@@ -360,65 +363,89 @@ impl InputSession {
         Ok(())
     }
 
-    /// Press key combinations one after another on a temporary hardware
-    /// keyboard. Each combination is a HID keyboard usage with the modifier
-    /// usages held around it, e.g. `(0x19, [0xE3])` for Command-V.
-    ///
-    /// The keyboard is registered with the phone, used and removed again:
-    /// while it is registered iOS hides the on-screen keyboard.
-    pub async fn keys(&mut self, combos: &[(u64, Vec<u64>)]) -> Result<()> {
+    /// Register a temporary hardware keyboard with the phone. While it is
+    /// registered iOS hides the on-screen keyboard, so pair every attach with
+    /// [`keyboard_detach`](Self::keyboard_detach).
+    pub async fn keyboard_attach(&mut self) -> Result<()> {
+        if self.board.is_some() {
+            return Ok(());
+        }
+        crate::device::ax::trace(|| "keyboard: registering".into());
+        let board = self
+            .keyboard
+            .create_main_keyboard()
+            .await
+            .map_err(|e| anyhow!("register keyboard: {e}"))?;
+        self.board = Some(board);
+        // The phone needs a moment to attach the new keyboard; keys sent
+        // 250 ms after registering were lost, 800 ms worked (iOS 27.0.1).
+        tokio::time::sleep(KEYBOARD_ATTACH).await;
+        crate::device::ax::trace(|| "keyboard: registered".into());
+        Ok(())
+    }
+
+    /// Press key combinations one after another on the attached keyboard.
+    /// Each is a HID keyboard usage with the modifier usages held around it,
+    /// e.g. `(0x19, [0xE3])` for Command-V.
+    pub async fn keyboard_press(&mut self, combos: &[(u64, Vec<u64>)]) -> Result<()> {
         let usage = |raw: u64| {
             KeyboardUsage::new(raw as u16).map_err(|e| anyhow!("key usage {raw:#x}: {e}"))
         };
-        // Validate everything before the keyboard exists.
+        // Validate everything before the first key goes out.
         for (key, modifiers) in combos {
             usage(*key)?;
             for m in modifiers {
                 usage(*m)?;
             }
         }
-        crate::device::ax::trace(|| "keyboard: registering".into());
-        let mut board = self
-            .keyboard
-            .create_main_keyboard()
-            .await
-            .map_err(|e| anyhow!("register keyboard: {e}"))?;
-        crate::device::ax::trace(|| "keyboard: registered".into());
-        // The phone needs a moment to attach the new keyboard; keys sent
-        // 250 ms after registering were lost, 800 ms worked (iOS 27.0.1).
-        tokio::time::sleep(KEYBOARD_ATTACH).await;
-        let result: Result<()> = async {
-            for (key, modifiers) in combos {
-                crate::device::ax::trace(|| format!("keyboard: combo {key:#x}"));
-                for m in modifiers {
-                    self.keyboard
-                        .main_keyboard_key_down(&mut board, usage(*m)?)
-                        .await
-                        .map_err(|e| anyhow!("modifier down: {e}"))?;
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
+        let board = self
+            .board
+            .as_mut()
+            .ok_or_else(|| anyhow!("no keyboard attached"))?;
+        for (key, modifiers) in combos {
+            crate::device::ax::trace(|| format!("keyboard: combo {key:#x}"));
+            for m in modifiers {
                 self.keyboard
-                    .main_keyboard_key_down(&mut board, usage(*key)?)
+                    .main_keyboard_key_down(board, usage(*m)?)
                     .await
-                    .map_err(|e| anyhow!("key down: {e}"))?;
-                tokio::time::sleep(Duration::from_millis(40)).await;
-                // Everything up at once.
-                self.keyboard
-                    .set_main_keyboard_usages(&mut board, std::iter::empty())
-                    .await
-                    .map_err(|e| anyhow!("key up: {e}"))?;
-                tokio::time::sleep(Duration::from_millis(80)).await;
+                    .map_err(|e| anyhow!("modifier down: {e}"))?;
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            Ok(())
+            self.keyboard
+                .main_keyboard_key_down(board, usage(*key)?)
+                .await
+                .map_err(|e| anyhow!("key down: {e}"))?;
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            // Everything up at once.
+            self.keyboard
+                .set_main_keyboard_usages(board, std::iter::empty())
+                .await
+                .map_err(|e| anyhow!("key up: {e}"))?;
+            tokio::time::sleep(Duration::from_millis(80)).await;
         }
-        .await;
-        // Remove the keyboard whatever happened; removal also releases keys.
+        Ok(())
+    }
+
+    /// Remove the temporary keyboard; this also releases any key still down
+    /// and brings the on-screen keyboard back.
+    pub async fn keyboard_detach(&mut self) -> Result<()> {
+        let Some(mut board) = self.board.take() else {
+            return Ok(());
+        };
         crate::device::ax::trace(|| "keyboard: removing".into());
         let removed = self.keyboard.remove_main_keyboard(&mut board).await;
         crate::device::ax::trace(|| "keyboard: removed".into());
-        result?;
-        removed.map_err(|e| anyhow!("remove keyboard: {e}"))?;
-        Ok(())
+        removed.map_err(|e| anyhow!("remove keyboard: {e}"))
+    }
+
+    /// Attach, press, detach.
+    pub async fn keys(&mut self, combos: &[(u64, Vec<u64>)]) -> Result<()> {
+        self.keyboard_attach().await?;
+        let pressed = self.keyboard_press(combos).await;
+        // Remove the keyboard whatever happened.
+        let detached = self.keyboard_detach().await;
+        pressed?;
+        detached
     }
 
     /// One key with optional modifiers.
@@ -427,6 +454,7 @@ impl InputSession {
     }
 
     pub async fn close(mut self) {
+        let _ = self.keyboard_detach().await;
         self.settle_previous().await;
         let _ = tokio::time::timeout(Duration::from_secs(2), self.display.stop_media_stream()).await;
     }

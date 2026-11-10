@@ -126,7 +126,7 @@ pub fn render(cmd: &str, v: &Value) -> String {
                     s(&d["connection"]),
                     s(&d["ios_version"]),
                     s(&d["model"]),
-                    if d["ready"] == true { "ready" } else { s(&d["state"]).leak() }
+                    s(&d["state"])
                 ));
             }
             if out.is_empty() {
