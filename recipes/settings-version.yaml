@@ -1,0 +1,11 @@
+name: settings-version
+description: 설정에서 iOS 버전 읽기
+app: com.apple.Preferences
+args: {}
+steps:
+  - launch: com.apple.Preferences
+  - wait_for: {label: "일반"}
+  - tap: {label: "일반"}
+  - tap: {label: "정보"}
+  - read_field: {name: ios_version, selector: {label: "iOS 버전"}, take: value}
+output: [ios_version]

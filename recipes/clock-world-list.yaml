@@ -1,0 +1,7 @@
+name: clock-world-list
+description: 시계 앱 세계 시계 목록 읽기
+app: com.apple.mobiletimer
+args: {}
+steps:
+  - launch: com.apple.mobiletimer
+output: [cities]

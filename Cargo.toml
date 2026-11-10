@@ -1,0 +1,52 @@
+[package]
+name = "iphone-cli"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Let AI agents read and operate any app on a real iPhone through the accessibility tree. No XCUITest, WebDriverAgent or Xcode signing."
+repository = "https://github.com/HyunSeob/iphone-cli"
+readme = "README.md"
+publish = false
+
+[lib]
+name = "iphone_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "iph"
+path = "src/main.rs"
+
+[dependencies]
+idevice = { version = "=0.1.68", features = [
+  "usbmuxd",
+  "tcp",
+  "core_device_proxy",
+  "tunnel_tcp_stack",
+  "rsd",
+  "xpc",
+  "core_device",
+  "display_stream",
+  "dvt",
+  "amfi",
+  "mobile_image_mounter",
+  "heartbeat",
+] }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml_ng = "0.10"
+plist = "1.8"
+regex = "1"
+unicode-normalization = "0.1"
+toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+libc = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+debug = false
+strip = true

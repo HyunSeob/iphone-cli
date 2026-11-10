@@ -1,0 +1,8 @@
+name: calculator-multiply
+description: 계산기로 두 수를 곱한 결과 읽기 (기본 12×34)
+app: com.apple.calculator
+args: {a: "12", b: "34"}
+steps:
+  - launch: com.apple.calculator
+  - wait_for: {label: "곱하기"}
+output: [result]
