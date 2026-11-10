@@ -331,7 +331,7 @@ impl Session {
         let pattern = map.get("regex").and_then(|v| v.as_str());
         let timeout = Duration::from_millis(opt_u64(map, "timeout_ms").unwrap_or(5000));
         // The element may still be on its way in.
-        self.wait_for(&sel, timeout).await?;
+        Box::pin(self.wait_for(&sel, timeout)).await?;
         let (_, screen) = self
             .screen(Fresh::MaxAge(reuse()), sel.needs_identifier() || what == "identifier", BuildOptions::default())
             .await?;
@@ -433,9 +433,12 @@ impl Session {
             if scrolls >= max_scrolls {
                 break;
             }
-            let moved = self
-                .cmd_scroll(ScrollArgs { direction: direction.clone(), until: None, max: None })
-                .await?;
+            let moved = Box::pin(self.cmd_scroll(ScrollArgs {
+                direction: direction.clone(),
+                until: None,
+                max: None,
+            }))
+            .await?;
             scrolls += 1;
             if moved.get("screen_changed").and_then(|v| v.as_bool()) != Some(true) {
                 ended = "end_of_list";
@@ -498,7 +501,7 @@ impl Session {
                     other => actions::parse_args(other)?,
                 };
                 let app = args.app.clone();
-                let r = self.cmd_launch(args).await?;
+                let r = Box::pin(self.cmd_launch(args)).await?;
                 if r.get("foreground").and_then(|v| v.as_bool()) != Some(true) {
                     return Err(Fail::unknown(
                         "launch_not_verified",
@@ -513,13 +516,13 @@ impl Session {
             "wait_for" => {
                 let (sel, options) = selector_and_options(body)?;
                 let timeout = Duration::from_millis(opt_u64(&options, "timeout_ms").unwrap_or(8000));
-                let el = self.wait_for(&sel, timeout).await?;
+                let el = Box::pin(self.wait_for(&sel, timeout)).await?;
                 no_value(fields! { "element": brief(&el) })
             }
             "assert" => {
                 let (sel, _) = selector_and_options(body)?;
                 // One patient look: the screen may be a moment behind.
-                let el = self.wait_for(&sel, Duration::from_millis(1500)).await.map_err(|mut f| {
+                let el = Box::pin(self.wait_for(&sel, Duration::from_millis(1500))).await.map_err(|mut f| {
                     f.code = "assert_failed".into();
                     f.message = format!("expected {} on screen", sel.describe());
                     f
@@ -532,7 +535,7 @@ impl Session {
                         "a tap list cannot be confirmed; make the guarded tap a step of its own",
                     ));
                 }
-                let r = self.tap_sequence(body.as_array().unwrap()).await?;
+                let r = Box::pin(self.tap_sequence(body.as_array().unwrap())).await?;
                 no_value(fields! {
                     "screen_changed": r.get("screen_changed").cloned().unwrap_or(Value::Null),
                     "taps": r.get("taps").cloned().unwrap_or(Value::Null),
@@ -542,22 +545,21 @@ impl Session {
                 let (sel, options) = selector_and_options(body)?;
                 // Give the target a moment to appear, as a person would.
                 let timeout = Duration::from_millis(opt_u64(&options, "timeout_ms").unwrap_or(5000));
-                self.wait_for(&sel, timeout).await?;
+                Box::pin(self.wait_for(&sel, timeout)).await?;
                 let target = match body.as_object() {
                     Some(m) if m.contains_key("selector") => m["selector"].clone(),
                     _ => body.clone(),
                 };
-                let r = self
-                    .tap_impl(
-                        TapArgs {
-                            target,
-                            long_ms: opt_u64(&options, "long_ms"),
-                            double: options.get("double").and_then(|v| v.as_bool()).unwrap_or(false),
-                            confirm: confirm_op.map(String::from),
-                        },
-                        needs_confirm,
-                    )
-                    .await?;
+                let r = Box::pin(self.tap_impl(
+                    TapArgs {
+                        target,
+                        long_ms: opt_u64(&options, "long_ms"),
+                        double: options.get("double").and_then(|v| v.as_bool()).unwrap_or(false),
+                        confirm: confirm_op.map(String::from),
+                    },
+                    needs_confirm,
+                ))
+                .await?;
                 no_value(fields! {
                     "screen_changed": r.get("screen_changed").cloned().unwrap_or(Value::Null),
                     "element": r.get("element").cloned().unwrap_or(Value::Null),
@@ -568,7 +570,7 @@ impl Session {
                     Value::String(s) => TypeArgs { text: s.clone(), ..Default::default() },
                     other => actions::parse_args(other)?,
                 };
-                let r = self.cmd_type(args).await?;
+                let r = Box::pin(self.cmd_type(args)).await?;
                 no_value(fields! {
                     "value": r.get("value").cloned().unwrap_or(Value::Null),
                     "clipboard_restored": r.get("clipboard_restored").cloned().unwrap_or(Value::Null),
@@ -579,7 +581,7 @@ impl Session {
                     Value::String(s) => SwipeArgs { direction: Some(s.clone()), ..Default::default() },
                     other => actions::parse_args(other)?,
                 };
-                let r = self.cmd_swipe(args).await?;
+                let r = Box::pin(self.cmd_swipe(args)).await?;
                 no_value(fields! { "screen_changed": r.get("screen_changed").cloned().unwrap_or(Value::Null) })
             }
             "scroll_until" => {
@@ -588,18 +590,17 @@ impl Session {
                     Some(m) if m.contains_key("selector") => m["selector"].clone(),
                     _ => body.clone(),
                 };
-                let r = self
-                    .cmd_scroll(ScrollArgs {
-                        direction: options
-                            .get("direction")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("down")
-                            .to_string(),
-                        until: Some(until),
-                        max: opt_u64(&options, "max").map(|n| n as u32),
-                    })
-                    .await
-                    .map_err(|mut f| {
+                let r = Box::pin(self.cmd_scroll(ScrollArgs {
+                    direction: options
+                        .get("direction")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("down")
+                        .to_string(),
+                    until: Some(until),
+                    max: opt_u64(&options, "max").map(|n| n as u32),
+                }))
+                .await
+                .map_err(|mut f| {
                         // Not finding the target fails the step.
                         if f.outcome == Outcome::Done {
                             f.outcome = Outcome::NotSent;
@@ -612,11 +613,11 @@ impl Session {
                 })
             }
             "read_field" => {
-                let (name, value) = self.read_field(body).await?;
+                let (name, value) = Box::pin(self.read_field(body)).await?;
                 Ok((fields! { "name": name.clone(), "value": value.clone() }, Some((name, value))))
             }
             "read_list" => {
-                let (name, rows, info) = self.read_list(body).await?;
+                let (name, rows, info) = Box::pin(self.read_list(body)).await?;
                 let count = rows.as_array().map(|a| a.len()).unwrap_or(0);
                 Ok((
                     fields! { "name": name.clone(), "count": count, "scrolls": info["scrolls"], "ended": info["ended"] },
@@ -625,12 +626,12 @@ impl Session {
             }
             "button" => {
                 let button = body.as_str().ok_or_else(|| Fail::invalid("button needs a name"))?;
-                let r = self.cmd_button(ButtonArgs { button: button.to_string() }).await?;
+                let r = Box::pin(self.cmd_button(ButtonArgs { button: button.to_string() })).await?;
                 no_value(fields! { "screen_changed": r.get("screen_changed").cloned().unwrap_or(Value::Null) })
             }
             "key" => {
                 let key = body.as_str().ok_or_else(|| Fail::invalid("key needs a name"))?;
-                let r = self.cmd_key(KeyArgs { key: key.to_string() }).await?;
+                let r = Box::pin(self.cmd_key(KeyArgs { key: key.to_string() })).await?;
                 no_value(fields! { "screen_changed": r.get("screen_changed").cloned().unwrap_or(Value::Null) })
             }
             "sleep" => {
@@ -722,7 +723,9 @@ impl Session {
                     }
                 }
             }
-            let result = self.run_step(kind, body, op_id.as_deref(), needs_confirm).await;
+            // Boxed: the step futures are large and would otherwise pile up on
+            // the stack of whoever polls the run.
+            let result = Box::pin(self.run_step(kind, body, op_id.as_deref(), needs_confirm)).await;
             let ms = started.elapsed().as_millis() as u64;
             match result {
                 Ok((extra, value)) => {
@@ -782,7 +785,7 @@ impl Session {
             )));
         }
         let opts = RunOptions { confirm, batch: false };
-        let mut out = match self.run_steps(&recipe.steps, &args, &opts).await {
+        let mut out = match Box::pin(self.run_steps(&recipe.steps, &args, &opts)).await {
             Ok(o) => o,
             Err(f) => return Err(f.with("recipe", recipe.name.clone())),
         };
@@ -861,6 +864,7 @@ mod tests {
             label: Some("iOS 버전, 27.0.1".into()),
             value: None,
             identifier: None,
+            hint: None,
             frame: None,
             traits: vec![],
             enabled: true,

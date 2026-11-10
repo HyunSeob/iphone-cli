@@ -391,6 +391,7 @@ mod tests {
             label: (!label.is_empty()).then(|| label.to_string()),
             value: None,
             identifier: None,
+            hint: None,
             frame: Some(Rect { x: frame.0, y: frame.1, w: frame.2, h: frame.3 }),
             traits: vec![],
             enabled: true,

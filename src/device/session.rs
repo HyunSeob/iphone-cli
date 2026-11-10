@@ -326,7 +326,7 @@ impl Session {
         // application's frame; look again rather than hand out a screen
         // without a size.
         for _ in 0..3 {
-            let (seq, dump) = self.dump(fresh, full).await?;
+            let (seq, dump) = Box::pin(self.dump(fresh, full)).await?;
             let screen = Screen::build(&dump, opts);
             if screen.width > 0.0 && screen.height > 0.0 {
                 self.screen_size = Some((screen.width, screen.height));

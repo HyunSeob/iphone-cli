@@ -60,24 +60,23 @@ fn log(msg: &str) {
 
 async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
     match cmd {
-        "read" => s.cmd_read(parse_args(args)?).await,
-        "find" => s.cmd_find(parse_args(args)?).await,
-        "tap" => s.cmd_tap(parse_args(args)?).await,
-        "swipe" => s.cmd_swipe(parse_args(args)?).await,
-        "scroll" => s.cmd_scroll(parse_args(args)?).await,
-        "type" => s.cmd_type(parse_args(args)?).await,
-        "key" => s.cmd_key(parse_args(args)?).await,
-        "button" => s.cmd_button(parse_args(args)?).await,
-        "launch" => s.cmd_launch(parse_args(args)?).await,
+        "read" => Box::pin(s.cmd_read(parse_args(args)?)).await,
+        "find" => Box::pin(s.cmd_find(parse_args(args)?)).await,
+        "tap" => Box::pin(s.cmd_tap(parse_args(args)?)).await,
+        "swipe" => Box::pin(s.cmd_swipe(parse_args(args)?)).await,
+        "scroll" => Box::pin(s.cmd_scroll(parse_args(args)?)).await,
+        "type" => Box::pin(s.cmd_type(parse_args(args)?)).await,
+        "key" => Box::pin(s.cmd_key(parse_args(args)?)).await,
+        "button" => Box::pin(s.cmd_button(parse_args(args)?)).await,
+        "launch" => Box::pin(s.cmd_launch(parse_args(args)?)).await,
         "apps" => s.cmd_apps().await,
-        "screenshot" => s.cmd_screenshot(parse_args(args)?).await,
+        "screenshot" => Box::pin(s.cmd_screenshot(parse_args(args)?)).await,
         "batch" => {
             let steps = args
                 .get("steps")
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| Fail::invalid("batch needs a JSON array of steps"))?;
-            s.run_steps(steps, &Map::new(), &RunOptions { confirm: None, batch: true })
-                .await
+            Box::pin(s.run_steps(steps, &Map::new(), &RunOptions { confirm: None, batch: true })).await
         }
         "run" => {
             let name = args
@@ -87,9 +86,9 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
             let empty = Map::new();
             let given = args.get("args").and_then(|v| v.as_object()).unwrap_or(&empty);
             let confirm = args.get("confirm").and_then(|v| v.as_str()).map(String::from);
-            s.cmd_run(name, given, confirm).await
+            Box::pin(s.cmd_run(name, given, confirm)).await
         }
-        "doctor" => doctor::run(s, parse_args(args)?).await,
+        "doctor" => Box::pin(doctor::run(s, parse_args(args)?)).await,
         "status" => Ok(fields! {
             "udid": s.udid.clone(),
             "connection": s.connection(),
@@ -155,7 +154,8 @@ async fn handle(stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
         ),
         cmd => {
             let mut session = shared.session.lock().await;
-            let result = match tokio::time::timeout(budget(cmd), dispatch(&mut session, cmd, &req.args)).await {
+            let work = Box::pin(dispatch(&mut session, cmd, &req.args));
+            let result = match tokio::time::timeout(budget(cmd), work).await {
                 Ok(r) => r,
                 Err(_) => {
                     // Whatever was in flight is abandoned with its connections.

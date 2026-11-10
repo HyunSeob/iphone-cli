@@ -1,9 +1,13 @@
 //! What the numbered accessibility attributes mean.
 //!
-//! Found by experiment on iOS 27.0.1 with Settings, Calculator, Notes and
-//! Clock (2026-11-10): read a screen, compare the numbers with what is
-//! visibly there, change one thing, read again. Numbers not listed here are
-//! passed through untouched in `iph read --raw`.
+//! Found by experiment on iOS 27.0.1 with Settings, Calculator and Notes
+//! (2026-11-10): read a screen, compare the numbers with what is visibly
+//! there, change one thing, read again. Numbers not listed here are passed
+//! through untouched in `iph read --raw`.
+//!
+//! Seen but not used: 1 activation point, 13 custom actions, 48 and 43 other
+//! frames, 61 a second role-like number, 73 language, 78 trait descriptions
+//! ("버튼"), 87/88 alternative labels, 128 a pointer string.
 
 /// Text VoiceOver would speak for the element. String or attributed string.
 pub const LABEL: i64 = 3;
@@ -25,10 +29,16 @@ pub const ROLE_DESCRIPTION: i64 = 46;
 pub const VALUE: i64 = 53;
 /// Bit set of UIAccessibilityTraits, see [`trait_names`].
 pub const TRAITS: i64 = 77;
-/// Hint text ("double tap to …"). Only in the additional pass.
-pub const HINT: i64 = 86;
+/// Hint text VoiceOver adds after the label ("changes the sign of a value").
+pub const HINT: i64 = 23;
+/// The label as plain text (number 3 can be an attributed string).
+pub const LABEL_PLAIN: i64 = 33;
 
-/// Public UIAccessibilityTraits bits, plus private ones confirmed on device.
+/// Public UIAccessibilityTraits bits, plus private ones. Seen on device:
+/// text_entry and editing (Notes body while typing), search_field (Settings),
+/// back_button (navigation bars), toggle (Settings switches), not_enabled
+/// (Notes share button on an empty note), keyboard_key (keyboard, Calculator).
+/// Not yet seen on device: secure_text, tab_button.
 pub mod traits {
     pub const BUTTON: u64 = 1 << 0;
     pub const LINK: u64 = 1 << 1;
@@ -93,7 +103,7 @@ pub fn trait_names(bits: u64) -> Vec<&'static str> {
 
 /// Role name for an element. The trait bits are the dependable source (they
 /// are a public, stable set); the role number refines what traits cannot say.
-pub fn role_name(role: Option<i64>, bits: u64, is_application: bool) -> &'static str {
+pub fn role_name(role: Option<i64>, bits: u64, is_application: bool, has_text: bool) -> &'static str {
     if is_application || role == Some(1) {
         return "application";
     }
@@ -136,7 +146,8 @@ pub fn role_name(role: Option<i64>, bits: u64, is_application: bool) -> &'static
     if bits & traits::TAB_BAR != 0 {
         return "tab_bar";
     }
-    "other"
+    // No telling trait: a row of plain text, or a container.
+    if has_text { "text" } else { "other" }
 }
 
 #[cfg(test)]
@@ -156,11 +167,12 @@ mod tests {
 
     #[test]
     fn roles_follow_traits() {
-        assert_eq!(role_name(Some(1), 0, true), "application");
-        assert_eq!(role_name(Some(3), 9007207844675649, false), "switch");
-        assert_eq!(role_name(Some(15), 146029151232, false), "search_field");
-        assert_eq!(role_name(Some(2), 8589934657, false), "button");
-        assert_eq!(role_name(Some(6), 8590000192, false), "header");
-        assert_eq!(role_name(None, 0, false), "other");
+        assert_eq!(role_name(Some(1), 0, true, true), "application");
+        assert_eq!(role_name(Some(3), 9007207844675649, false, true), "switch");
+        assert_eq!(role_name(Some(15), 146029151232, false, false), "search_field");
+        assert_eq!(role_name(Some(2), 8589934657, false, true), "button");
+        assert_eq!(role_name(Some(6), 8590000192, false, true), "header");
+        assert_eq!(role_name(Some(14), 146028888064, false, true), "text");
+        assert_eq!(role_name(None, 0, false, false), "other");
     }
 }

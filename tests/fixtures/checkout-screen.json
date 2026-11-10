@@ -1,0 +1,18 @@
+{
+  "_comment": "Made-up checkout screen for safety tests. Not captured from any real app.",
+  "width": 430.0,
+  "height": 932.0,
+  "apps": [{ "pid": 4242, "name": "가상 상점" }],
+  "elements": [
+    { "id": "app00001", "role": "application", "label": "가상 상점", "frame": { "x": 0, "y": 0, "w": 430, "h": 932 } },
+    { "id": "back0001", "role": "button", "label": "뒤로", "traits": ["button", "back_button"], "frame": { "x": 20, "y": 59, "w": 44, "h": 44 }, "parent": "app00001", "depth": 1 },
+    { "id": "head0001", "role": "header", "label": "주문서", "traits": ["header"], "frame": { "x": 180, "y": 70, "w": 70, "h": 21 }, "parent": "app00001", "depth": 1 },
+    { "id": "item0001", "role": "text", "label": "시험용 연필 12자루, 3,000원", "traits": ["static_text"], "frame": { "x": 20, "y": 140, "w": 390, "h": 60 }, "parent": "app00001", "depth": 1 },
+    { "id": "sum00001", "role": "text", "label": "총 결제 금액, 3,000원", "traits": ["static_text"], "frame": { "x": 20, "y": 220, "w": 390, "h": 50 }, "parent": "app00001", "depth": 1 },
+    { "id": "meth0001", "role": "button", "label": "Payment methods", "traits": ["button"], "frame": { "x": 20, "y": 290, "w": 390, "h": 50 }, "parent": "app00001", "depth": 1 },
+    { "id": "canc0001", "role": "button", "label": "취소", "traits": ["button"], "frame": { "x": 20, "y": 780, "w": 185, "h": 56 }, "parent": "app00001", "depth": 1 },
+    { "id": "pay00001", "role": "button", "label": "3,000원 결제하기", "traits": ["button"], "frame": { "x": 225, "y": 780, "w": 185, "h": 56 }, "parent": "app00001", "depth": 1 },
+    { "id": "payen001", "role": "button", "label": "Pay ₩3,000", "traits": ["button"], "frame": { "x": 20, "y": 850, "w": 390, "h": 56 }, "parent": "app00001", "depth": 1 },
+    { "id": "icon0001", "role": "button", "traits": ["button"], "frame": { "x": 370, "y": 63, "w": 36, "h": 36 }, "parent": "app00001", "depth": 1 }
+  ]
+}

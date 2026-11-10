@@ -315,7 +315,7 @@ impl Session {
 
     /// Check the safety guard for a tap on `el`. `Ok(Some(record))` means the
     /// tap is confirmed and the record must be finished afterwards.
-    pub(crate) fn guard_tap(
+    pub fn guard_tap(
         &self,
         el: Option<&Element>,
         confirm: Option<&str>,
@@ -375,7 +375,7 @@ impl Session {
         }
     }
 
-    pub(crate) fn finish_op(rec: Option<OpRecord>, state: &str) {
+    pub fn finish_op(rec: Option<OpRecord>, state: &str) {
         if let Some(mut rec) = rec {
             rec.state = state.to_string();
             rec.at = safety::now_utc();

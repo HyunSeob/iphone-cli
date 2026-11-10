@@ -79,24 +79,35 @@ pub struct Element {
     pub value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frame: Option<Rect>,
+    #[serde(default)]
     pub traits: Vec<String>,
+    #[serde(default = "yes")]
     pub enabled: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub selected: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub focused: bool,
     /// `id` of the parent element, absent for an application.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    #[serde(default)]
     pub depth: u32,
+    #[serde(default)]
     pub pid: i64,
     /// False when the element lies outside the screen.
+    #[serde(default = "yes")]
     pub on_screen: bool,
     /// Every numbered attribute, only with `--raw`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<serde_json::Value>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -253,21 +264,25 @@ impl Screen {
             if raw.is_application {
                 screen.apps.push(AppInfo {
                     pid: key.pid,
-                    name: text(raw.attrs.get(&attrs::LABEL)),
+                    name: text(raw.attrs.get(&attrs::LABEL))
+                        .or_else(|| text(raw.attrs.get(&attrs::LABEL_PLAIN))),
                     bundle_id: None,
                 });
             }
             if !on_screen && !opts.include_offscreen && !raw.is_application {
                 continue;
             }
-            let label = text(raw.attrs.get(&attrs::LABEL));
+            let label = text(raw.attrs.get(&attrs::LABEL))
+                .or_else(|| text(raw.attrs.get(&attrs::LABEL_PLAIN)));
             let value = text(raw.attrs.get(&attrs::VALUE));
+            let has_text = label.is_some() || value.is_some();
             screen.elements.push(Element {
                 id,
-                role: attrs::role_name(role_num, bits, raw.is_application).to_string(),
+                role: attrs::role_name(role_num, bits, raw.is_application, has_text).to_string(),
                 label,
                 value,
                 identifier: text(raw.attrs.get(&attrs::IDENTIFIER)),
+                hint: text(raw.attrs.get(&attrs::HINT)),
                 frame,
                 traits: attrs::trait_names(bits)
                     .into_iter()

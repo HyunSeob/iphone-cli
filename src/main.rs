@@ -194,14 +194,23 @@ fn swipe_args(direction: &str, duration: Option<u64>, drag: bool) -> Result<Valu
 
 fn main() {
     let cli = Cli::parse();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    let code = runtime.block_on(run(cli));
-    // Background tasks (tunnel packet pump) must not hold the process open.
-    runtime.shutdown_background();
-    std::process::exit(code);
+    // The command futures nest deeply; give the thread that polls them room.
+    let worker = std::thread::Builder::new()
+        .name("iph-main".into())
+        .stack_size(64 << 20)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(16 << 20)
+                .build()
+                .expect("tokio runtime");
+            let code = runtime.block_on(run(cli));
+            // Background tasks (tunnel packet pump) must not hold the process open.
+            runtime.shutdown_background();
+            code
+        })
+        .expect("spawn main thread");
+    std::process::exit(worker.join().unwrap_or(1));
 }
 
 async fn run(cli: Cli) -> i32 {
