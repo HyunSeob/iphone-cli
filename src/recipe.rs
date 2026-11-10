@@ -242,18 +242,71 @@ fn apply_regex(text: Option<String>, pattern: Option<&str>) -> Result<Option<Str
     }))
 }
 
-/// Append `page` to `all`, skipping the rows both share: the longest run at
-/// the end of `all` that equals the start of `page`. Comparing runs instead
-/// of single rows keeps two genuinely identical rows apart.
-fn merge_rows(all: &mut Vec<Value>, page: Vec<Value>) -> usize {
-    let max = all.len().min(page.len());
-    let overlap = (0..=max)
-        .rev()
-        .find(|k| all[all.len() - k..] == page[..*k])
-        .unwrap_or(0);
-    let added = page.len() - overlap;
-    all.extend(page.into_iter().skip(overlap));
-    added
+/// One list row on one reading: what is reported for it, what identifies it,
+/// and where it sat.
+#[derive(Debug, Clone)]
+struct Row {
+    value: Value,
+    key: String,
+    y: f64,
+}
+
+/// How far the rows moved between two readings, if they moved as one block:
+/// the distance that at least two thirds of the rows appearing once in both
+/// readings agree on. None when nothing recognisable moved, or when the rows
+/// did not move together (a list stretching at its end, a reading taken
+/// mid-motion).
+fn scroll_distance(prev: &[Row], page: &[Row]) -> Option<f64> {
+    let once = |rows: &[Row], key: &str| rows.iter().filter(|r| r.key == key).count() == 1;
+    let deltas: Vec<f64> = page
+        .iter()
+        .filter(|r| once(page, &r.key) && once(prev, &r.key))
+        .filter_map(|r| prev.iter().find(|p| p.key == r.key).map(|p| p.y - r.y))
+        .filter(|d| d.abs() > 2.0)
+        .collect();
+    // The value with the most neighbours within 3 points.
+    let (agree, distance) = deltas
+        .iter()
+        .map(|d| (deltas.iter().filter(|o| (*o - d).abs() <= 3.0).count(), *d))
+        .max_by_key(|(n, _)| *n)?;
+    (agree * 3 >= deltas.len() * 2).then_some(distance)
+}
+
+/// Rows of `page` that were not on the previous reading.
+///
+/// When the rows moved as one block, position decides: a row was there
+/// already if the same row sat where this one would have been before the
+/// scroll, or sits exactly where it sat (a pinned element, not a list row).
+/// That keeps two identical rows apart and survives pinned headers and
+/// toolbars that match the row selector.
+///
+/// When they did not move as one block, only rows whose text the previous
+/// reading did not have count as new (more of the same text than before
+/// counts for the surplus). That can miss an identical neighbour, but never
+/// reports a row twice.
+fn new_rows(prev: &[Row], page: &[Row]) -> Vec<Value> {
+    match scroll_distance(prev, page) {
+        Some(dy) => page
+            .iter()
+            .filter(|r| {
+                let pinned = prev.iter().any(|p| p.key == r.key && (p.y - r.y).abs() <= 2.0);
+                let seen = prev.iter().any(|p| p.key == r.key && ((p.y - r.y) - dy).abs() <= 3.0);
+                !pinned && !seen
+            })
+            .map(|r| r.value.clone())
+            .collect(),
+        None => {
+            let mut out = Vec::new();
+            for (i, r) in page.iter().enumerate() {
+                let before = prev.iter().filter(|p| p.key == r.key).count();
+                let so_far = page[..=i].iter().filter(|p| p.key == r.key).count();
+                if so_far > before {
+                    out.push(r.value.clone());
+                }
+            }
+            out
+        }
+    }
 }
 
 /// Wrap a step's failure in the recipe-level report: which step, why, and
@@ -351,9 +404,16 @@ impl Session {
         screen: &Screen,
         row: &Selector,
         columns: Option<&Map<String, Value>>,
-    ) -> Res<Vec<Value>> {
+    ) -> Res<Vec<Row>> {
         let mut out = Vec::new();
         for el in dedupe_targets(row.find(screen)) {
+            let y = el.frame.map(|f| f.y).unwrap_or(0.0);
+            // Two rows are the same row when label and value agree.
+            let identity = format!(
+                "{}\u{1}{}",
+                el.label.as_deref().unwrap_or(""),
+                el.value.as_deref().unwrap_or("")
+            );
             let Some(cols) = columns else {
                 let mut v = json!({});
                 if let Some(l) = &el.label {
@@ -362,7 +422,7 @@ impl Session {
                 if let Some(val) = &el.value {
                     v["value"] = json!(val);
                 }
-                out.push(v);
+                out.push(Row { value: v, key: identity, y });
                 continue;
             };
             let mut rec = Map::new();
@@ -392,7 +452,8 @@ impl Session {
                 let text = apply_regex(source.and_then(|e| take(e, what)), pattern)?;
                 rec.insert(col.clone(), text.map(Value::String).unwrap_or(Value::Null));
             }
-            out.push(Value::Object(rec));
+            let key = format!("{identity}\u{1}{}", Value::Object(rec.clone()));
+            out.push(Row { value: Value::Object(rec), key, y });
         }
         Ok(out)
     }
@@ -416,11 +477,31 @@ impl Session {
         let full = row.needs_identifier() || until.as_ref().is_some_and(|u| u.needs_identifier());
 
         let mut all: Vec<Value> = Vec::new();
+        let mut prev: Option<Vec<Row>> = None;
         let mut scrolls = 0u32;
-        let mut ended = "max_scrolls";
+        // Readings in a row that brought no new row.
+        let mut barren = 0u32;
+        let ended;
         loop {
             let (_, screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
-            merge_rows(&mut all, Self::rows_on_screen(&screen, &row, columns)?);
+            let page = Self::rows_on_screen(&screen, &row, columns)?;
+            match &prev {
+                None => all.extend(page.iter().map(|r| r.value.clone())),
+                Some(before) => {
+                    let fresh_rows = new_rows(before, &page);
+                    crate::device::ax::trace(|| {
+                        format!(
+                            "read_list page: rows={} moved={:?} new={}",
+                            page.len(),
+                            scroll_distance(before, &page),
+                            fresh_rows.len(),
+                        )
+                    });
+                    barren = if fresh_rows.is_empty() { barren + 1 } else { 0 };
+                    all.extend(fresh_rows);
+                }
+            }
+            prev = Some(page);
             if all.len() >= limit {
                 all.truncate(limit);
                 ended = "limit";
@@ -430,20 +511,23 @@ impl Session {
                 ended = "until";
                 break;
             }
-            if scrolls >= max_scrolls {
+            // Two readings without a new row: the list is at its end. One can
+            // be a dropped drag or a bounce.
+            if barren >= 2 {
+                ended = "end_of_list";
                 break;
             }
-            let moved = Box::pin(self.cmd_scroll(ScrollArgs {
+            if scrolls >= max_scrolls {
+                ended = "max_scrolls";
+                break;
+            }
+            Box::pin(self.cmd_scroll(ScrollArgs {
                 direction: direction.clone(),
                 until: None,
                 max: None,
             }))
             .await?;
             scrolls += 1;
-            if moved.get("screen_changed").and_then(|v| v.as_bool()) != Some(true) {
-                ended = "end_of_list";
-                break;
-            }
         }
         Ok((
             name.to_string(),
@@ -840,20 +924,68 @@ mod tests {
         assert_eq!(substitute(&step, &args)["type"]["text"], "12×34");
     }
 
+    fn rows(items: &[(&str, f64)]) -> Vec<Row> {
+        items
+            .iter()
+            .map(|(label, y)| Row { value: json!({ "label": label }), key: label.to_string(), y: *y })
+            .collect()
+    }
+
+    fn labels(v: &[Value]) -> Vec<&str> {
+        v.iter().map(|x| x["label"].as_str().unwrap()).collect()
+    }
+
     #[test]
-    fn merge_keeps_identical_neighbours_apart() {
-        let row = |s: &str| json!({ "label": s });
-        let mut all = vec![row("a"), row("b"), row("b")];
-        // The next page overlaps on "b", "b" and adds another "b" and "c".
-        let added = merge_rows(&mut all, vec![row("b"), row("b"), row("b"), row("c")]);
-        assert_eq!(added, 2);
-        assert_eq!(all.len(), 5);
-        // No overlap: everything is new.
-        let added = merge_rows(&mut all, vec![row("x")]);
-        assert_eq!(added, 1);
-        // A page identical to the tail adds nothing.
-        let added = merge_rows(&mut all, vec![row("c"), row("x")]);
-        assert_eq!(added, 0);
+    fn only_rows_that_were_not_on_the_previous_reading_are_new() {
+        // The list moved up by 160 points.
+        let before = rows(&[("a", 100.0), ("b", 180.0), ("c", 260.0), ("d", 340.0)]);
+        let after = rows(&[("c", 100.0), ("d", 180.0), ("e", 260.0), ("f", 340.0)]);
+        assert_eq!(scroll_distance(&before, &after), Some(160.0));
+        assert_eq!(labels(&new_rows(&before, &after)), ["e", "f"]);
+    }
+
+    #[test]
+    fn pinned_elements_that_match_the_row_selector_are_counted_once() {
+        // "합계" stays at the top and "받아쓰기" at the bottom on every reading.
+        let before = rows(&[("합계", 60.0), ("a", 100.0), ("b", 180.0), ("받아쓰기", 860.0)]);
+        let after = rows(&[("합계", 60.0), ("b", 100.0), ("c", 180.0), ("받아쓰기", 860.0)]);
+        assert_eq!(labels(&new_rows(&before, &after)), ["c"]);
+    }
+
+    #[test]
+    fn identical_rows_are_kept_apart_by_position() {
+        // Three purchases that read the same; the list moved up by 80.
+        let before = rows(&[("커피 4,500원", 100.0), ("커피 4,500원", 180.0), ("빵 3,000원", 260.0)]);
+        let after = rows(&[
+            ("커피 4,500원", 100.0),
+            ("빵 3,000원", 180.0),
+            ("커피 4,500원", 260.0),
+            ("우유 2,000원", 340.0),
+        ]);
+        // The first two are the old second and third rows; the coffee at 260
+        // and the milk are new.
+        assert_eq!(labels(&new_rows(&before, &after)), ["커피 4,500원", "우유 2,000원"]);
+    }
+
+    #[test]
+    fn rows_that_did_not_move_together_are_matched_by_text() {
+        // The end of a list stretching under the finger: every row shifted by
+        // a different amount. Nothing is new.
+        let before = rows(&[("a", 94.0), ("b", 143.0), ("c", 193.0), ("d", 242.0), ("e", 326.0)]);
+        let after = rows(&[("a", 114.0), ("b", 173.0), ("c", 238.0), ("d", 302.0), ("e", 406.0)]);
+        assert_eq!(scroll_distance(&before, &after), None);
+        assert!(new_rows(&before, &after).is_empty());
+        // The same, with one row that was not there before.
+        let after = rows(&[("b", 173.0), ("c", 238.0), ("d", 302.0), ("e", 406.0), ("f", 470.0)]);
+        assert_eq!(labels(&new_rows(&before, &after)), ["f"]);
+    }
+
+    #[test]
+    fn a_reading_with_nothing_in_common_is_all_new() {
+        let before = rows(&[("a", 100.0), ("b", 180.0)]);
+        let after = rows(&[("x", 100.0), ("y", 180.0)]);
+        assert_eq!(scroll_distance(&before, &after), None);
+        assert_eq!(labels(&new_rows(&before, &after)), ["x", "y"]);
     }
 
     #[test]
