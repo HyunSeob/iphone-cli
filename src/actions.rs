@@ -10,7 +10,8 @@ use unicode_normalization::UnicodeNormalization;
 use crate::{
     ax::tree::{BuildOptions, Element, Rect, Screen},
     device::{
-        input::normalize,
+        ax::trace,
+        input::{Motion, normalize},
         session::{Fresh, Session, reuse},
     },
     fields,
@@ -69,6 +70,8 @@ pub struct SwipeArgs {
     pub from: Option<[f64; 2]>,
     pub to: Option<[f64; 2]>,
     pub duration_ms: Option<u64>,
+    /// Slow to a stop before lifting (a drag) instead of flicking.
+    pub drag: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -99,10 +102,13 @@ pub struct ButtonArgs {
     pub button: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchArgs {
     pub app: String,
+    /// Quit the app first, so it starts from its first screen.
+    #[serde(default)]
+    pub restart: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -248,6 +254,13 @@ fn tap_point(el: &Element, screen: &Screen) -> Res<(f64, f64)> {
 
 fn nfc(s: &str) -> String {
     s.nfc().collect()
+}
+
+/// The app now in front, when it is not the one that was in front before.
+fn app_changed(before: &Screen, after: &Screen) -> Option<Value> {
+    let was: Vec<i64> = before.apps.iter().map(|a| a.pid).collect();
+    let now = after.apps.first()?;
+    (!was.contains(&now.pid)).then(|| json!({ "name": now.name, "pid": now.pid }))
 }
 
 impl Session {
@@ -410,6 +423,7 @@ impl Session {
             }
         };
         let element_json = element.map(brief);
+        self.check_front_allowed(&screen).await?;
         let op = self.guard_tap(element, args.confirm.as_deref(), "tap", force_confirm)?;
         let op_id = op.as_ref().map(|o| o.op_id.clone());
 
@@ -444,6 +458,7 @@ impl Session {
         let after = self.observe(AFTER_TAP).await;
         let changed = after.as_ref().map(|(_, s)| s.signature() != before);
         Self::finish_op(op, "done");
+        let app_change = after.as_ref().and_then(|(_, s)| app_changed(&screen, s));
 
         let mut out = fields! {
             "sent": true,
@@ -464,7 +479,77 @@ impl Session {
                 json!("the tap was sent but no reading came back to compare"),
             );
         }
+        if let Some(change) = app_change {
+            out.insert("app_changed".into(), json!(true));
+            out.insert("app".into(), change);
+        }
         Ok(out)
+    }
+
+    /// Tap several targets in a row on the screen as it is now: every target
+    /// is found (and checked by the safety guard) before the first tap goes
+    /// out, nothing is re-read in between, and the screen is read once at the
+    /// end. For keypads and other screens that hold still while tapped.
+    pub(crate) async fn tap_sequence(&mut self, targets: &[Value]) -> Res {
+        if targets.is_empty() {
+            return Err(Fail::invalid("the tap list is empty"));
+        }
+        let parsed: Vec<Target> = targets.iter().map(parse_target).collect::<Res<_>>()?;
+        let need_ids = parsed
+            .iter()
+            .any(|t| matches!(t, Target::Selector(s) if s.needs_identifier()));
+        let (_, screen) = self
+            .screen(Fresh::MaxAge(reuse()), need_ids, BuildOptions::default())
+            .await?;
+        if screen.width <= 0.0 || screen.height <= 0.0 {
+            return Err(Fail::not_sent("no_screen_size", "the reading has no application frame"));
+        }
+        self.check_front_allowed(&screen).await?;
+        let mut points: Vec<(f64, f64, Option<&Element>)> = Vec::new();
+        for target in &parsed {
+            let (x, y, el) = match target {
+                Target::Selector(sel) => {
+                    let el = resolve_one(sel, &screen)?;
+                    let (x, y) = tap_point(el, &screen)?;
+                    (x, y, Some(el))
+                }
+                Target::Point(x, y) => (*x, *y, screen.element_at(*x, *y)),
+            };
+            // A guarded target stops the whole sequence before it starts; a
+            // confirmed tap is always a step of its own.
+            self.guard_tap(el, None, "tap", false)?;
+            points.push((x, y, el));
+        }
+        let before = screen.signature();
+        let normalized: Vec<(u16, u16)> = points
+            .iter()
+            .map(|(x, y, _)| (normalize(*x, screen.width), normalize(*y, screen.height)))
+            .collect();
+        let tapped: Vec<Value> = points
+            .iter()
+            .map(|(_, _, el)| el.map(brief).unwrap_or(Value::Null))
+            .collect();
+        let input = self.ensure_input().await?;
+        for (i, (nx, ny)) in normalized.iter().enumerate() {
+            if let Err(e) = input.tap(*nx, *ny, Duration::from_millis(50)).await {
+                self.input = None;
+                return Err(Fail::unknown("input_failed", format!("{e:#}"))
+                    .hint(t(
+                        "입력이 일부 나갔을 수 있습니다. 다시 보내지 말고 `iph read`로 화면을 확인하세요.",
+                        "Part of the input may have gone out. Do not resend; check the screen with `iph read`.",
+                    ))
+                    .with("taps_sent", i));
+            }
+        }
+        let after = self.observe(AFTER_TAP).await;
+        let changed = after.as_ref().map(|(_, s)| s.signature() != before);
+        Ok(fields! {
+            "sent": true,
+            "verified": changed.is_some(),
+            "screen_changed": changed.unwrap_or(false),
+            "taps": tapped.len(),
+            "elements": tapped,
+        })
     }
 
     /// Drag between two points given in logical points and report whether the
@@ -474,7 +559,7 @@ impl Session {
         from: (f64, f64),
         to: (f64, f64),
         duration: Duration,
-        end_hold: Duration,
+        motion: Motion,
     ) -> Res<(bool, Option<Screen>)> {
         let (_, screen) = self
             .screen(Fresh::MaxAge(reuse()), false, BuildOptions::default())
@@ -490,18 +575,33 @@ impl Session {
                 )));
             }
         }
+        self.check_front_allowed(&screen).await?;
         let before = screen.signature();
         let a = (normalize(from.0, screen.width), normalize(from.1, screen.height));
         let b = (normalize(to.0, screen.width), normalize(to.1, screen.height));
         let input = self.ensure_input().await?;
-        if let Err(e) = input.drag(a, b, duration, end_hold).await {
+        if let Err(e) = input.drag(a, b, duration, motion).await {
             self.input = None;
             return Err(Fail::unknown("input_failed", format!("{e:#}")).hint(t(
                 "입력이 나갔을 수 있습니다. 다시 보내지 말고 `iph read`로 화면을 확인하세요.",
                 "The input may have gone out. Do not resend; check the screen with `iph read`.",
             )));
         }
-        let after = self.observe(AFTER_DRAG).await.map(|(_, s)| s);
+        let mut after = self.observe(AFTER_DRAG).await.map(|(_, s)| s);
+        if motion == Motion::Flick {
+            // The content coasts after a flick: read until two readings agree.
+            for _ in 0..3 {
+                let next = self.observe(Duration::from_millis(150)).await.map(|(_, s)| s);
+                let still = match (&after, &next) {
+                    (Some(a), Some(b)) => a.signature() == b.signature(),
+                    _ => true,
+                };
+                after = next.or(after);
+                if still {
+                    break;
+                }
+            }
+        }
         let changed = after.as_ref().is_some_and(|s| s.signature() != before);
         Ok((changed, after))
     }
@@ -535,7 +635,8 @@ impl Session {
             _ => return Err(Fail::invalid("give a direction, or both from and to")),
         };
         let duration = Duration::from_millis(args.duration_ms.unwrap_or(250).clamp(50, 10_000));
-        let (changed, _) = self.drag_points(from, to, duration, Duration::ZERO).await?;
+        let motion = if args.drag { Motion::Place } else { Motion::Flick };
+        let (changed, _) = self.drag_points(from, to, duration, motion).await?;
         Ok(fields! {
             "sent": true,
             "verified": true,
@@ -556,9 +657,9 @@ impl Session {
                 return Err(Fail::invalid(format!("unknown direction `{other}` (up, down)")));
             }
         };
-        // A slow drag with a short stop at the end moves the list by the
-        // finger's distance, without a fling that would overshoot.
-        self.drag_points(from, to, Duration::from_millis(450), Duration::from_millis(150))
+        // A drag that slows to a stop moves the list by the finger's distance,
+        // without a fling that would overshoot.
+        self.drag_points(from, to, Duration::from_millis(500), Motion::Place)
             .await
     }
 
@@ -609,8 +710,14 @@ impl Session {
                 .with("scrolls", scrolls)
                 .with("screen_summary", screen.summary(12)));
             }
-            let (changed, after) = self.scroll_step(&args.direction).await?;
+            let (mut changed, mut after) = self.scroll_step(&args.direction).await?;
             scrolls += 1;
+            if !changed {
+                // One still screen can be a dropped drag; two in a row is the
+                // end of the list.
+                (changed, after) = self.scroll_step(&args.direction).await?;
+                scrolls += 1;
+            }
             if !changed {
                 return Err(Fail::new(
                     crate::reply::Outcome::Done,
@@ -633,11 +740,11 @@ impl Session {
 
     pub async fn cmd_key(&mut self, args: KeyArgs) -> Res {
         let (usage, modifiers) = crate::keys::parse_combo(&args.key).map_err(Fail::invalid)?;
-        let before = self
+        let (_, screen) = self
             .screen(Fresh::MaxAge(reuse()), false, BuildOptions::default())
-            .await
-            .ok()
-            .map(|(_, screen)| screen.signature());
+            .await?;
+        self.check_front_allowed(&screen).await?;
+        let before = Some(screen.signature());
         let input = self.ensure_input().await?;
         if let Err(e) = input.key(usage, &modifiers).await {
             self.input = None;
@@ -657,11 +764,11 @@ impl Session {
 
     pub async fn cmd_button(&mut self, args: ButtonArgs) -> Res {
         let (page, usage, hold) = crate::keys::button(&args.button).map_err(Fail::invalid)?;
-        let before = self
+        let (_, screen) = self
             .screen(Fresh::MaxAge(reuse()), false, BuildOptions::default())
-            .await
-            .ok()
-            .map(|(_, screen)| screen.signature());
+            .await?;
+        self.check_front_allowed(&screen).await?;
+        let before = Some(screen.signature());
         let input = self.ensure_input().await?;
         if let Err(e) = input.button(page, usage, Duration::from_millis(hold)).await {
             self.input = None;
@@ -728,15 +835,19 @@ impl Session {
 
     pub async fn cmd_launch(&mut self, args: LaunchArgs) -> Res {
         let bundle = self.resolve_bundle(&args.app).await?;
+        self.check_launch_allowed(&bundle)?;
         let mut svc = self.app_service().await?;
         // From here the launch request may have reached the phone.
-        let launched = svc
-            .launch_application(bundle.as_str(), &[], false, false, None, None, None)
-            .await;
+        let launched = tokio::time::timeout(
+            Duration::from_secs(30),
+            svc.launch_application(bundle.as_str(), &[], args.restart, false, None, None, None),
+        )
+        .await
+        .map_err(|_| "no answer within 30 s".to_string())
+        .and_then(|r| r.map_err(|e| format!("{e:?}")));
         let resp = match launched {
             Ok(r) => r,
-            Err(e) => {
-                let msg = format!("{e:?}");
+            Err(msg) => {
                 let locked = msg.to_lowercase().contains("lock");
                 return Err(Fail::unknown("launch_failed", msg).hint(if locked {
                     t("폰 잠금을 풀어 주세요.", "Unlock the phone.")
@@ -809,8 +920,10 @@ impl Session {
             .with("screen_summary", screen.summary(12)));
         };
         let before_value = field.value.clone().unwrap_or_default();
+        self.check_front_allowed(&screen).await?;
 
         // Remember what the user had on the clipboard.
+        trace(|| "type: focused field found".into());
         let mut clip = self.pasteboard().await?;
         let general = idevice::core_device::GENERAL_PASTEBOARD;
         let saved = tokio::time::timeout(Duration::from_secs(8), clip.get(general)).await;
@@ -823,6 +936,7 @@ impl Session {
             }
             _ => (None, None, false),
         };
+        trace(|| "type: clipboard saved".into());
         // A fresh connection for writing, so a late answer to the read above
         // cannot be mistaken for the answer to the write.
         let mut clip = self.pasteboard().await?;
@@ -832,6 +946,7 @@ impl Session {
                 .map_err(|e| Fail::not_sent("clipboard_failed", format!("{e:?}")))?;
         }
 
+        trace(|| "type: clipboard set".into());
         let input = match self.ensure_input().await {
             Ok(i) => i,
             Err(e) => {
@@ -839,17 +954,18 @@ impl Session {
                 return Err(e);
             }
         };
-        let cmd = [crate::keys::MOD_COMMAND];
-        let mut step: anyhow::Result<()> = Ok(());
+        trace(|| "type: input ready".into());
+        let cmd = vec![crate::keys::MOD_COMMAND];
+        let mut combos: Vec<(u64, Vec<u64>)> = Vec::new();
         if args.clear {
-            step = input.key(crate::keys::usage('a').unwrap(), &cmd).await;
-            if step.is_ok() {
-                step = input.key(crate::keys::KEY_BACKSPACE, &[]).await;
-            }
+            combos.push((crate::keys::usage('a').unwrap(), cmd.clone()));
+            combos.push((crate::keys::KEY_BACKSPACE, vec![]));
         }
-        if step.is_ok() && !args.text.is_empty() {
-            step = input.key(crate::keys::usage('v').unwrap(), &cmd).await;
+        if !args.text.is_empty() {
+            combos.push((crate::keys::usage('v').unwrap(), cmd.clone()));
         }
+        let step = input.keys(&combos).await;
+        trace(|| "type: keys sent".into());
         if let Err(e) = step {
             self.input = None;
             let restored = self
@@ -891,9 +1007,11 @@ impl Session {
             }
         }
 
+        trace(|| format!("type: verified={verified}"));
         let restored = self
             .restore_clipboard(&saved_text, &saved_image, snapshot_ok, &args.text)
             .await;
+        trace(|| "type: clipboard restored".into());
 
         if !verified {
             return Err(Fail::unknown(

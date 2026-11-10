@@ -211,7 +211,7 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
     // 6. Unlocked: Settings can be brought to the front and read.
     let mut front_ok = false;
     if services_ok {
-        let launched = s.cmd_launch(LaunchArgs { app: SETTINGS.into() }).await;
+        let launched = s.cmd_launch(LaunchArgs { app: SETTINGS.into(), restart: false }).await;
         match launched {
             Ok(r) if r.get("foreground").and_then(|v| v.as_bool()) == Some(true) => {
                 front_ok = true;

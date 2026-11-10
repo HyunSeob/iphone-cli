@@ -146,8 +146,19 @@ impl Ka {
     }
 }
 
+/// Most object expansions one archive may take. A full screen needs a few
+/// thousand; the cap stops an archive whose objects point at each other in
+/// many ways from being unfolded forever.
+pub const DEFAULT_BUDGET: usize = 400_000;
+
 /// Decode a keyed archive and return its root object.
 pub fn decode(bytes: &[u8]) -> Result<Ka> {
+    decode_with_budget(bytes, DEFAULT_BUDGET).map(|(root, _)| root)
+}
+
+/// Like [`decode`], with an explicit cap. Also returns how many object
+/// expansions were used.
+pub fn decode_with_budget(bytes: &[u8], budget: usize) -> Result<(Ka, usize)> {
     let top = Value::from_reader(Cursor::new(bytes)).map_err(|e| anyhow!("not a plist: {e}"))?;
     let dict = top
         .as_dictionary()
@@ -165,8 +176,10 @@ pub fn decode(bytes: &[u8]) -> Result<Ka> {
         objects,
         active: vec![false; objects.len()],
         depth: 0,
+        left: budget,
     };
-    r.value(root)
+    let root = r.value(root)?;
+    Ok((root, budget - r.left))
 }
 
 /// True when `bytes` look like a keyed archive (a nested layer).
@@ -179,6 +192,8 @@ struct Resolver<'a> {
     /// Objects currently being expanded, to cut reference cycles.
     active: Vec<bool>,
     depth: usize,
+    /// Object expansions left before giving up.
+    left: usize,
 }
 
 const MAX_DEPTH: usize = 200;
@@ -219,6 +234,10 @@ impl Resolver<'_> {
         if self.active[index] || self.depth >= MAX_DEPTH {
             return Ok(Ka::Null);
         }
+        if self.left == 0 {
+            bail!("archive unfolds into too many objects");
+        }
+        self.left -= 1;
         self.active[index] = true;
         self.depth += 1;
         let out = self.instance(dict);
@@ -361,6 +380,29 @@ mod tests {
         assert_eq!(root.class(), Some("Thing"));
         assert_eq!(root.get("next"), Some(&Ka::Null));
         assert_eq!(root.get("nothing"), Some(&Ka::Null));
+    }
+
+    #[test]
+    fn densely_linked_objects_hit_the_budget_instead_of_running_forever() {
+        // 12 objects that each point at all the others: unfolding every path
+        // would take 12! steps.
+        let n = 12;
+        let mut objects: Vec<Value> = vec!["$null".into()];
+        for _ in 0..n {
+            let mut d = Dictionary::new();
+            d.insert("$class".into(), Value::Uid(Uid::new(n as u64 + 1)));
+            d.insert(
+                "others".into(),
+                Value::Array((1..=n as u64).map(|i| Value::Uid(Uid::new(i))).collect()),
+            );
+            objects.push(Value::Dictionary(d));
+        }
+        objects.push(class("Thing"));
+        let bytes = archive(objects);
+        let started = std::time::Instant::now();
+        let err = decode_with_budget(&bytes, 50_000).unwrap_err();
+        assert!(err.to_string().contains("too many objects"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

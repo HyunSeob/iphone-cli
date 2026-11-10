@@ -83,8 +83,12 @@ enum Cmd {
     /// Swipe: up, down, left, right, or x1,y1,x2,y2.
     Swipe {
         direction: String,
+        /// Milliseconds the movement takes.
         #[arg(long)]
         duration: Option<u64>,
+        /// Slow to a stop before lifting (a drag) instead of flicking.
+        #[arg(long)]
+        drag: bool,
     },
     /// Scroll the content up or down, optionally until an element shows.
     Scroll {
@@ -109,7 +113,12 @@ enum Cmd {
     /// Press a hardware button: home, lock, volume_up, volume_down.
     Button { button: String },
     /// Launch an app by bundle id or name.
-    Launch { app: String },
+    Launch {
+        app: String,
+        /// Quit it first so it starts from its first screen.
+        #[arg(long)]
+        restart: bool,
+    },
     /// List installed apps.
     Apps,
     /// Save a screenshot (PNG).
@@ -163,7 +172,7 @@ fn exit_code(value: &Value) -> i32 {
     }
 }
 
-fn swipe_args(direction: &str, duration: Option<u64>) -> Result<Value, Fail> {
+fn swipe_args(direction: &str, duration: Option<u64>, drag: bool) -> Result<Value, Fail> {
     let nums: Vec<f64> = direction
         .split(',')
         .filter_map(|p| p.trim().parse::<f64>().ok())
@@ -179,6 +188,7 @@ fn swipe_args(direction: &str, duration: Option<u64>) -> Result<Value, Fail> {
     if let Some(d) = duration {
         v["duration_ms"] = json!(d);
     }
+    v["drag"] = json!(drag);
     Ok(v)
 }
 
@@ -274,7 +284,7 @@ async fn run(cli: Cli) -> i32 {
             "tap",
             json!({ "target": target, "long_ms": long, "double": double, "confirm": confirm }),
         ),
-        Cmd::Swipe { direction, duration } => match swipe_args(&direction, duration) {
+        Cmd::Swipe { direction, duration, drag } => match swipe_args(&direction, duration, drag) {
             Ok(v) => ("swipe", v),
             Err(f) => {
                 let v = envelope(Err(f), started);
@@ -291,7 +301,7 @@ async fn run(cli: Cli) -> i32 {
         }
         Cmd::Key { key } => ("key", json!({ "key": key })),
         Cmd::Button { button } => ("button", json!({ "button": button })),
-        Cmd::Launch { app } => ("launch", json!({ "app": app })),
+        Cmd::Launch { app, restart } => ("launch", json!({ "app": app, "restart": restart })),
         Cmd::Apps => ("apps", Value::Null),
         Cmd::Screenshot { output } => {
             let name = output.unwrap_or_else(|| {

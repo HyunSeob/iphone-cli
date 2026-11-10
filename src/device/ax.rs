@@ -1,11 +1,16 @@
 //! Subscription to the phone's accessibility tree.
 //!
-//! One DTX connection to `…axAuditDaemon.remoteAXService`. Each
-//! `clientNeedsAccessibility:` (true) makes the phone send one dump of the
-//! whole screen, in two passes: the first about 1.1 s after the request on a
-//! still screen (later while something animates), the second about 0.5 s
-//! after that. The phone does not send dumps on its own when the screen
-//! changes, so every fresh reading is a new request on the same connection.
+//! One DTX connection to `…axAuditDaemon.remoteAXService`.
+//!
+//! What the phone does (iOS 27.0.1, measured 2026-11-10):
+//! - `clientNeedsAccessibility:` (true) asks for a dump of the whole screen.
+//!   The answer comes in two passes: the first about 1.1 s after the request
+//!   on a still screen (up to several seconds while something animates), the
+//!   second about 0.5 s later.
+//! - The 1.1 s is a quiet period that every new request restarts. Requests
+//!   sent every second never get an answer. So: one request, then wait.
+//! - The phone does not send dumps on its own when the screen changes. Every
+//!   fresh reading is a new request on the same connection.
 
 use std::{
     sync::{Arc, Mutex},
@@ -20,7 +25,7 @@ use idevice::{
 };
 use tokio::sync::{mpsc, watch};
 
-use crate::ax::dump::{Dump, DumpKind};
+use crate::ax::dump::{Dump, DumpKind, Payload};
 
 pub const SERVICE: &str = "com.apple.accessibility.axAuditDaemon.remoteAXService";
 const SUBSCRIBE: &str = "clientNeedsAccessibility:";
@@ -31,7 +36,10 @@ pub struct AxState {
     /// Number of first-pass dumps received so far.
     pub seq: u64,
     pub initial: Option<Arc<Dump>>,
+    /// When the latest first-pass dump arrived.
     pub initial_at: Option<Instant>,
+    /// Payloads the parser gave up on.
+    pub unparsed: u64,
     /// `seq` of the reading that `full` belongs to.
     pub full_seq: u64,
     /// First pass merged with the second pass (identifiers, hints).
@@ -62,6 +70,8 @@ pub struct AxSub {
     state: Arc<Mutex<AxState>>,
     changed: watch::Receiver<u64>,
     task: tokio::task::JoinHandle<()>,
+    /// When the connection's first request went out.
+    pub opened: Instant,
 }
 
 impl Drop for AxSub {
@@ -80,6 +90,7 @@ impl AxSub {
         let stream = adapter.connect(port).await?;
         let mut dtx = RemoteServerClient::new(stream);
         subscribe(&mut dtx).await?;
+        let opened = Instant::now();
 
         let state = Arc::new(Mutex::new(AxState::default()));
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Cmd>();
@@ -105,13 +116,38 @@ impl AxSub {
                             continue;
                         }
                         let Some(AuxValue::Array(bytes)) =
-                            msg.aux.as_ref().and_then(|a| a.values.first())
+                            msg.aux.and_then(|a| a.values.into_iter().next())
                         else {
                             continue;
                         };
-                        let Ok(dump) = Dump::parse(bytes) else { continue };
-                        trace(|| format!("ax dump {:?} elements={} bytes={}", dump.kind, dump.elements.len(), bytes.len()));
-                        if accept(&task_state, dump) {
+                        let arrived = Instant::now();
+                        debug_keep(&bytes, false);
+                        let size = bytes.len();
+                        // Off the async threads: a payload that takes long to
+                        // unfold must not stall the tunnel and the timers.
+                        let parsed = tokio::task::spawn_blocking(move || {
+                            let r = Payload::parse(&bytes);
+                            (r, bytes)
+                        })
+                        .await;
+                        let dump = match parsed {
+                            Ok((Ok(Payload::Dump(dump)), _)) => dump,
+                            Ok((Ok(Payload::Notification(n)), _)) => {
+                                trace(|| format!("ax notification {n} bytes={size}"));
+                                continue;
+                            }
+                            Ok((Err(e), bytes)) => {
+                                debug_keep(&bytes, true);
+                                eprintln!("[{}] accessibility payload of {size} bytes not understood: {e:#}", crate::safety::now_utc());
+                                task_state.lock().unwrap().unparsed += 1;
+                                ticks += 1;
+                                let _ = changed_tx.send(ticks);
+                                continue;
+                            }
+                            Err(_) => continue,
+                        };
+                        trace(|| format!("ax dump {:?} elements={} bytes={size}", dump.kind, dump.elements.len()));
+                        if accept(&task_state, dump, arrived) {
                             ticks += 1;
                             let _ = changed_tx.send(ticks);
                         }
@@ -128,6 +164,7 @@ impl AxSub {
             state,
             changed: changed_rx,
             task,
+            opened,
         })
     }
 
@@ -135,11 +172,43 @@ impl AxSub {
         self.state.lock().unwrap().closed
     }
 
-    /// Ask the phone for a new dump.
-    pub fn request(&self) -> Result<()> {
+    /// Ask the phone for a new dump. Returns when the request was made.
+    ///
+    /// The phone answers a request about 1.1 s after the *last* one it got:
+    /// every new request restarts that wait, so asking again while an answer
+    /// is on its way only delays it.
+    pub fn request(&self) -> Result<Instant> {
         self.cmd
             .send(Cmd::Subscribe)
-            .map_err(|_| anyhow!("accessibility connection closed"))
+            .map_err(|_| anyhow!("accessibility connection closed"))?;
+        Ok(Instant::now())
+    }
+
+    pub fn unparsed_count(&self) -> u64 {
+        self.state.lock().unwrap().unparsed
+    }
+
+    /// Wait for a first-pass dump that arrived at or after `earliest`.
+    pub async fn wait_arrived(&mut self, earliest: Instant, timeout: Duration) -> Option<(u64, Arc<Dump>)> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            {
+                let s = self.state.lock().unwrap();
+                if s.initial_at.is_some_and(|at| at >= earliest) {
+                    if let Some(d) = s.initial.clone() {
+                        return Some((s.seq, d));
+                    }
+                }
+                if s.closed {
+                    return None;
+                }
+            }
+            let left = deadline.checked_duration_since(Instant::now())?;
+            match tokio::time::timeout(left, self.changed.changed()).await {
+                Ok(Ok(())) => {}
+                _ => return None,
+            }
+        }
     }
 
     pub fn seq(&self) -> u64 {
@@ -210,6 +279,26 @@ impl AxSub {
     }
 }
 
+/// `IPH_DUMP_DIR=<dir>` keeps the last few raw payloads on disk before they
+/// are parsed, to study a payload that the parser chokes on. The payloads
+/// hold whatever is on the phone's screen: use it on test screens only and
+/// delete the files afterwards.
+fn debug_keep(bytes: &[u8], failed: bool) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let Ok(dir) = std::env::var("IPH_DUMP_DIR") else {
+        return;
+    };
+    if failed {
+        let n = N.load(Ordering::Relaxed);
+        let _ = std::fs::write(format!("{dir}/failed-{n}.raw.bin"), bytes);
+        return;
+    }
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let _ = std::fs::write(format!("{dir}/payload-{}.raw.bin", n % 8), bytes);
+    trace(|| format!("ax payload #{n} bytes={} kept as payload-{}", bytes.len(), n % 8));
+}
+
 async fn subscribe(dtx: &mut RemoteServerClient<Box<dyn idevice::ReadWrite>>) -> Result<()> {
     dtx.call_method(
         0,
@@ -222,32 +311,41 @@ async fn subscribe(dtx: &mut RemoteServerClient<Box<dyn idevice::ReadWrite>>) ->
 }
 
 /// Store a dump. Returns false for dumps that carry nothing.
-fn accept(state: &Arc<Mutex<AxState>>, dump: Dump) -> bool {
-    let mut s = state.lock().unwrap();
+fn accept(state: &Arc<Mutex<AxState>>, dump: Dump, arrived: Instant) -> bool {
     if dump.elements.is_empty() || dump.applications.is_empty() {
-        s.empty += 1;
+        state.lock().unwrap().empty += 1;
         return false;
     }
     match dump.kind {
         DumpKind::Initial => {
+            let mut s = state.lock().unwrap();
             s.seq += 1;
             s.initial = Some(Arc::new(dump));
-            s.initial_at = Some(Instant::now());
+            s.initial_at = Some(arrived);
             true
         }
         DumpKind::Additional => {
-            let Some(initial) = s.initial.clone() else {
-                return false;
+            let (seq, initial) = {
+                let s = state.lock().unwrap();
+                match s.initial.clone() {
+                    Some(i) => (s.seq, i),
+                    None => return false,
+                }
             };
             // The second pass belongs to the newest first pass only if it
             // describes the same elements.
             if !initial.same_elements(&dump) {
                 return false;
             }
+            // Merge without holding the lock; readers must never wait on it.
             let mut merged = (*initial).clone();
             merged.absorb(&dump);
+            let mut s = state.lock().unwrap();
+            if s.seq != seq {
+                return false;
+            }
             s.full = Some(Arc::new(merged));
-            s.full_seq = s.seq;
+            s.full_seq = seq;
             true
         }
         DumpKind::Other(_) => false,

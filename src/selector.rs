@@ -2,10 +2,12 @@
 //!
 //! Text form (CLI): `label="정확히"`, `label~="포함"`, `label/정규식/`,
 //! `role=button`, `id=…`, `value~=…`, `within=…`, `index=N`, combined with
-//! spaces. A string with none of these is an exact label.
+//! spaces. `label`, `value` and `id` all take `=`, `~=` and `/regex/`. A
+//! string with none of these is an exact label.
 //!
 //! Structured form (recipes, MCP, batch): `{label, label_contains,
-//! label_regex, value, value_contains, value_regex, role, id, within, index}`.
+//! label_regex, value, value_contains, value_regex, role, id, id_contains,
+//! id_regex, within, index}`.
 
 use anyhow::{Result, anyhow, bail};
 use regex::Regex;
@@ -56,8 +58,9 @@ pub struct Selector {
     pub label: Option<TextMatch>,
     pub value: Option<TextMatch>,
     pub role: Option<String>,
-    /// accessibilityIdentifier, or the `id` handle from `iph read`.
-    pub id: Option<String>,
+    /// accessibilityIdentifier, or (exact form only) the `id` handle from
+    /// `iph read`.
+    pub id: Option<TextMatch>,
     pub within: Option<Box<Selector>>,
     pub index: Option<usize>,
 }
@@ -177,7 +180,7 @@ impl Selector {
                 "label" => sel.label = Some(text_match(op, &val)?),
                 "value" => sel.value = Some(text_match(op, &val)?),
                 "role" if op == '=' => sel.role = Some(val.to_lowercase()),
-                "id" if op == '=' => sel.id = Some(val),
+                "id" => sel.id = Some(text_match(op, &val)?),
                 "within" if op == '=' => sel.within = Some(Box::new(Selector::parse(&val)?)),
                 "index" if op == '=' => {
                     sel.index = Some(val.parse().map_err(|_| anyhow!("index must be a number"))?)
@@ -211,7 +214,9 @@ impl Selector {
                         "value_contains" => sel.value = Some(TextMatch::Contains(nfc(&s()?))),
                         "value_regex" => sel.value = Some(text_match('/', &s()?)?),
                         "role" => sel.role = Some(s()?.to_lowercase()),
-                        "id" | "identifier" => sel.id = Some(s()?),
+                        "id" | "identifier" => sel.id = Some(TextMatch::Exact(nfc(&s()?))),
+                        "id_contains" => sel.id = Some(TextMatch::Contains(nfc(&s()?))),
+                        "id_regex" => sel.id = Some(text_match('/', &s()?)?),
                         "within" => sel.within = Some(Box::new(Selector::from_value(val)?)),
                         "index" => {
                             sel.index = Some(
@@ -253,7 +258,7 @@ impl Selector {
             parts.push(format!("role={r}"));
         }
         if let Some(i) = &self.id {
-            parts.push(format!("id={i}"));
+            parts.push(i.describe("id"));
         }
         if let Some(w) = &self.within {
             parts.push(format!("within=\"{}\"", w.describe().replace('"', "\\\"")));
@@ -290,7 +295,8 @@ impl Selector {
             }
         }
         if let Some(id) = &self.id {
-            if el.identifier.as_deref() != Some(id.as_str()) && el.id != *id {
+            let by_handle = matches!(id, TextMatch::Exact(want) if el.id == *want);
+            if !by_handle && !id.matches(el.identifier.as_deref(), false) {
                 return false;
             }
         }
@@ -451,6 +457,8 @@ mod tests {
         assert_eq!(ids("role=switch"), vec!["c"]);
         assert_eq!(ids("id=com.apple.settings.wifi"), vec!["b"]);
         assert_eq!(ids("id=e"), vec!["e"]);
+        assert_eq!(ids("id~=settings.wi"), vec!["b"]);
+        assert_eq!(ids("id/^com\\.apple\\.settings\\./"), vec!["b"]);
         assert_eq!(ids("role=switch value=0"), vec!["c"]);
         assert_eq!(ids("label~=일반 index=1"), vec!["e"]);
         assert!(ids("label~=일반 index=5").is_empty());

@@ -270,6 +270,7 @@ mod tests {
         let g = Guard::new(&SafetyConfig {
             add: vec!["기부".into(), "Donate".into()],
             remove: vec!["보내기".into()],
+            only_apps: vec![],
         });
         assert_eq!(g.check("기부하기"), Some("기부"));
         assert_eq!(g.check("donate"), Some("donate"));

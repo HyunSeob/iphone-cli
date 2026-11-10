@@ -20,6 +20,9 @@ pub struct SafetyConfig {
     pub add: Vec<String>,
     /// Built-in words to stop guarding.
     pub remove: Vec<String>,
+    /// When not empty: bundle ids of the only apps iph may launch or send
+    /// input to. Anything else in front blocks the input.
+    pub only_apps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,11 +62,12 @@ mod tests {
     #[test]
     fn parses_partial_config() {
         let c: Config = toml::from_str(
-            "udid = \"X\"\n[safety]\nadd = [\"기부\"]\nremove = [\"보내기\"]\n",
+            "udid = \"X\"\n[safety]\nadd = [\"기부\"]\nremove = [\"보내기\"]\nonly_apps = [\"com.apple.Preferences\"]\n",
         )
         .unwrap();
         assert_eq!(c.udid.as_deref(), Some("X"));
         assert_eq!(c.safety.add, vec!["기부"]);
+        assert_eq!(c.safety.only_apps, vec!["com.apple.Preferences"]);
         assert_eq!(c.daemon.input_idle_secs, 120);
     }
 }

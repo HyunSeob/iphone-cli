@@ -379,7 +379,10 @@ impl Session {
                     Some(inner) => {
                         let inner = Selector::from_value(inner).map_err(|e| Fail::invalid(e.to_string()))?;
                         let scoped = Selector {
-                            within: Some(Box::new(Selector { id: Some(el.id.clone()), ..Default::default() })),
+                            within: Some(Box::new(Selector {
+                                id: Some(crate::selector::TextMatch::Exact(el.id.clone())),
+                                ..Default::default()
+                            })),
                             ..inner
                         };
                         scoped.find(screen).first().copied()
@@ -446,6 +449,36 @@ impl Session {
         ))
     }
 
+    /// A failure when the latest reading shows another app in front than the
+    /// one this run launched (a notification was tapped, a link opened …).
+    fn unexpected_app(&self, expected_pid: Option<i64>) -> Option<Fail> {
+        let expected = expected_pid?;
+        let (_, dump, _) = self.ax.as_ref()?.latest()?;
+        if dump.applications.iter().any(|a| a.pid == expected) {
+            return None;
+        }
+        let screen = Screen::build(&dump, BuildOptions::default());
+        Some(
+            Fail::not_sent(
+                "unexpected_app",
+                format!(
+                    "another app came to the front: {}",
+                    screen
+                        .apps
+                        .iter()
+                        .filter_map(|a| a.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+            .hint(t(
+                "알림 배너를 눌렀거나 다른 앱이 열렸을 수 있습니다. 화면을 확인하세요. 집중 모드(방해금지)를 켜 두면 배너가 뜨지 않습니다.",
+                "A notification banner may have been tapped or another app opened. Check the screen. A Focus (Do Not Disturb) keeps banners away.",
+            ))
+            .with("screen_summary", screen.summary(6)),
+        )
+    }
+
     /// Run one step. Returns extra fields for the step's record and, for read
     /// steps, the value read.
     async fn run_step(
@@ -460,15 +493,22 @@ impl Session {
         }
         match kind {
             "launch" => {
-                let app = body.as_str().ok_or_else(|| Fail::invalid("launch needs an app name or bundle id"))?;
-                let r = self.cmd_launch(LaunchArgs { app: app.to_string() }).await?;
+                let args: LaunchArgs = match body {
+                    Value::String(s) => LaunchArgs { app: s.clone(), restart: false },
+                    other => actions::parse_args(other)?,
+                };
+                let app = args.app.clone();
+                let r = self.cmd_launch(args).await?;
                 if r.get("foreground").and_then(|v| v.as_bool()) != Some(true) {
                     return Err(Fail::unknown(
                         "launch_not_verified",
                         format!("{app} was launched but is not in front"),
                     ));
                 }
-                no_value(fields! { "bundle_id": r.get("bundle_id").cloned().unwrap_or(Value::Null) })
+                no_value(fields! {
+                    "bundle_id": r.get("bundle_id").cloned().unwrap_or(Value::Null),
+                    "pid": r.get("pid").cloned().unwrap_or(Value::Null),
+                })
             }
             "wait_for" => {
                 let (sel, options) = selector_and_options(body)?;
@@ -485,6 +525,18 @@ impl Session {
                     f
                 })?;
                 no_value(fields! { "element": brief(&el) })
+            }
+            "tap" if body.is_array() => {
+                if needs_confirm {
+                    return Err(Fail::invalid(
+                        "a tap list cannot be confirmed; make the guarded tap a step of its own",
+                    ));
+                }
+                let r = self.tap_sequence(body.as_array().unwrap()).await?;
+                no_value(fields! {
+                    "screen_changed": r.get("screen_changed").cloned().unwrap_or(Value::Null),
+                    "taps": r.get("taps").cloned().unwrap_or(Value::Null),
+                })
             }
             "tap" => {
                 let (sel, options) = selector_and_options(body)?;
@@ -599,10 +651,17 @@ impl Session {
     ) -> Res {
         let mut records: Vec<Value> = Vec::new();
         let mut outputs = Map::new();
+        // The app the last `launch` step brought to the front. Every later
+        // step must still find it there.
+        let mut expected_pid: Option<i64> = None;
         for (i, raw) in steps.iter().enumerate() {
             let index = i + 1;
             let started = Instant::now();
             let step = substitute(raw, args);
+            if let Some(f) = self.unexpected_app(expected_pid) {
+                let kind = split_step(&step).map(|(k, _, _)| k).unwrap_or("?");
+                return Err(step_failure(index, raw, f, kind, &records, &outputs, 0));
+            }
             let (kind, body, confirm) = match split_step(&step) {
                 Ok(x) => x,
                 Err(e) => return Err(step_failure(index, raw, Fail::invalid(e), "?", &records, &outputs, 0)),
@@ -668,6 +727,9 @@ impl Session {
             match result {
                 Ok((extra, value)) => {
                     Session::finish_op(claimed, "done");
+                    if kind == "launch" {
+                        expected_pid = extra.get("pid").and_then(|v| v.as_i64());
+                    }
                     let mut rec = fields! { "index": index, "kind": kind, "ok": true, "elapsed_ms": ms };
                     for (k, v) in extra {
                         if !v.is_null() {
@@ -690,6 +752,9 @@ impl Session {
                     return Err(step_failure(index, raw, f, kind, &records, &outputs, ms));
                 }
             }
+        }
+        if let Some(f) = self.unexpected_app(expected_pid) {
+            return Err(step_failure(steps.len(), &Value::Null, f, "end", &records, &outputs, 0));
         }
         Ok(fields! { "steps": records, "outputs": outputs })
     }

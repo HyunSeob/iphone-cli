@@ -105,7 +105,7 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
 }
 
 /// How long one request may run before the daemon gives up on it.
-fn budget(cmd: &str) -> Duration {
+pub fn budget(cmd: &str) -> Duration {
     match cmd {
         "run" | "batch" => Duration::from_secs(600),
         "doctor" => Duration::from_secs(120),
@@ -146,6 +146,7 @@ async fn handle(stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
             log("shutdown requested");
             shared.session.lock().await.shutdown().await;
             let _ = std::fs::remove_file(paths::socket(&shared.udid));
+            let _ = std::fs::remove_file(paths::daemon_pid(&shared.udid));
             std::process::exit(0);
         }
         _ if req.build != shared.build => envelope(
@@ -190,6 +191,8 @@ pub async fn run(udid: String) -> Result<()> {
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+    // So a client can put down a daemon that stopped answering.
+    std::fs::write(paths::daemon_pid(&udid), std::process::id().to_string())?;
 
     let config = Config::load()?;
     let idle_exit = Duration::from_secs(config.daemon.idle_exit_secs.max(30));
@@ -219,6 +222,7 @@ pub async fn run(udid: String) -> Result<()> {
                             log("idle, exiting");
                             session.shutdown().await;
                             let _ = std::fs::remove_file(&keeper_sock);
+                            let _ = std::fs::remove_file(paths::daemon_pid(&keeper.udid));
                             std::process::exit(0);
                         }
                     }

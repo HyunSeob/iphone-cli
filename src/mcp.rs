@@ -13,7 +13,7 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const SELECTOR_DOC: &str = "Selector: a plain string is an exact label (the name part of a \"name, value\" row also counts). \
 Or combine terms: label=\"exact\", label~=\"contains\", label/regex/, role=button, id=<identifier or element id>, \
 value~=…, within=\"<selector>\", index=N. An object works too: {label, label_contains, label_regex, value, \
-value_contains, role, id, within, index}. More than one match is an error that lists the candidates.";
+value_contains, role, id, id_contains, id_regex, within, index}. More than one match is an error that lists the candidates.";
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
@@ -70,6 +70,7 @@ fn tools() -> Vec<Value> {
                 "from": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
                 "to": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
                 "duration_ms": { "type": "integer" },
+                "drag": { "type": "boolean", "description": "Slow to a stop before lifting (a drag) instead of flicking." },
             }),
             &[],
         ),
@@ -109,7 +110,10 @@ fn tools() -> Vec<Value> {
         tool(
             "iph_launch",
             "Bring an app to the front by bundle id (com.apple.Preferences) or by its name.",
-            json!({ "app": { "type": "string" } }),
+            json!({
+                "app": { "type": "string" },
+                "restart": { "type": "boolean", "description": "Quit the app first so it starts from its first screen." },
+            }),
             &["app"],
         ),
         tool("iph_apps", "List installed apps with their bundle ids.", json!({}), &[]),

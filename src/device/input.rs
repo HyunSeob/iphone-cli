@@ -23,8 +23,8 @@ use idevice::{
         CallInfoBlob, DisplayServiceClient, build_screen_audio_offer, build_screen_video_offer,
         build_start_audio_parameters, build_start_video_parameters,
         hid::{
-            ButtonState, IndigoHidClient, TOUCHSCREEN_STATE_CONTACT, TOUCHSCREEN_STATE_RELEASE,
-            UniversalHidServiceClient,
+            ButtonState, IndigoHidClient, KeyboardUsage, TOUCHSCREEN_STATE_CONTACT,
+            TOUCHSCREEN_STATE_RELEASE, UniversalHidServiceClient,
         },
     },
     rsd::RsdHandshake,
@@ -41,6 +41,12 @@ const WARMUP: Duration = Duration::from_millis(1000);
 /// the next input (and before closing), not after each one, so the caller can
 /// already ask for the new screen meanwhile.
 const SETTLE: Duration = Duration::from_millis(300);
+/// Shortest pause between one release and the next touch on the open
+/// connection, so two taps are not read as a double tap or a drag.
+const TOUCH_GAP: Duration = Duration::from_millis(150);
+
+/// Time between registering the temporary keyboard and its first key.
+const KEYBOARD_ATTACH: Duration = Duration::from_millis(700);
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -88,9 +94,18 @@ impl Drop for Drain {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    Flick,
+    Place,
+}
+
 pub struct InputSession {
     display: DisplayServiceClient<Box<dyn ReadWrite>>,
     hid: UniversalHidServiceClient<Box<dyn ReadWrite>>,
+    /// A second connection for the keyboard, so its request/response traffic
+    /// stays off the touch connection.
+    keyboard: UniversalHidServiceClient<Box<dyn ReadWrite>>,
     indigo: Option<IndigoHidClient<Box<dyn ReadWrite>>>,
     drain: Drain,
     pub started: Instant,
@@ -167,11 +182,15 @@ impl InputSession {
         let hid = UniversalHidServiceClient::connect_rsd(adapter, rsd)
             .await
             .map_err(|e| anyhow!("hid service: {e:?}"))?;
+        let keyboard = UniversalHidServiceClient::connect_rsd(adapter, rsd)
+            .await
+            .map_err(|e| anyhow!("hid service (keyboard): {e:?}"))?;
         let indigo = IndigoHidClient::connect_rsd(adapter, rsd).await.ok();
 
         Ok(Self {
             display,
             hid,
+            keyboard,
             indigo,
             drain,
             started: Instant::now(),
@@ -189,16 +208,27 @@ impl InputSession {
         self.drain.packets.load(Ordering::Relaxed)
     }
 
-    async fn settle_previous(&mut self) {
+    async fn wait_since_release(&mut self, gap: Duration) {
         if let Some(t) = self.last_release {
             let since = t.elapsed();
-            if since < SETTLE {
-                tokio::time::sleep(SETTLE - since).await;
+            if since < gap {
+                tokio::time::sleep(gap - since).await;
             }
         }
     }
 
+    /// Before closing: let the last release sink in.
+    async fn settle_previous(&mut self) {
+        self.wait_since_release(SETTLE).await;
+    }
+
+    /// Before a new touch: keep it apart from the previous one.
+    async fn gap(&mut self) {
+        self.wait_since_release(TOUCH_GAP).await;
+    }
+
     async fn contact(&mut self, x: u16, y: u16) -> Result<()> {
+        crate::device::ax::trace(|| format!("contact {x},{y}"));
         self.hid
             .send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x, y, None)
             .await
@@ -219,7 +249,7 @@ impl InputSession {
     /// One finger down at (x, y), held for `hold`, then lifted. Coordinates are
     /// normalized 0..=65535.
     pub async fn tap(&mut self, x: u16, y: u16, hold: Duration) -> Result<()> {
-        self.settle_previous().await;
+        self.gap().await;
         crate::device::ax::trace(|| format!("tap down {x},{y}"));
         self.contact(x, y).await?;
         tokio::time::sleep(hold).await;
@@ -227,7 +257,7 @@ impl InputSession {
     }
 
     pub async fn double_tap(&mut self, x: u16, y: u16) -> Result<()> {
-        self.settle_previous().await;
+        self.gap().await;
         for i in 0..2 {
             self.contact(x, y).await?;
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -239,43 +269,58 @@ impl InputSession {
         Ok(())
     }
 
-    /// Drag from (x1, y1) to (x2, y2) over `duration`, then lift. `end_hold`
-    /// keeps the finger still before lifting so a list stops without a fling.
+    /// Move one finger from `from` to `to` over `duration`, then lift.
+    ///
+    /// [`Motion::Flick`] moves at constant speed and lifts while moving, so a
+    /// list keeps coasting (a swipe). [`Motion::Place`] slows to a stop before
+    /// lifting, so the content ends up moved by the finger's distance and
+    /// stays there (a scroll step, a drag-and-drop).
     pub async fn drag(
         &mut self,
         from: (u16, u16),
         to: (u16, u16),
         duration: Duration,
-        end_hold: Duration,
+        motion: Motion,
     ) -> Result<()> {
-        self.settle_previous().await;
+        self.gap().await;
         let steps = (duration.as_millis() / 16).clamp(4, 240) as u32;
         let start = Instant::now();
         crate::device::ax::trace(|| format!("drag start {from:?} -> {to:?}"));
         let mut sent_any = false;
+        let mut last = from;
         let res: Result<()> = async {
             for i in 0..=steps {
                 let t = i as f64 / steps as f64;
-                let x = (from.0 as f64 + (to.0 as f64 - from.0 as f64) * t).round() as u16;
-                let y = (from.1 as f64 + (to.1 as f64 - from.1 as f64) * t).round() as u16;
+                let eased = match motion {
+                    Motion::Flick => t,
+                    // Cubic ease-out: fast at first, almost still at the end.
+                    Motion::Place => 1.0 - (1.0 - t).powi(3),
+                };
+                let x = (from.0 as f64 + (to.0 as f64 - from.0 as f64) * eased).round() as u16;
+                let y = (from.1 as f64 + (to.1 as f64 - from.1 as f64) * eased).round() as u16;
                 self.contact(x, y).await?;
                 sent_any = true;
+                last = (x, y);
                 let due = duration.mul_f64(t);
                 let elapsed = start.elapsed();
                 if due > elapsed {
                     tokio::time::sleep(due - elapsed).await;
                 }
             }
-            if !end_hold.is_zero() {
-                tokio::time::sleep(end_hold).await;
-                self.contact(to.0, to.1).await?;
+            if motion == Motion::Place {
+                // Rest on the end point; the last samples must say "not
+                // moving" or the list flings on release.
+                for _ in 0..4 {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    self.contact(to.0, to.1).await?;
+                }
             }
             Ok(())
         }
         .await;
         if sent_any {
             // Always lift, also after a failed sample.
-            let lifted = self.release(to.0, to.1).await;
+            let lifted = self.release(last.0, last.1).await;
             res?;
             lifted?;
         } else {
@@ -303,45 +348,70 @@ impl InputSession {
         Ok(())
     }
 
-    /// Press a key (HID keyboard usage) with optional modifier usages held
-    /// around it, e.g. `[0xE3]` for Command.
-    pub async fn key(&mut self, usage: u64, modifiers: &[u64]) -> Result<()> {
-        let indigo = self
-            .indigo
-            .as_mut()
-            .ok_or_else(|| anyhow!("indigo HID service unavailable"))?;
-        let mut down: Vec<u64> = Vec::new();
-        let res: Result<()> = async {
+    /// Press key combinations one after another on a temporary hardware
+    /// keyboard. Each combination is a HID keyboard usage with the modifier
+    /// usages held around it, e.g. `(0x19, [0xE3])` for Command-V.
+    ///
+    /// The keyboard is registered with the phone, used and removed again:
+    /// while it is registered iOS hides the on-screen keyboard.
+    pub async fn keys(&mut self, combos: &[(u64, Vec<u64>)]) -> Result<()> {
+        let usage = |raw: u64| {
+            KeyboardUsage::new(raw as u16).map_err(|e| anyhow!("key usage {raw:#x}: {e}"))
+        };
+        // Validate everything before the keyboard exists.
+        for (key, modifiers) in combos {
+            usage(*key)?;
             for m in modifiers {
-                indigo
-                    .send_keyboard(*m, ButtonState::Down)
-                    .await
-                    .map_err(|e| anyhow!("modifier down: {e:?}"))?;
-                down.push(*m);
+                usage(*m)?;
             }
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            indigo
-                .send_keyboard(usage, ButtonState::Down)
-                .await
-                .map_err(|e| anyhow!("key down: {e:?}"))?;
-            down.push(usage);
-            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        crate::device::ax::trace(|| "keyboard: registering".into());
+        let mut board = self
+            .keyboard
+            .create_main_keyboard()
+            .await
+            .map_err(|e| anyhow!("register keyboard: {e}"))?;
+        crate::device::ax::trace(|| "keyboard: registered".into());
+        // The phone needs a moment to attach the new keyboard; keys sent
+        // 250 ms after registering were lost, 800 ms worked (iOS 27.0.1).
+        tokio::time::sleep(KEYBOARD_ATTACH).await;
+        let result: Result<()> = async {
+            for (key, modifiers) in combos {
+                crate::device::ax::trace(|| format!("keyboard: combo {key:#x}"));
+                for m in modifiers {
+                    self.keyboard
+                        .main_keyboard_key_down(&mut board, usage(*m)?)
+                        .await
+                        .map_err(|e| anyhow!("modifier down: {e}"))?;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                self.keyboard
+                    .main_keyboard_key_down(&mut board, usage(*key)?)
+                    .await
+                    .map_err(|e| anyhow!("key down: {e}"))?;
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                // Everything up at once.
+                self.keyboard
+                    .set_main_keyboard_usages(&mut board, std::iter::empty())
+                    .await
+                    .map_err(|e| anyhow!("key up: {e}"))?;
+                tokio::time::sleep(Duration::from_millis(80)).await;
+            }
             Ok(())
         }
         .await;
-        // Release in reverse order whatever happened above.
-        let mut release_err = None;
-        for k in down.iter().rev() {
-            if let Err(e) = indigo.send_keyboard(*k, ButtonState::Up).await {
-                release_err = Some(anyhow!("key up: {e:?}"));
-            }
-        }
-        res?;
-        if let Some(e) = release_err {
-            return Err(e);
-        }
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Remove the keyboard whatever happened; removal also releases keys.
+        crate::device::ax::trace(|| "keyboard: removing".into());
+        let removed = self.keyboard.remove_main_keyboard(&mut board).await;
+        crate::device::ax::trace(|| "keyboard: removed".into());
+        result?;
+        removed.map_err(|e| anyhow!("remove keyboard: {e}"))?;
         Ok(())
+    }
+
+    /// One key with optional modifiers.
+    pub async fn key(&mut self, usage: u64, modifiers: &[u64]) -> Result<()> {
+        self.keys(&[(usage, modifiers.to_vec())]).await
     }
 
     pub async fn close(mut self) {

@@ -120,6 +120,22 @@ async fn stop(udid: &str) -> bool {
     true
 }
 
+/// Kill a daemon that no longer answers, by the pid it wrote at startup.
+fn kill_daemon(udid: &str) {
+    if let Some(pid) = std::fs::read_to_string(paths::daemon_pid(udid))
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .filter(|pid| *pid > 1)
+    {
+        // SAFETY: plain kill(2) on a pid this tool's own daemon recorded.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    let _ = std::fs::remove_file(paths::socket(udid));
+    let _ = std::fs::remove_file(paths::daemon_pid(udid));
+}
+
 /// Stop the daemon for `udid`. Returns false when none was running.
 pub async fn stop_daemon(udid: &str) -> bool {
     stop(udid).await
@@ -142,7 +158,24 @@ pub async fn request(udid: &str, cmd: &str, args: Value) -> Value {
             );
         }
         let mut reply = String::new();
-        let read = BufReader::new(&mut stream).read_line(&mut reply).await;
+        // The daemon bounds every command itself; this is for a daemon that
+        // stopped answering altogether.
+        let patience = crate::daemon::budget(cmd) + Duration::from_secs(20);
+        let read = tokio::time::timeout(patience, BufReader::new(&mut stream).read_line(&mut reply)).await;
+        let Ok(read) = read else {
+            kill_daemon(udid);
+            return envelope(
+                Err(Fail::unknown(
+                    "daemon_timeout",
+                    format!("the daemon did not answer within {} s and was stopped", patience.as_secs()),
+                )
+                .hint(t(
+                    "입력이 나갔을 수 있습니다. 다시 보내지 말고 `iph read`로 화면을 확인하세요.",
+                    "The input may have gone out. Do not resend; check the screen with `iph read`.",
+                ))),
+                started,
+            );
+        };
         let parsed: Option<Value> = match read {
             Ok(n) if n > 0 => serde_json::from_str(&reply).ok(),
             _ => None,

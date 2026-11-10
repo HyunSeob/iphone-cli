@@ -1,8 +1,12 @@
 name: calculator-multiply
-description: 계산기로 두 수를 곱한 결과 읽기 (기본 12×34)
+description: 계산기로 12×34를 계산해 결과 읽기
 app: com.apple.calculator
-args: {a: "12", b: "34"}
+args: {}
 steps:
   - launch: com.apple.calculator
-  - wait_for: {label: "곱하기"}
+  - wait_for: {label: "등호"}
+  # 목록으로 주면 화면을 다시 읽지 않고 이어서 누른다 (키패드처럼 누르는 동안 움직이지 않는 화면용)
+  - tap: ["모두 지우기", "1", "2", "곱하기", "3", "4", "등호"]
+  # 계산기 표시 창은 이름표가 없고 식별자에 값이 들어 있다: StandardInputView;value:408
+  - read_field: {name: result, selector: {role: other, id_regex: "^StandardInputView"}, take: identifier, regex: "value:(.*)$"}
 output: [result]

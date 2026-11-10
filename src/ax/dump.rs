@@ -61,6 +61,15 @@ pub enum DumpKind {
     Other(String),
 }
 
+/// What one message from the accessibility service carried.
+#[derive(Debug, Clone)]
+pub enum Payload {
+    Dump(Dump),
+    /// A short notice about one element (an announcement, a screen change)
+    /// with the phone's notification number. Not a reading.
+    Notification(i64),
+}
+
 #[derive(Debug, Clone)]
 pub struct Dump {
     pub kind: DumpKind,
@@ -86,12 +95,31 @@ fn unwrap_layers(bytes: &[u8]) -> Result<Ka> {
     bail!("too many nested archive layers")
 }
 
-impl Dump {
+impl Payload {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let root = unwrap_layers(bytes)?;
         let result = root
             .get("resultData")
             .ok_or_else(|| anyhow!("payload is not a translator response"))?;
+        if result.get("treeDump").is_none() {
+            let notification = root.get("notification").and_then(|n| n.as_i64()).unwrap_or(0);
+            if notification != 0 {
+                return Ok(Payload::Notification(notification));
+            }
+        }
+        Dump::from_response(result).map(Payload::Dump)
+    }
+}
+
+impl Dump {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        match Payload::parse(bytes)? {
+            Payload::Dump(d) => Ok(d),
+            Payload::Notification(n) => bail!("payload is notification {n}, not a tree dump"),
+        }
+    }
+
+    fn from_response(result: &Ka) -> Result<Self> {
         let entries = result
             .get("treeDump")
             .and_then(|t| t.as_array())

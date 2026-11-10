@@ -26,6 +26,10 @@ pub fn socket(udid: &str) -> PathBuf {
     state_dir().join(format!("{udid}.sock"))
 }
 
+pub fn daemon_pid(udid: &str) -> PathBuf {
+    state_dir().join(format!("{udid}.pid"))
+}
+
 pub fn daemon_log(udid: &str) -> PathBuf {
     state_dir().join(format!("{udid}.log"))
 }
