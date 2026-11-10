@@ -425,26 +425,37 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
     if args.no_touch_test {
         checks.push(skip("touch_input", true, "--no-touch-test"));
     } else if tree_ok {
-        let down = s
-            .cmd_scroll(ScrollArgs { direction: "down".into(), until: None, max: None })
-            .await;
-        let moved = matches!(&down, Ok(r) if r.get("screen_changed").and_then(|v| v.as_bool()) == Some(true));
-        if moved {
-            // Put the list back where it was.
-            let _ = s
-                .cmd_scroll(ScrollArgs { direction: "up".into(), until: None, max: None })
+        // Down and back; if down does nothing (the list may be at its end, or
+        // the first drag of a new session was lost), up and back.
+        let mut verdict: Option<Check> = None;
+        let mut last_detail = String::new();
+        for (there, back) in [("down", "up"), ("up", "down")] {
+            let moved = s
+                .cmd_scroll(ScrollArgs { direction: there.into(), until: None, max: None })
                 .await;
-            checks.push(Check::new("touch_input", true));
-        } else {
-            let detail = match down {
-                Ok(_) => "the drag was sent but the screen did not move".to_string(),
-                Err(f) => f.message,
-            };
-            checks.push(Check::new("touch_input", true).status("fail").detail(detail).action(
+            match &moved {
+                Ok(r) if r.get("screen_changed").and_then(|v| v.as_bool()) == Some(true) => {
+                    // Put the list back where it was.
+                    let _ = s
+                        .cmd_scroll(ScrollArgs { direction: back.into(), until: None, max: None })
+                        .await;
+                    let mut check = Check::new("touch_input", true);
+                    if there == "up" {
+                        check = check.detail("the first drag did not move the screen; the second did");
+                    }
+                    verdict = Some(check);
+                    break;
+                }
+                Ok(_) => last_detail = "the drags were sent but the screen did not move".to_string(),
+                Err(f) => last_detail = f.message.clone(),
+            }
+        }
+        checks.push(verdict.unwrap_or_else(|| {
+            Check::new("touch_input", true).status("fail").detail(last_detail).action(
                 "설정 → 개발자 → 'UI 자동화 활성화'를 켜고 다시 시도하세요. 그래도 안 되면 폰을 재시동하세요.",
                 "Turn on Settings → Developer → Enable UI Automation and try again. If it still fails, restart the phone.",
-            ));
-        }
+            )
+        }));
     } else {
         checks.push(skip("touch_input", true, "no accessibility tree"));
     }

@@ -1,7 +1,7 @@
 //! The commands themselves, shared by the CLI, the MCP server, `batch` and
 //! recipes. Each takes JSON arguments and returns the fields of its result.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -29,6 +29,9 @@ pub const AFTER_TAP: Duration = Duration::from_millis(480);
 pub const AFTER_DRAG: Duration = Duration::from_millis(300);
 pub const AFTER_LAUNCH: Duration = Duration::from_millis(600);
 pub const AFTER_PASTE: Duration = Duration::from_millis(200);
+/// An unasked dump this recently before an input means the app is one that
+/// triggers them; its readings are then double-checked.
+const UNASKED_MEMORY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -309,11 +312,45 @@ impl Session {
         Ok(out)
     }
 
-    /// Read the screen after an input: wait `delay` for it to react, then ask
-    /// the phone for a new dump. The phone does not push dumps on its own.
-    pub(crate) async fn observe(&mut self, delay: Duration) -> Option<(u64, Screen)> {
+    /// Read the screen after an input that began at `since`: wait `delay` for
+    /// the screen to react, then ask the phone for a new dump.
+    ///
+    /// Some apps make the phone send dumps unasked while they change
+    /// (Calculator on every key). Such a dump shows the screen as it was a
+    /// moment earlier and can arrive late enough to pass for the answer; the
+    /// calculator recipe then read "12×3" instead of "408". So with `careful`
+    /// (inputs that change the screen several times), or when the phone has
+    /// lately sent unasked dumps, the screen is read until two readings in a
+    /// row agree.
+    pub(crate) async fn observe_with(
+        &mut self,
+        since: Instant,
+        delay: Duration,
+        careful: bool,
+    ) -> Option<(u64, Screen)> {
         tokio::time::sleep(delay).await;
-        self.screen(Fresh::Force, false, BuildOptions::default()).await.ok()
+        let mut latest = self.screen(Fresh::Force, false, BuildOptions::default()).await.ok()?;
+        let lately = since.checked_sub(UNASKED_MEMORY).unwrap_or(since);
+        let chatty = self.ax.as_ref().is_some_and(|a| a.unasked_since(lately));
+        if !careful && !chatty {
+            return Some(latest);
+        }
+        for _ in 0..2 {
+            trace(|| "observe: reading again until two readings agree".into());
+            let Ok(next) = self.screen(Fresh::Force, false, BuildOptions::default()).await else {
+                break;
+            };
+            let same = next.1.signature() == latest.1.signature();
+            latest = next;
+            if same {
+                break;
+            }
+        }
+        Some(latest)
+    }
+
+    pub(crate) async fn observe(&mut self, since: Instant, delay: Duration) -> Option<(u64, Screen)> {
+        self.observe_with(since, delay, false).await
     }
 
     /// Check the safety guard for a tap on `el`. `Ok(Some(record))` means the
@@ -390,6 +427,76 @@ impl Session {
         self.tap_impl(args, false).await
     }
 
+    /// Read the screen and find where to tap for each target. Fails without
+    /// sending anything when a target is missing, ambiguous or covered.
+    async fn locate(
+        &mut self,
+        targets: &[Target],
+        fresh: Fresh,
+    ) -> Res<(Screen, Vec<(f64, f64, Option<Element>)>)> {
+        let need_ids = targets
+            .iter()
+            .any(|t| matches!(t, Target::Selector(s) if s.needs_identifier()));
+        let (_, screen) = self.screen(fresh, need_ids, BuildOptions::default()).await?;
+        if screen.width <= 0.0 || screen.height <= 0.0 {
+            return Err(Fail::not_sent("no_screen_size", "the reading has no application frame"));
+        }
+        let mut points = Vec::with_capacity(targets.len());
+        for target in targets {
+            points.push(match target {
+                Target::Selector(sel) => {
+                    let el = resolve_one(sel, &screen)?;
+                    let (x, y) = tap_point(el, &screen)?;
+                    (x, y, Some(el.clone()))
+                }
+                Target::Point(x, y) => {
+                    if *x < 0.0 || *y < 0.0 || *x > screen.width || *y > screen.height {
+                        return Err(Fail::invalid(format!(
+                            "point {x},{y} is outside the {}x{} screen",
+                            screen.width, screen.height
+                        )));
+                    }
+                    (*x, *y, screen.element_at(*x, *y).cloned())
+                }
+            });
+        }
+        self.check_front_allowed(&screen).await?;
+        Ok((screen, points))
+    }
+
+    /// Locate the targets, make sure input can be sent, and locate them again
+    /// if getting ready took long enough for the screen to have moved on: a
+    /// cold input session takes seconds to open, and a tap must never go to
+    /// where something used to be.
+    ///
+    /// Guarded targets without a confirmation are refused here, before the
+    /// input session is touched.
+    async fn locate_ready(
+        &mut self,
+        targets: &[Target],
+        confirm_given: bool,
+        force_confirm: bool,
+    ) -> Res<(Screen, Vec<(f64, f64, Option<Element>)>)> {
+        let located = self.locate(targets, Fresh::MaxAge(reuse())).await?;
+        if !confirm_given {
+            for (_, _, el) in &located.1 {
+                self.guard_tap(el.as_ref(), None, "tap", force_confirm)?;
+            }
+        }
+        let started = std::time::Instant::now();
+        self.ensure_input().await?;
+        if started.elapsed() < Duration::from_millis(400) {
+            return Ok(located);
+        }
+        let again = self.locate(targets, Fresh::Force).await?;
+        if !confirm_given {
+            for (_, _, el) in &again.1 {
+                self.guard_tap(el.as_ref(), None, "tap", force_confirm)?;
+            }
+        }
+        Ok(again)
+    }
+
     /// `force_confirm`: the caller (a recipe step with `confirm: true`)
     /// requires an op_id even when the label is not a guarded word.
     pub(crate) async fn tap_impl(&mut self, args: TapArgs, force_confirm: bool) -> Res {
@@ -397,40 +504,23 @@ impl Session {
             return Err(Fail::invalid("--double and --long cannot be combined"));
         }
         if let Some(ms) = args.long_ms
-            && !(1..=60_000).contains(&ms) {
-                return Err(Fail::invalid("--long must be 1..60000 ms"));
-            }
-        let target = parse_target(&args.target)?;
-        let need_ids = matches!(&target, Target::Selector(s) if s.needs_identifier());
-        let (_, screen) = self
-            .screen(Fresh::MaxAge(reuse()), need_ids, BuildOptions::default())
-            .await?;
-        if screen.width <= 0.0 || screen.height <= 0.0 {
-            return Err(Fail::not_sent("no_screen_size", "the reading has no application frame"));
+            && !(1..=60_000).contains(&ms)
+        {
+            return Err(Fail::invalid("--long must be 1..60000 ms"));
         }
-        let (x, y, element) = match &target {
-            Target::Selector(sel) => {
-                let el = resolve_one(sel, &screen)?;
-                let (x, y) = tap_point(el, &screen)?;
-                (x, y, Some(el))
-            }
-            Target::Point(x, y) => {
-                if *x < 0.0 || *y < 0.0 || *x > screen.width || *y > screen.height {
-                    return Err(Fail::invalid(format!(
-                        "point {x},{y} is outside the {}x{} screen",
-                        screen.width, screen.height
-                    )));
-                }
-                (*x, *y, screen.element_at(*x, *y))
-            }
-        };
-        let element_json = element.map(brief);
-        self.check_front_allowed(&screen).await?;
-        let op = self.guard_tap(element, args.confirm.as_deref(), "tap", force_confirm)?;
+        let target = parse_target(&args.target)?;
+        let (screen, mut points) = self
+            .locate_ready(std::slice::from_ref(&target), args.confirm.is_some(), force_confirm)
+            .await?;
+        let (x, y, element) = points.remove(0);
+        let element_json = element.as_ref().map(brief);
+        // Claims the op_id when the target is guarded; from here on the id is spent.
+        let op = self.guard_tap(element.as_ref(), args.confirm.as_deref(), "tap", force_confirm)?;
         let op_id = op.as_ref().map(|o| o.op_id.clone());
 
         let (nx, ny) = (normalize(x, screen.width), normalize(y, screen.height));
         let before = screen.signature();
+        let input_began = Instant::now();
         let input = match self.ensure_input().await {
             Ok(i) => i,
             Err(e) => {
@@ -457,7 +547,7 @@ impl Session {
             }
             return Err(fail);
         }
-        let after = self.observe(AFTER_TAP).await;
+        let after = self.observe(input_began, AFTER_TAP).await;
         let changed = after.as_ref().map(|(_, s)| s.signature() != before);
         Self::finish_op(op, "done");
         let app_change = after.as_ref().and_then(|(_, s)| app_changed(&screen, s));
@@ -497,31 +587,9 @@ impl Session {
             return Err(Fail::invalid("the tap list is empty"));
         }
         let parsed: Vec<Target> = targets.iter().map(parse_target).collect::<Res<_>>()?;
-        let need_ids = parsed
-            .iter()
-            .any(|t| matches!(t, Target::Selector(s) if s.needs_identifier()));
-        let (_, screen) = self
-            .screen(Fresh::MaxAge(reuse()), need_ids, BuildOptions::default())
-            .await?;
-        if screen.width <= 0.0 || screen.height <= 0.0 {
-            return Err(Fail::not_sent("no_screen_size", "the reading has no application frame"));
-        }
-        self.check_front_allowed(&screen).await?;
-        let mut points: Vec<(f64, f64, Option<&Element>)> = Vec::new();
-        for target in &parsed {
-            let (x, y, el) = match target {
-                Target::Selector(sel) => {
-                    let el = resolve_one(sel, &screen)?;
-                    let (x, y) = tap_point(el, &screen)?;
-                    (x, y, Some(el))
-                }
-                Target::Point(x, y) => (*x, *y, screen.element_at(*x, *y)),
-            };
-            // A guarded target stops the whole sequence before it starts; a
-            // confirmed tap is always a step of its own.
-            self.guard_tap(el, None, "tap", false)?;
-            points.push((x, y, el));
-        }
+        // A guarded target stops the whole sequence before it starts; a
+        // confirmed tap is always a step of its own.
+        let (screen, points) = self.locate_ready(&parsed, false, false).await?;
         let before = screen.signature();
         let normalized: Vec<(u16, u16)> = points
             .iter()
@@ -529,8 +597,9 @@ impl Session {
             .collect();
         let tapped: Vec<Value> = points
             .iter()
-            .map(|(_, _, el)| el.map(brief).unwrap_or(Value::Null))
+            .map(|(_, _, el)| el.as_ref().map(brief).unwrap_or(Value::Null))
             .collect();
+        let input_began = Instant::now();
         let input = self.ensure_input().await?;
         for (i, (nx, ny)) in normalized.iter().enumerate() {
             if let Err(e) = input.tap(*nx, *ny, Duration::from_millis(50)).await {
@@ -543,15 +612,21 @@ impl Session {
                     .with("taps_sent", i));
             }
         }
-        let after = self.observe(AFTER_TAP).await;
+        let after = self.observe_with(input_began, AFTER_TAP, true).await;
         let changed = after.as_ref().map(|(_, s)| s.signature() != before);
-        Ok(fields! {
+        let app_change = after.as_ref().and_then(|(_, s)| app_changed(&screen, s));
+        let mut out = fields! {
             "sent": true,
             "verified": changed.is_some(),
             "screen_changed": changed.unwrap_or(false),
             "taps": tapped.len(),
             "elements": tapped,
-        })
+        };
+        if let Some(change) = app_change {
+            out.insert("app_changed".into(), json!(true));
+            out.insert("app".into(), change);
+        }
+        Ok(out)
     }
 
     /// Drag between two points given in logical points and report whether the
@@ -581,6 +656,7 @@ impl Session {
         let before = screen.signature();
         let a = (normalize(from.0, screen.width), normalize(from.1, screen.height));
         let b = (normalize(to.0, screen.width), normalize(to.1, screen.height));
+        let input_began = Instant::now();
         let input = self.ensure_input().await?;
         if let Err(e) = input.drag(a, b, duration, motion).await {
             self.drop_input();
@@ -589,11 +665,11 @@ impl Session {
                 "The input may have gone out. Do not resend; check the screen with `iph read`.",
             )));
         }
-        let mut after = self.observe(AFTER_DRAG).await.map(|(_, s)| s);
+        let mut after = self.observe(input_began, AFTER_DRAG).await.map(|(_, s)| s);
         if motion == Motion::Flick {
             // The content coasts after a flick: read until two readings agree.
             for _ in 0..3 {
-                let next = self.observe(Duration::from_millis(150)).await.map(|(_, s)| s);
+                let next = self.observe(Instant::now(), Duration::from_millis(150)).await.map(|(_, s)| s);
                 let still = match (&after, &next) {
                     (Some(a), Some(b)) => a.signature() == b.signature(),
                     _ => true,
@@ -638,10 +714,10 @@ impl Session {
         };
         let duration = Duration::from_millis(args.duration_ms.unwrap_or(250).clamp(50, 10_000));
         let motion = if args.drag { Motion::Place } else { Motion::Flick };
-        let (changed, _) = self.drag_points(from, to, duration, motion).await?;
+        let (changed, after) = self.drag_points(from, to, duration, motion).await?;
         Ok(fields! {
             "sent": true,
-            "verified": true,
+            "verified": after.is_some(),
             "screen_changed": changed,
             "from": [from.0, from.1],
             "to": [to.0, to.1],
@@ -670,10 +746,10 @@ impl Session {
             return Err(Fail::invalid("direction must be up or down"));
         }
         let Some(until) = &args.until else {
-            let (changed, _) = self.scroll_step(&args.direction).await?;
+            let (changed, after) = self.scroll_step(&args.direction).await?;
             return Ok(fields! {
                 "sent": true,
-                "verified": true,
+                "verified": after.is_some(),
                 "screen_changed": changed,
                 "scrolls": 1,
             });
@@ -747,13 +823,14 @@ impl Session {
             .await?;
         self.check_front_allowed(&screen).await?;
         let before = Some(screen.signature());
+        let input_began = Instant::now();
         let input = self.ensure_input().await?;
         if let Err(e) = input.key(usage, &modifiers).await {
             self.drop_input();
             return Err(Fail::unknown("input_failed", format!("{e:#}")));
         }
         let changed = match before {
-            Some(sig) => self.observe(AFTER_TAP).await.map(|(_, sc)| sc.signature() != sig),
+            Some(sig) => self.observe(input_began, AFTER_TAP).await.map(|(_, sc)| sc.signature() != sig),
             None => None,
         };
         Ok(fields! {
@@ -771,13 +848,14 @@ impl Session {
             .await?;
         self.check_front_allowed(&screen).await?;
         let before = Some(screen.signature());
+        let input_began = Instant::now();
         let input = self.ensure_input().await?;
         if let Err(e) = input.button(page, usage, Duration::from_millis(hold)).await {
             self.drop_input();
             return Err(Fail::unknown("input_failed", format!("{e:#}")));
         }
         let changed = match before {
-            Some(sig) => self.observe(AFTER_LAUNCH).await.map(|(_, sc)| sc.signature() != sig),
+            Some(sig) => self.observe(input_began, AFTER_LAUNCH).await.map(|(_, sc)| sc.signature() != sig),
             None => None,
         };
         Ok(fields! {
@@ -839,6 +917,7 @@ impl Session {
         let bundle = self.resolve_bundle(&args.app).await?;
         self.check_launch_allowed(&bundle)?;
         let mut svc = self.app_service().await?;
+        let launch_began = Instant::now();
         // From here the launch request may have reached the phone.
         let launched = tokio::time::timeout(
             Duration::from_secs(30),
@@ -866,7 +945,7 @@ impl Session {
         let mut foreground = false;
         let mut delay = AFTER_LAUNCH;
         for _ in 0..4 {
-            if let Some((_, screen)) = self.observe(delay).await
+            if let Some((_, screen)) = self.observe(launch_began, delay).await
                 && screen.apps.iter().any(|a| a.pid == pid) {
                     foreground = true;
                     break;
@@ -955,6 +1034,7 @@ impl Session {
         if !args.text.is_empty() {
             combos.push((crate::keys::usage('v').unwrap(), cmd.clone()));
         }
+        let keys_began = Instant::now();
         let pressed = input.keyboard_press(&combos).await;
         trace(|| "type: keys sent".into());
         if let Err(e) = pressed {
@@ -985,7 +1065,7 @@ impl Session {
             let mut verified = false;
             for attempt in 0..3 {
                 let delay = if attempt == 0 { AFTER_PASTE } else { Duration::from_millis(400) };
-                let Some((_, screen)) = self.observe(delay).await else { continue };
+                let Some((_, screen)) = self.observe_with(keys_began, delay, true).await else { continue };
                 let now = Self::focused_field(&screen)
                     .or_else(|| screen.by_id(&field.id))
                     .and_then(|e| e.value.clone())

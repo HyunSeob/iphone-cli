@@ -61,7 +61,7 @@ A tap on an element labelled with 결제 · 송금 · 보내기 · 이체 · 주
  {"read_field": {"name": "ios_version", "selector": {"label": "iOS 버전"}, "take": "value"}}]
 ```
 
-The result has `steps[]` (each with `elapsed_ms`) and `outputs`. On failure: `failed_step`, `reason`, `screen_summary`.
+The result has `steps[]` (each with `elapsed_ms`) and `outputs`. On failure: `failed_step`, `reason`, `screen_summary`. The `outcome` of a failed run is the failing step's; `inputs_sent` says how many earlier steps had already sent input, so think before running the whole thing again.
 
 Steps: `launch`, `wait_for`, `tap` (a selector, or a list of selectors tapped in a row without re-reading: for keypads), `type`, `swipe`, `scroll_until`, `read_field` (`take`: `value` | `label` | `identifier` | `text`, optional `regex` with one capture group), `read_list` (`row` selector, `columns: {name: {take, regex}}`, scrolls and collects each row once), `assert`, `button`, `key`, `sleep` (ms).
 

@@ -17,10 +17,10 @@ application   "설정"  @0,0 430x932
   …
 
 $ iph tap "일반"
-{"ok":true,"outcome":"done","elapsed_ms":1547,"sent":true,"verified":true,"screen_changed":true,…}
+{"ok":true,"outcome":"done","elapsed_ms":1752,"sent":true,"verified":true,"screen_changed":true,…}
 
 $ iph run settings-version
-{"ok":true,"outcome":"done","elapsed_ms":9513,"steps":[…],"outputs":{"ios_version":"27.0.1"},…}
+{"ok":true,"outcome":"done","elapsed_ms":10788,"steps":[…],"outputs":{"ios_version":"27.0.1"},…}
 ```
 
 ## 되는 것 · 안 되는 것
@@ -104,7 +104,7 @@ iph setup                     # 폰 준비 상태를 차례로 확인하고, 할
 ### 결과
 
 ```json
-{"ok": true, "outcome": "done", "elapsed_ms": 1547, "sent": true, "verified": true, "screen_changed": true, "element": {…}}
+{"ok": true, "outcome": "done", "elapsed_ms": 1752, "sent": true, "verified": true, "screen_changed": true, "element": {…}}
 {"ok": false, "outcome": "not_sent", "error": {"code": "not_found", "message": "…", "hint": "…"}, "elapsed_ms": 1210, "screen_summary": {…}}
 ```
 
@@ -138,7 +138,7 @@ input_idle_secs = 120    # 입력 세션을 이만큼 안 쓰면 닫음. 0이면
 idle_exit_secs = 1800    # 요청이 이만큼 없으면 상주 프로세스 종료
 ```
 
-입력을 보내려면 폰이 '화면 공유 중' 상태여야 합니다 (폰 상단에 표시가 뜹니다). 화면 공유 중에 내용을 가리거나 경고하는 앱이라면 `input_idle_secs = 0`으로 두세요. 입력을 보내는 동안만 공유 상태가 되고, 대신 입력마다 3~4초쯤 더 걸립니다. 이 방식에서는 세션을 새로 연 직후의 첫 입력이 가끔 먹지 않았습니다 (20번 중 2번). 그때는 결과가 `screen_changed: false`로 나오니 화면을 보고 다시 판단하세요. 읽기는 화면 공유와 상관없습니다.
+입력을 보내려면 폰이 '화면 공유 중' 상태여야 합니다 (폰 상단에 표시가 뜹니다). 화면 공유 중에 내용을 가리거나 경고하는 앱이라면 `input_idle_secs = 0`으로 두세요. 입력을 보내는 동안만 공유 상태가 되고, 대신 입력마다 3~4초쯤 더 걸립니다. 읽기는 화면 공유와 상관없습니다.
 
 **한계:** 이름표만 봅니다. 이름표가 없거나 다른 말로 붙은 버튼(아이콘만 있는 결제 버튼, "다음", "확인")은 막지 못합니다. 돈이나 메시지가 걸린 흐름은 레시피에서 마지막 단계에 `confirm: true`를 직접 달아 두세요.
 
@@ -174,7 +174,7 @@ output: [ios_version]
 | (어느 단계든) `confirm: true` | `--confirm <op_id>`가 있어야 실행 |
 
 - `{{이름}}`은 `--arg 이름=값`으로 바뀝니다. `args`에 기본값을 적고, `null`이면 필수입니다.
-- 단계가 실패하면 즉시 멈추고 `{failed_step, reason, screen_summary}`를 돌려줍니다. 추측해서 진행하지 않습니다.
+- 단계가 실패하면 즉시 멈추고 `{failed_step, reason, screen_summary}`를 돌려줍니다. 추측해서 진행하지 않습니다. 이때 `outcome`은 실패한 그 단계의 것입니다. 그 앞 단계들이 이미 보낸 입력이 있으면 `inputs_sent`에 개수가 나오므로, 처음부터 다시 돌려도 되는 흐름인지는 그 숫자를 보고 판단하세요.
 - `launch` 뒤에는 그 앱이 계속 앞에 있어야 합니다. 다른 앱이 나오면 `unexpected_app`으로 멈춥니다.
 - 단계별 `elapsed_ms`가 결과에 들어 있습니다.
 - 찾는 곳: `~/.config/iph/recipes/*.yaml`(개인, 우선) → 저장소 `recipes/`(예제, 바이너리에 들어 있음). 파일 경로를 직접 줘도 됩니다.
@@ -197,15 +197,15 @@ iPhone 15 Pro Max · iOS 27.0.1 · Wi-Fi, 상주 프로세스가 붙어 있는 �
 
 | 동작 | 걸린 시간 |
 |---|---|
-| `iph read` (설정 첫 화면, 10회) | 중앙값 1.27초, 최대 1.63초 |
+| `iph read` (설정 첫 화면, 10회) | 중앙값 1.35초, 최대 2.10초 |
 | `iph read --full` (10회) | 중앙값 1.45초, 최대 1.79초 |
-| `iph tap` + 화면 확인 (20회, 놓침 0) | 중앙값 1.55초, 최대 2.82초 |
+| `iph tap` + 화면 확인 (20회, 놓침 0) | 중앙값 1.75초, 최대 4.30초 |
 | `iph scroll` 한 칸 + 확인 | 2.1~2.6초 |
-| `iph type` (메모, 확인 · 클립보드 복원 포함) | 2.5~5초 |
-| 레시피 `settings-version` (5단계) | 9.5~11.3초 |
+| `iph type` (메모, 확인 · 클립보드 복원 포함) | 4~7초 |
+| 레시피 `settings-version` (5단계) | 10.8~22.4초 |
 | 상주 프로세스가 없을 때 첫 `iph read` (터널 + 구독 포함) | 약 2~3초 |
 
-한 번 읽는 데 1초 넘게 걸리는 것은 폰 쪽 사정입니다. 폰은 요청을 받고 약 1.1초 조용히 기다린 뒤에야 화면을 내보냅니다. 자세한 관찰은 [docs/how-it-works.md](docs/how-it-works.md).
+한 번 읽는 데 1초 넘게 걸리는 것은 폰 쪽 사정입니다. 폰은 요청을 받고 약 1.1초 조용히 기다린 뒤에야 화면을 내보냅니다. 화면이 스스로 자주 바뀌는 앱에서는 옛 화면을 읽지 않으려고 두 번 읽어 맞춰 보기 때문에 단계마다 1~2초가 더 듭니다. 자세한 관찰은 [docs/how-it-works.md](docs/how-it-works.md).
 
 ## 알려진 한계
 

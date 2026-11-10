@@ -9,8 +9,11 @@
 //!   second about 0.5 s later.
 //! - The 1.1 s is a quiet period that every new request restarts. Requests
 //!   sent every second never get an answer. So: one request, then wait.
-//! - The phone does not send dumps on its own when the screen changes. Every
-//!   fresh reading is a new request on the same connection.
+//! - After a navigation in Settings the phone sent nothing on its own; a
+//!   fresh reading is a new request on the same connection. Some apps do make
+//!   the phone send dumps unasked (Calculator on every key, Notes when the
+//!   keyboard comes or goes). Those lag behind what triggered them, so one
+//!   can arrive after a later request and look like its answer.
 
 use std::{
     sync::{Arc, Mutex},
@@ -28,6 +31,8 @@ use tokio::sync::{mpsc, watch};
 use crate::ax::dump::{Dump, DumpKind, Payload};
 
 pub const SERVICE: &str = "com.apple.accessibility.axAuditDaemon.remoteAXService";
+/// The phone never answers a request sooner than this (about 1.1 s typical).
+pub const ANSWER_AT_LEAST: Duration = Duration::from_millis(700);
 const SUBSCRIBE: &str = "clientNeedsAccessibility:";
 const PUSH: &str = "processDataFromRemoteDevice:";
 
@@ -38,6 +43,13 @@ pub struct AxState {
     pub initial: Option<Arc<Dump>>,
     /// When the latest first-pass dump arrived.
     pub initial_at: Option<Instant>,
+    /// Arrival times of the most recent first-pass dumps.
+    pub arrivals: std::collections::VecDeque<Instant>,
+    /// When the last request went out, and whether its answer is still due.
+    pub asked_at: Option<Instant>,
+    pub answer_due: bool,
+    /// When the phone last sent a first-pass dump nobody asked for.
+    pub unasked_at: Option<Instant>,
     /// Payloads the parser gave up on.
     pub unparsed: u64,
     /// `seq` of the reading that `full` belongs to.
@@ -92,7 +104,11 @@ impl AxSub {
         subscribe(&mut dtx).await?;
         let opened = Instant::now();
 
-        let state = Arc::new(Mutex::new(AxState::default()));
+        let state = Arc::new(Mutex::new(AxState {
+            asked_at: Some(opened),
+            answer_due: true,
+            ..Default::default()
+        }));
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Cmd>();
         let (changed_tx, changed_rx) = watch::channel(0u64);
         let task_state = state.clone();
@@ -181,7 +197,16 @@ impl AxSub {
         self.cmd
             .send(Cmd::Subscribe)
             .map_err(|_| anyhow!("accessibility connection closed"))?;
-        Ok(Instant::now())
+        let now = Instant::now();
+        let mut s = self.state.lock().unwrap();
+        s.asked_at = Some(now);
+        s.answer_due = true;
+        Ok(now)
+    }
+
+    /// True when the phone sent a dump nobody asked for at or after `since`.
+    pub fn unasked_since(&self, since: Instant) -> bool {
+        self.state.lock().unwrap().unasked_at.is_some_and(|t| t >= since)
     }
 
     pub fn unparsed_count(&self) -> u64 {
@@ -227,6 +252,11 @@ impl AxSub {
     /// When the latest first-pass dump arrived.
     pub fn latest_arrival(&self) -> Option<Instant> {
         self.state.lock().unwrap().initial_at
+    }
+
+    /// How many first-pass dumps arrived at or after `since`.
+    pub fn initials_since(&self, since: Instant) -> usize {
+        self.state.lock().unwrap().arrivals.iter().filter(|t| **t >= since).count()
     }
 
     /// Latest dump with second-pass attributes, if it belongs to reading `seq`.
@@ -302,6 +332,20 @@ fn accept(state: &Arc<Mutex<AxState>>, dump: Dump, arrived: Instant) -> bool {
             s.seq += 1;
             s.initial = Some(Arc::new(dump));
             s.initial_at = Some(arrived);
+            // An answer needs about a second. A dump that comes while none is
+            // due, or sooner than an answer can, was sent unasked: the app is
+            // one that makes the phone do that.
+            let answers = s.answer_due
+                && s.asked_at.is_some_and(|at| arrived >= at + ANSWER_AT_LEAST);
+            if answers {
+                s.answer_due = false;
+            } else {
+                s.unasked_at = Some(arrived);
+            }
+            if s.arrivals.len() >= 32 {
+                s.arrivals.pop_front();
+            }
+            s.arrivals.push_back(arrived);
             true
         }
         DumpKind::Additional => {

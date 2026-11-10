@@ -392,7 +392,23 @@ impl Session {
             .screen(Fresh::MaxAge(reuse()), sel.needs_identifier() || what == "identifier", BuildOptions::default())
             .await?;
         let el = actions::resolve_one(&sel, &screen)?;
-        let text = apply_regex(take(el, what), pattern)?;
+        let mut text = apply_regex(take(el, what), pattern)?;
+        // What a recipe hands back must not come from a reading that was
+        // already out of date: look again until two readings give the same.
+        let needs_ids = sel.needs_identifier() || what == "identifier";
+        for _ in 0..2 {
+            let (_, again) = self.screen(Fresh::Force, needs_ids, BuildOptions::default()).await?;
+            let next = match dedupe_targets(sel.find(&again)).as_slice() {
+                [one] => apply_regex(take(one, what), pattern)?,
+                _ => None,
+            };
+            let same = next == text;
+            text = next;
+            if same {
+                break;
+            }
+        }
+        let el = actions::resolve_one(&sel, &screen)?;
         match text {
             Some(text) => Ok((name.to_string(), Value::String(text))),
             None => Err(Fail::not_sent(
@@ -686,14 +702,7 @@ impl Session {
                     until: Some(until),
                     max: opt_u64(&options, "max").map(|n| n as u32),
                 }))
-                .await
-                .map_err(|mut f| {
-                        // Not finding the target fails the step.
-                        if f.outcome == Outcome::Done {
-                            f.outcome = Outcome::NotSent;
-                        }
-                        f
-                    })?;
+                .await?;
                 no_value(fields! {
                     "scrolls": r.get("scrolls").cloned().unwrap_or(Value::Null),
                     "element": r.get("element").cloned().unwrap_or(Value::Null),
@@ -742,6 +751,8 @@ impl Session {
         // The app the last `launch` step brought to the front. Every later
         // step must still find it there.
         let mut expected_pid: Option<i64> = None;
+        // Steps that sent something to the phone and completed.
+        let mut inputs_sent = 0u32;
         for (i, raw) in steps.iter().enumerate() {
             let index = i + 1;
             let started = Instant::now();
@@ -820,6 +831,12 @@ impl Session {
                     if kind == "launch" {
                         expected_pid = extra.get("pid").and_then(|v| v.as_i64());
                     }
+                    if matches!(
+                        kind,
+                        "launch" | "tap" | "type" | "swipe" | "scroll_until" | "read_list" | "button" | "key"
+                    ) {
+                        inputs_sent += 1;
+                    }
                     let mut rec = fields! { "index": index, "kind": kind, "ok": true, "elapsed_ms": ms };
                     for (k, v) in extra {
                         if !v.is_null() {
@@ -839,7 +856,8 @@ impl Session {
                             _ => "unknown",
                         },
                     );
-                    return Err(step_failure(index, raw, f, kind, &records, &outputs, ms));
+                    return Err(step_failure(index, raw, f, kind, &records, &outputs, ms)
+                        .with("inputs_sent", inputs_sent));
                 }
             }
         }

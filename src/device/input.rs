@@ -185,17 +185,29 @@ impl InputSession {
 
         let drain = Drain::start(vec![audio_udp, video_udp]);
 
-        // Connect the HID services first and only then wait: a report sent
-        // the instant a HID connection came up was sometimes lost, and with
-        // it the whole first gesture.
-        let hid = UniversalHidServiceClient::connect_rsd(adapter, rsd)
+        // Connect the HID services first and only then wait, so the first
+        // real report does not go out the instant the connection came up.
+        let mut hid = UniversalHidServiceClient::connect_rsd(adapter, rsd)
             .await
             .map_err(|e| anyhow!("hid service: {e:?}"))?;
         let keyboard = UniversalHidServiceClient::connect_rsd(adapter, rsd)
             .await
             .map_err(|e| anyhow!("hid service (keyboard): {e:?}"))?;
         let indigo = IndigoHidClient::connect_rsd(adapter, rsd).await.ok();
+        // A "finger up" with no finger down does nothing on the phone, but it
+        // is a first report, and the first report on a new connection is
+        // sometimes lost, taking a whole gesture with it. Measured with a new
+        // session for every scroll: 7 of 40 first drags lost without this,
+        // 0 of 60 with it (iOS 27.0.1). `IPH_INPUT_PRIME=0` turns it off.
+        let prime = std::env::var("IPH_INPUT_PRIME").map(|v| v != "0").unwrap_or(true);
+        if prime {
+            let _ = hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, 65535, 65535, None).await;
+        }
         tokio::time::sleep(warmup()).await;
+        if prime {
+            let _ = hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, 65535, 65535, None).await;
+            tokio::time::sleep(Duration::from_millis(60)).await;
+        }
 
         Ok(Self {
             display,

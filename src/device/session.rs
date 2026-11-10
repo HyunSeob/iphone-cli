@@ -21,7 +21,7 @@ use crate::{
     },
     config::Config,
     device::{
-        ax::AxSub,
+        ax::{ANSWER_AT_LEAST, AxSub},
         conn::{self, Tunnel},
         input::InputSession,
     },
@@ -59,8 +59,6 @@ pub fn reuse() -> Duration {
 /// request restarts the phone's wait, so this must be generous: answers took
 /// up to 5.8 s while a list was still settling.
 const ASK_AGAIN: Duration = Duration::from_millis(6500);
-/// The phone never answers a request sooner than this (about 1.1 s typical).
-const ANSWER_AT_LEAST: Duration = Duration::from_millis(700);
 const READ_TIMEOUT: Duration = Duration::from_secs(14);
 /// Shortest time between the end of one input session and the start of the
 /// next.
@@ -286,6 +284,13 @@ impl Session {
                         // belongs to an earlier request and may predate what
                         // the caller wants to see.
                         if let Some(x) = ax.wait_arrived(at + ANSWER_AT_LEAST, ASK_AGAIN).await {
+                            crate::device::ax::trace(|| {
+                                let ms = ax
+                                    .latest_arrival()
+                                    .map(|t| t.saturating_duration_since(at).as_millis())
+                                    .unwrap_or(0);
+                                format!("answer accepted {ms} ms after the request")
+                            });
                             got = Some(x);
                             break;
                         }
@@ -388,11 +393,10 @@ impl Session {
                 self.input_closed_at = Some(Instant::now());
             }
         if self.input.is_none() {
-            // A session opened right after another one ended sometimes took no
-            // input: 1 of 4 with under a second between them. Two or four
-            // seconds between them still lost 1 of 8 and 1 of 12 on a kept
-            // tunnel, while 24 of 24 worked after a daemon restart; the cause
-            // is not understood. `IPH_REOPEN_GAP_MS` overrides the gap.
+            // Keep a new session a little apart from the one before it.
+            // (Lost first gestures turned out to be the first report on a new
+            // connection, which `InputSession::open` now spends on a no-op;
+            // the gap stays as a margin. `IPH_REOPEN_GAP_MS` overrides it.)
             if let Some(closed) = self.input_closed_at {
                 let gap = std::env::var("IPH_REOPEN_GAP_MS")
                     .ok()
@@ -448,8 +452,7 @@ impl Session {
     /// With `input_idle_secs = 0` the input session ends with each command,
     /// so the phone shows "screen sharing" only while input is being sent.
     /// For apps that hide their content or complain while the screen is
-    /// shared. Every input then pays for a new session (3 to 4 s), and the
-    /// first input of a new session was ignored 2 times in 20.
+    /// shared. Every input then pays for a new session (3 to 4 s).
     pub async fn close_input_if_unheld(&mut self) {
         if self.config.daemon.input_idle_secs == 0
             && let Some(s) = self.input.take() {
