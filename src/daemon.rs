@@ -99,6 +99,15 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
             "pid": std::process::id(),
             "build": build_stamp(),
         }),
+        // For testing recovery: close the tunnel under the open connections,
+        // as a pulled cable or a Wi-Fi drop would.
+        "debug_drop_tunnel" if std::env::var("IPH_DEBUG").is_ok_and(|v| v == "1") => {
+            let closed = match s.tunnel.as_mut() {
+                Some(t) => t.adapter.close().await.is_ok(),
+                None => false,
+            };
+            Ok(fields! { "closed": closed })
+        }
         other => Err(Fail::invalid(format!("unknown command `{other}`"))),
     }
 }

@@ -153,6 +153,9 @@ enum Cmd {
     /// Internal: the resident process.
     #[command(hide = true)]
     Daemon,
+    /// Internal: send a raw daemon command (recovery tests).
+    #[command(hide = true)]
+    Debug { command: String },
 }
 
 fn print(value: &Value, human_out: bool, cmd: &str) {
@@ -286,6 +289,11 @@ async fn run(cli: Cli) -> i32 {
             let v = envelope(Ok(fields! { "stopped": stopped }), started);
             print(&v, human_out, "stop");
             return 0;
+        }
+        Cmd::Debug { command } => {
+            let v = client::request(&udid, &command, Value::Null).await;
+            print(&v, human_out, "debug");
+            return exit_code(&v);
         }
         Cmd::Doctor { no_touch_test } => ("doctor", json!({ "no_touch_test": no_touch_test })),
         Cmd::Read { app, all, full, raw, max_age } => (
