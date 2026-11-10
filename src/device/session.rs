@@ -62,6 +62,9 @@ const ASK_AGAIN: Duration = Duration::from_millis(6500);
 /// The phone never answers a request sooner than this (about 1.1 s typical).
 const ANSWER_AT_LEAST: Duration = Duration::from_millis(700);
 const READ_TIMEOUT: Duration = Duration::from_secs(14);
+/// Shortest time between the end of one input session and the start of the
+/// next.
+const REOPEN_GAP: Duration = Duration::from_millis(2000);
 const SECOND_PASS_WAIT: Duration = Duration::from_millis(2500);
 
 pub struct Session {
@@ -72,6 +75,8 @@ pub struct Session {
     pub ax: Option<AxSub>,
     pub input: Option<InputSession>,
     pub(crate) input_used: Instant,
+    /// When the last input session ended, to keep the next one apart from it.
+    input_closed_at: Option<Instant>,
     apps: Option<Vec<AppListEntry>>,
     /// Logical screen size from the last complete reading.
     screen_size: Option<(f64, f64)>,
@@ -108,21 +113,6 @@ fn plain_path(s: &str) -> String {
     }
     // The same app is reported under /private/var and /var.
     path.strip_prefix("/private").map(String::from).unwrap_or(path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::plain_path;
-
-    #[test]
-    fn paths_compare_across_spellings() {
-        assert_eq!(
-            plain_path("file:///private/var/containers/Bundle/Application/AB/My%20App.app/"),
-            "/var/containers/Bundle/Application/AB/My App.app"
-        );
-        assert_eq!(plain_path("/Applications/Preferences.app"), "/Applications/Preferences.app");
-        assert_eq!(plain_path("file:///Applications/%EB%A9%94%EB%AA%A8.app/x"), "/Applications/메모.app/x");
-    }
 }
 
 fn is_transport_error(msg: &str) -> bool {
@@ -166,6 +156,7 @@ impl Session {
             ax: None,
             input: None,
             input_used: Instant::now(),
+            input_closed_at: None,
             apps: None,
             screen_size: None,
             stale_before: None,
@@ -191,9 +182,16 @@ impl Session {
         Ok((tunnel.adapter.clone(), port))
     }
 
+    /// Abandon the input session without the orderly close (after an error).
+    pub fn drop_input(&mut self) {
+        if self.input.take().is_some() {
+            self.input_closed_at = Some(Instant::now());
+        }
+    }
+
     /// Drop every connection. The next request builds them again.
     pub fn reset(&mut self) {
-        self.input = None;
+        self.drop_input();
         self.ax = None;
         self.tunnel = None;
     }
@@ -384,12 +382,28 @@ impl Session {
             .input
             .as_ref()
             .is_some_and(|i| i.media_idle_ms().is_none_or(|ms| ms > 2500));
-        if stale {
-            if let Some(old) = self.input.take() {
+        if stale
+            && let Some(old) = self.input.take() {
                 old.close().await;
+                self.input_closed_at = Some(Instant::now());
             }
-        }
         if self.input.is_none() {
+            // A session opened right after another one ended sometimes took no
+            // input: 1 of 4 with under a second between them. Two or four
+            // seconds between them still lost 1 of 8 and 1 of 12 on a kept
+            // tunnel, while 24 of 24 worked after a daemon restart; the cause
+            // is not understood. `IPH_REOPEN_GAP_MS` overrides the gap.
+            if let Some(closed) = self.input_closed_at {
+                let gap = std::env::var("IPH_REOPEN_GAP_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .map(Duration::from_millis)
+                    .unwrap_or(REOPEN_GAP);
+                let since = closed.elapsed();
+                if since < gap {
+                    tokio::time::sleep(gap - since).await;
+                }
+            }
             let mut last = String::new();
             for attempt in 0..2 {
                 let tunnel = self.ensure_tunnel().await?;
@@ -424,11 +438,24 @@ impl Session {
     /// media stream keeps the phone encoding video.
     pub async fn close_idle_input(&mut self) {
         let idle = Duration::from_secs(self.config.daemon.input_idle_secs);
-        if self.input.is_some() && self.input_used.elapsed() > idle {
-            if let Some(s) = self.input.take() {
+        if self.input.is_some() && self.input_used.elapsed() > idle
+            && let Some(s) = self.input.take() {
                 s.close().await;
+                self.input_closed_at = Some(Instant::now());
             }
-        }
+    }
+
+    /// With `input_idle_secs = 0` the input session ends with each command,
+    /// so the phone shows "screen sharing" only while input is being sent.
+    /// For apps that hide their content or complain while the screen is
+    /// shared. Every input then pays for a new session (3 to 4 s), and the
+    /// first input of a new session was ignored 2 times in 20.
+    pub async fn close_input_if_unheld(&mut self) {
+        if self.config.daemon.input_idle_secs == 0
+            && let Some(s) = self.input.take() {
+                s.close().await;
+                self.input_closed_at = Some(Instant::now());
+            }
     }
 
     pub async fn shutdown(&mut self) {
@@ -570,5 +597,20 @@ impl Session {
         bounded("screenshot", 20, svc.take_screenshot(None, ImageFormat::Png))
             .await
             .map_err(|e| Fail::not_sent("screenshot_failed", e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain_path;
+
+    #[test]
+    fn paths_compare_across_spellings() {
+        assert_eq!(
+            plain_path("file:///private/var/containers/Bundle/Application/AB/My%20App.app/"),
+            "/var/containers/Bundle/Application/AB/My App.app"
+        );
+        assert_eq!(plain_path("/Applications/Preferences.app"), "/Applications/Preferences.app");
+        assert_eq!(plain_path("file:///Applications/%EB%A9%94%EB%AA%A8.app/x"), "/Applications/메모.app/x");
     }
 }

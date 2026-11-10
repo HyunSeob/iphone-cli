@@ -66,30 +66,26 @@ fn now_ms() -> u64 {
 
 struct Drain {
     last_packet_ms: Arc<AtomicU64>,
-    packets: Arc<AtomicU64>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Drain {
     fn start(sockets: Vec<UdpSocketHandle>) -> Self {
         let last_packet_ms = Arc::new(AtomicU64::new(0));
-        let packets = Arc::new(AtomicU64::new(0));
         let tasks = sockets
             .into_iter()
             .map(|s| {
                 let last = last_packet_ms.clone();
-                let n = packets.clone();
                 tokio::spawn(async move {
+                    // The media itself is not needed; only that it keeps coming.
                     while s.recv().await.is_ok() {
                         last.store(now_ms(), Ordering::Relaxed);
-                        n.fetch_add(1, Ordering::Relaxed);
                     }
                 })
             })
             .collect();
         Self {
             last_packet_ms,
-            packets,
             tasks,
         }
     }
@@ -217,10 +213,6 @@ impl InputSession {
     pub fn media_idle_ms(&self) -> Option<u64> {
         let last = self.drain.last_packet_ms.load(Ordering::Relaxed);
         (last > 0).then(|| now_ms().saturating_sub(last))
-    }
-
-    pub fn media_packets(&self) -> u64 {
-        self.drain.packets.load(Ordering::Relaxed)
     }
 
     async fn wait_since_release(&mut self, gap: Duration) {

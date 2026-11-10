@@ -1,3 +1,8 @@
+// A failed command carries its whole report (code, hint, candidates, screen
+// summary) in the error value. It is built once per failure and never copied
+// in a loop, so its size does not matter.
+#![allow(clippy::result_large_err)]
+
 pub mod actions;
 pub mod ax;
 pub mod client;

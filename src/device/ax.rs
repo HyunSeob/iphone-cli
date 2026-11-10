@@ -194,11 +194,10 @@ impl AxSub {
         loop {
             {
                 let s = self.state.lock().unwrap();
-                if s.initial_at.is_some_and(|at| at >= earliest) {
-                    if let Some(d) = s.initial.clone() {
+                if s.initial_at.is_some_and(|at| at >= earliest)
+                    && let Some(d) = s.initial.clone() {
                         return Some((s.seq, d));
                     }
-                }
                 if s.closed {
                     return None;
                 }
@@ -236,40 +235,16 @@ impl AxSub {
         (s.full_seq == seq).then(|| s.full.clone()).flatten()
     }
 
-    /// Wait for a first-pass dump newer than `after`.
-    pub async fn wait_newer(&mut self, after: u64, timeout: Duration) -> Option<(u64, Arc<Dump>)> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            {
-                let s = self.state.lock().unwrap();
-                if s.seq > after {
-                    if let Some(d) = s.initial.clone() {
-                        return Some((s.seq, d));
-                    }
-                }
-                if s.closed {
-                    return None;
-                }
-            }
-            let left = deadline.checked_duration_since(Instant::now())?;
-            match tokio::time::timeout(left, self.changed.changed()).await {
-                Ok(Ok(())) => {}
-                _ => return None,
-            }
-        }
-    }
-
     /// Wait for the second pass of reading `seq`.
     pub async fn wait_full(&mut self, seq: u64, timeout: Duration) -> Option<Arc<Dump>> {
         let deadline = Instant::now() + timeout;
         loop {
             {
                 let s = self.state.lock().unwrap();
-                if s.full_seq == seq {
-                    if let Some(d) = s.full.clone() {
+                if s.full_seq == seq
+                    && let Some(d) = s.full.clone() {
                         return Some(d);
                     }
-                }
                 // A newer reading replaced this one; its second pass will not come.
                 if s.seq > seq || s.closed {
                     return None;

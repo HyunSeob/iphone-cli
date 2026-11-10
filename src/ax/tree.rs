@@ -36,7 +36,7 @@ impl Rect {
         let y1 = self.y.max(other.y);
         let x2 = (self.x + self.w).min(other.x + other.w);
         let y2 = (self.y + self.h).min(other.y + other.h);
-        (x2 > x1 && y2 > y1).then(|| Rect {
+        (x2 > x1 && y2 > y1).then_some(Rect {
             x: x1,
             y: y1,
             w: x2 - x1,
@@ -127,6 +127,9 @@ pub struct Screen {
     pub apps: Vec<AppInfo>,
     pub elements: Vec<Element>,
 }
+
+/// Role, label, value and rounded frame of one element.
+pub type ElementSignature = (String, Option<String>, Option<String>, Option<(i64, i64, i64, i64)>);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BuildOptions {
@@ -312,7 +315,7 @@ impl Screen {
 
     /// What a comparison of two readings looks at: everything a user could
     /// see or an agent could act on, without handles.
-    pub fn signature(&self) -> Vec<(String, Option<String>, Option<String>, Option<(i64, i64, i64, i64)>)> {
+    pub fn signature(&self) -> Vec<ElementSignature> {
         self.elements
             .iter()
             .map(|e| {

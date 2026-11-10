@@ -27,11 +27,10 @@ pub async fn resolve_udid(flag: Option<String>) -> Result<String, Fail> {
     if let Some(u) = flag.filter(|u| !u.is_empty()) {
         return Ok(u);
     }
-    if let Ok(u) = std::env::var("IPH_UDID") {
-        if !u.is_empty() {
+    if let Ok(u) = std::env::var("IPH_UDID")
+        && !u.is_empty() {
             return Ok(u);
         }
-    }
     let config = Config::load().map_err(|e| Fail::not_sent("config_invalid", format!("{e:#}")))?;
     if let Some(u) = config.udid.filter(|u| !u.is_empty()) {
         return Ok(u);

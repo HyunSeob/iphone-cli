@@ -29,6 +29,7 @@ pub struct SafetyConfig {
 #[serde(default)]
 pub struct DaemonConfig {
     /// Close the touch-input media session after this many idle seconds.
+    /// 0 closes it at the end of every command.
     pub input_idle_secs: u64,
     /// Exit the daemon after this many idle seconds.
     pub idle_exit_secs: u64,

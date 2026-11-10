@@ -340,6 +340,9 @@ fn step_failure(
     out
 }
 
+/// Extra fields for a step's record and, for read steps, the value read.
+type StepOutput = (Map<String, Value>, Option<(String, Value)>);
+
 pub struct RunOptions {
     /// `--confirm <op_id>` for steps marked `confirm: true`.
     pub confirm: Option<String>,
@@ -574,8 +577,8 @@ impl Session {
         body: &Value,
         confirm_op: Option<&str>,
         needs_confirm: bool,
-    ) -> Res<(Map<String, Value>, Option<(String, Value)>)> {
-        fn no_value(f: Map<String, Value>) -> Res<(Map<String, Value>, Option<(String, Value)>)> {
+    ) -> Res<StepOutput> {
+        fn no_value(f: Map<String, Value>) -> Res<StepOutput> {
             Ok((f, None))
         }
         match kind {
@@ -873,11 +876,10 @@ impl Session {
             Ok(o) => o,
             Err(f) => return Err(f.with("recipe", recipe.name.clone())),
         };
-        if !recipe.output.is_empty() {
-            if let Some(Value::Object(all)) = out.get_mut("outputs") {
+        if !recipe.output.is_empty()
+            && let Some(Value::Object(all)) = out.get_mut("outputs") {
                 all.retain(|k, _| recipe.output.contains(k));
             }
-        }
         out.insert("recipe".into(), json!(recipe.name));
         out.insert("source".into(), json!(recipe.source));
         Ok(out)

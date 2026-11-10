@@ -258,13 +258,12 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
         Some(true) => Check::new("developer_mode", true),
         Some(false) => {
             let mut revealed = false;
-            if let Ok(r) = &route {
-                if let Some(Ok(mut amfi)) = with_timeout(AmfiClient::connect(&*r.provider)).await {
+            if let Ok(r) = &route
+                && let Some(Ok(mut amfi)) = with_timeout(AmfiClient::connect(&*r.provider)).await {
                     revealed = with_timeout(amfi.reveal_developer_mode_option_in_ui())
                         .await
                         .is_some_and(|r| r.is_ok());
                 }
-            }
             let mut c = Check::new("developer_mode", true).status("fail").action(
                 "설정 → 개인정보 보호 및 보안 → 개발자 모드 → 켜기 → 재시동 후 비밀번호를 입력하세요.",
                 "Settings → Privacy & Security → Developer Mode → turn on → restart, then enter the passcode.",

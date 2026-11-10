@@ -182,7 +182,9 @@ async fn handle(stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
             if let Err(f) = &result {
                 log(&format!("{cmd} -> {} {}", f.outcome.as_str(), f.code));
             }
-            envelope(result, started)
+            let reply = envelope(result, started);
+            session.close_input_if_unheld().await;
+            reply
         }
     };
     *shared.last_request.lock().unwrap() = Instant::now();

@@ -29,11 +29,10 @@ fn detect() -> Lang {
         }
     }
     for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
-        if let Ok(v) = std::env::var(key) {
-            if !v.is_empty() {
+        if let Ok(v) = std::env::var(key)
+            && !v.is_empty() {
                 return if v.to_lowercase().starts_with("ko") { Lang::Ko } else { Lang::En };
             }
-        }
     }
     Lang::En
 }

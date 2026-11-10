@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::{io::Read, time::Instant};
 
 use clap::{Parser, Subcommand};

@@ -279,21 +279,18 @@ impl Selector {
         if el.role == "application" && self.role.as_deref() != Some("application") {
             return false;
         }
-        if let Some(l) = &self.label {
-            if !l.matches(el.label.as_deref(), true) {
+        if let Some(l) = &self.label
+            && !l.matches(el.label.as_deref(), true) {
                 return false;
             }
-        }
-        if let Some(v) = &self.value {
-            if !v.matches(el.value.as_deref(), false) {
+        if let Some(v) = &self.value
+            && !v.matches(el.value.as_deref(), false) {
                 return false;
             }
-        }
-        if let Some(r) = &self.role {
-            if el.role != *r {
+        if let Some(r) = &self.role
+            && el.role != *r {
                 return false;
             }
-        }
         if let Some(id) = &self.id {
             let by_handle = matches!(id, TextMatch::Exact(want) if el.id == *want);
             if !by_handle && !id.matches(el.identifier.as_deref(), false) {
@@ -347,7 +344,7 @@ fn is_inside(el: &Element, container: &Element, screen: &Screen) -> bool {
 
 /// Reduce matches that are the same tap target (same label, frames nested or
 /// equal) to one. Anything left over is a real ambiguity.
-pub fn dedupe_targets<'a>(matches: Vec<&'a Element>) -> Vec<&'a Element> {
+pub fn dedupe_targets(matches: Vec<&Element>) -> Vec<&Element> {
     let mut out: Vec<&Element> = Vec::new();
     'next: for m in matches {
         for kept in out.iter_mut() {

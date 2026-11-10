@@ -17,7 +17,7 @@ application   "Settings"  @0,0 430x932
   …
 
 $ iph tap "General"
-{"ok":true,"outcome":"done","elapsed_ms":1863,"sent":true,"verified":true,"screen_changed":true,…}
+{"ok":true,"outcome":"done","elapsed_ms":1547,"sent":true,"verified":true,"screen_changed":true,…}
 ```
 
 ## Scope
@@ -31,7 +31,7 @@ $ iph tap "General"
 
 ## Install
 
-Rust 1.85 or later, and Xcode once (to pair the phone and for its developer disk image).
+Rust 1.88 or later, and Xcode once (to pair the phone and for its developer disk image).
 
 ```sh
 git clone https://github.com/HyunSeob/iphone-cli
@@ -101,7 +101,7 @@ Recipes, MCP and batch also take an object: `{label, label_contains, label_regex
 ### Results
 
 ```json
-{"ok": true, "outcome": "done", "elapsed_ms": 1863, "sent": true, "verified": true, "screen_changed": true, "element": {…}}
+{"ok": true, "outcome": "done", "elapsed_ms": 1547, "sent": true, "verified": true, "screen_changed": true, "element": {…}}
 {"ok": false, "outcome": "not_sent", "error": {"code": "not_found", "message": "…", "hint": "…"}, "elapsed_ms": 1210, "screen_summary": {…}}
 ```
 
@@ -129,7 +129,13 @@ udid = "00008130-…"
 add = ["donate"]
 remove = ["보내기"]
 only_apps = ["com.apple.Preferences", "com.apple.calculator"]
+
+[daemon]
+input_idle_secs = 120    # close the input session after this long unused; 0 closes it after every command
+idle_exit_secs = 1800    # the resident process exits after this long without requests
 ```
+
+Sending input needs the phone to be in "screen sharing" state (an indicator shows at the top of the phone). For an app that hides its content or warns while the screen is shared, set `input_idle_secs = 0`: the phone is then in that state only while input is being sent, at the price of 3 to 4 s more per input. In this mode the first input after a new session was sometimes ignored (2 of 20); the result then says `screen_changed: false`, so look at the screen before deciding. Reading does not depend on screen sharing.
 
 **Limit:** the guard reads labels and nothing else. A button without a label, or labelled differently (an icon-only pay button, "Next", "OK"), is not caught. In any flow where money or messages are at stake, mark the last step `confirm: true` yourself.
 
@@ -188,12 +194,12 @@ iPhone 15 Pro Max, iOS 27.0.1, Wi-Fi, with the resident process connected (2026-
 
 | Action | Time |
 |---|---|
-| `iph read` (Settings home, 10 runs) | median 1.20 s, max 1.37 s |
+| `iph read` (Settings home, 10 runs) | median 1.27 s, max 1.63 s |
 | `iph read --full` (10 runs) | median 1.45 s, max 1.79 s |
-| `iph tap` including the check (20 runs, 0 misses) | median 1.86 s, max 2.58 s |
+| `iph tap` including the check (20 runs, 0 misses) | median 1.55 s, max 2.82 s |
 | `iph scroll`, one step with check | 2.1 to 2.6 s |
 | `iph type` (Notes, with check and clipboard restore) | 2.5 to 5 s |
-| Recipe `settings-version` (5 steps) | 8.2 to 13.2 s |
+| Recipe `settings-version` (5 steps) | 9.5 to 11.3 s |
 | First `iph read` without a resident process (tunnel and subscription included) | about 2 to 3 s |
 
 A reading takes more than a second because of the phone: after a request it waits about 1.1 s in silence before it sends the screen. Details: [docs/how-it-works.md](docs/how-it-works.md) (Korean).

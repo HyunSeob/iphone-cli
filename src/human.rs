@@ -110,11 +110,10 @@ pub fn render(cmd: &str, v: &Value) -> String {
                     line.push_str(&format!("  ({d})"));
                 }
                 out.push(line);
-                if c["status"] != "ok" {
-                    if let Some(a) = c["user_action"].as_str() {
+                if c["status"] != "ok"
+                    && let Some(a) = c["user_action"].as_str() {
                         out.push(format!("    → {a}"));
                     }
-                }
             }
             out.push(if v["ready"] == true { "ready".into() } else { "not ready".to_string() });
         }

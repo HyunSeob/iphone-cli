@@ -16,7 +16,7 @@ use crate::{
     },
     fields,
     i18n::t,
-    reply::{Fail, Fields, Res},
+    reply::{Fail, Res},
     safety::{self, OpRecord},
     selector::{Selector, dedupe_targets},
 };
@@ -145,23 +145,20 @@ pub enum Target {
 }
 
 pub fn parse_target(v: &Value) -> Res<Target> {
-    if let Some(obj) = v.as_object() {
-        if let (Some(x), Some(y)) = (
+    if let Some(obj) = v.as_object()
+        && let (Some(x), Some(y)) = (
             obj.get("x").and_then(|n| n.as_f64()),
             obj.get("y").and_then(|n| n.as_f64()),
-        ) {
-            if obj.len() == 2 {
+        )
+            && obj.len() == 2 {
                 return Ok(Target::Point(x, y));
             }
-        }
-    }
     if let Some(s) = v.as_str() {
         let parts: Vec<&str> = s.split(',').map(|p| p.trim()).collect();
-        if parts.len() == 2 {
-            if let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+        if parts.len() == 2
+            && let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
                 return Ok(Target::Point(x, y));
             }
-        }
     }
     Selector::from_value(v)
         .map(Target::Selector)
@@ -276,12 +273,11 @@ impl Session {
         let (seq, mut screen) = self
             .screen(fresh, args.full || args.raw, Self::build_opts(args.all, args.raw))
             .await?;
-        if args.app {
-            if let Some(front) = screen.apps.first().map(|a| a.pid) {
+        if args.app
+            && let Some(front) = screen.apps.first().map(|a| a.pid) {
                 screen.elements.retain(|e| e.pid == front);
                 screen.apps.retain(|a| a.pid == front);
             }
-        }
         let has_ids = screen.elements.iter().any(|e| e.identifier.is_some());
         Ok(fields! {
             "screen": {"width": screen.width, "height": screen.height},
@@ -400,11 +396,10 @@ impl Session {
         if args.double && args.long_ms.is_some() {
             return Err(Fail::invalid("--double and --long cannot be combined"));
         }
-        if let Some(ms) = args.long_ms {
-            if !(1..=60_000).contains(&ms) {
+        if let Some(ms) = args.long_ms
+            && !(1..=60_000).contains(&ms) {
                 return Err(Fail::invalid("--long must be 1..60000 ms"));
             }
-        }
         let target = parse_target(&args.target)?;
         let need_ids = matches!(&target, Target::Selector(s) if s.needs_identifier());
         let (_, screen) = self
@@ -451,7 +446,7 @@ impl Session {
         };
         if let Err(e) = sent {
             // The report may or may not have reached the phone.
-            self.input = None;
+            self.drop_input();
             Self::finish_op(op, "unknown");
             let mut fail = Fail::unknown("input_failed", format!("{e:#}")).hint(t(
                 "입력이 나갔을 수 있습니다. 다시 보내지 말고 `iph read`로 화면을 확인하세요.",
@@ -539,7 +534,7 @@ impl Session {
         let input = self.ensure_input().await?;
         for (i, (nx, ny)) in normalized.iter().enumerate() {
             if let Err(e) = input.tap(*nx, *ny, Duration::from_millis(50)).await {
-                self.input = None;
+                self.drop_input();
                 return Err(Fail::unknown("input_failed", format!("{e:#}"))
                     .hint(t(
                         "입력이 일부 나갔을 수 있습니다. 다시 보내지 말고 `iph read`로 화면을 확인하세요.",
@@ -588,7 +583,7 @@ impl Session {
         let b = (normalize(to.0, screen.width), normalize(to.1, screen.height));
         let input = self.ensure_input().await?;
         if let Err(e) = input.drag(a, b, duration, motion).await {
-            self.input = None;
+            self.drop_input();
             return Err(Fail::unknown("input_failed", format!("{e:#}")).hint(t(
                 "입력이 나갔을 수 있습니다. 다시 보내지 말고 `iph read`로 화면을 확인하세요.",
                 "The input may have gone out. Do not resend; check the screen with `iph read`.",
@@ -754,7 +749,7 @@ impl Session {
         let before = Some(screen.signature());
         let input = self.ensure_input().await?;
         if let Err(e) = input.key(usage, &modifiers).await {
-            self.input = None;
+            self.drop_input();
             return Err(Fail::unknown("input_failed", format!("{e:#}")));
         }
         let changed = match before {
@@ -778,7 +773,7 @@ impl Session {
         let before = Some(screen.signature());
         let input = self.ensure_input().await?;
         if let Err(e) = input.button(page, usage, Duration::from_millis(hold)).await {
-            self.input = None;
+            self.drop_input();
             return Err(Fail::unknown("input_failed", format!("{e:#}")));
         }
         let changed = match before {
@@ -871,12 +866,11 @@ impl Session {
         let mut foreground = false;
         let mut delay = AFTER_LAUNCH;
         for _ in 0..4 {
-            if let Some((_, screen)) = self.observe(delay).await {
-                if screen.apps.iter().any(|a| a.pid == pid) {
+            if let Some((_, screen)) = self.observe(delay).await
+                && screen.apps.iter().any(|a| a.pid == pid) {
                     foreground = true;
                     break;
                 }
-            }
             delay = Duration::from_millis(300);
         }
         Ok(fields! {
@@ -944,13 +938,12 @@ impl Session {
             // Nothing has been touched: the clipboard still holds the user's content.
             return Err(Fail::not_sent("keyboard_failed", format!("{e:#}")));
         }
-        if !args.text.is_empty() {
-            if let Err(e) = Clipboard::set_text(&adapter, port, &args.text).await {
+        if !args.text.is_empty()
+            && let Err(e) = Clipboard::set_text(&adapter, port, &args.text).await {
                 let _ = input.keyboard_detach().await;
                 self.invalidate_readings();
                 return Err(Fail::not_sent("clipboard_failed", e));
             }
-        }
         trace(|| "type: clipboard set".into());
 
         let cmd = vec![crate::keys::MOD_COMMAND];
@@ -966,7 +959,7 @@ impl Session {
         trace(|| "type: keys sent".into());
         if let Err(e) = pressed {
             let _ = input.keyboard_detach().await;
-            self.input = None;
+            self.drop_input();
             self.invalidate_readings();
             let restored = saved.restore(&adapter, port, &args.text).await;
             return Err(Fail::unknown("input_failed", format!("{e:#}"))
@@ -1015,19 +1008,17 @@ impl Session {
 
         let mut submitted = false;
         let mut submit_error = None;
-        if verified && args.submit {
-            if let Some(input) = self.input.as_mut() {
+        if verified && args.submit
+            && let Some(input) = self.input.as_mut() {
                 match input.keyboard_press(&[(crate::keys::KEY_RETURN, vec![])]).await {
                     Ok(()) => submitted = true,
                     Err(e) => submit_error = Some(format!("{e:#}")),
                 }
             }
-        }
-        if let Some(input) = self.input.as_mut() {
-            if input.keyboard_detach().await.is_err() {
-                self.input = None;
+        if let Some(input) = self.input.as_mut()
+            && input.keyboard_detach().await.is_err() {
+                self.drop_input();
             }
-        }
         // The on-screen keyboard comes back now; readings from before show
         // the screen without it.
         self.invalidate_readings();
@@ -1046,7 +1037,7 @@ impl Session {
             .with("clipboard_restored", restored));
         }
         if let Some(e) = submit_error {
-            self.input = None;
+            self.drop_input();
             return Err(Fail::unknown("input_failed", e)
                 .with("text_verified", true)
                 .with("clipboard_restored", restored));
@@ -1172,9 +1163,4 @@ impl Clipboard {
             (None, _) => false,
         }
     }
-}
-
-/// Fields of a result as a JSON object.
-pub fn to_value(fields: Fields) -> Value {
-    Value::Object(fields)
 }
