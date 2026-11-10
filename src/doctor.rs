@@ -6,7 +6,10 @@
 
 use std::time::Duration;
 
-use idevice::{IdeviceService, amfi::AmfiClient, usbmuxd::UsbmuxdConnection};
+use idevice::{
+    IdeviceService, amfi::AmfiClient, lockdown::LockdownClient,
+    mobile_image_mounter::ImageMounter, provider::IdeviceProvider, usbmuxd::UsbmuxdConnection,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -83,6 +86,134 @@ async fn with_timeout<T>(fut: impl std::future::Future<Output = T>) -> Option<T>
     tokio::time::timeout(Duration::from_secs(15), fut).await.ok()
 }
 
+struct LockdownFacts {
+    developer_mode: Option<bool>,
+    /// `PasswordProtected`: true while the phone is locked with a passcode.
+    locked: Option<bool>,
+}
+
+/// What lockdown says about Developer Mode and the lock. Read-only.
+async fn lockdown_facts(provider: &dyn IdeviceProvider) -> LockdownFacts {
+    let mut facts = LockdownFacts { developer_mode: None, locked: None };
+    // The image mounter answers the Developer Mode question most reliably;
+    // the AMFI service closed the connection on iOS 27.0.1 over Wi-Fi.
+    if let Some(Ok(mut mounter)) = with_timeout(ImageMounter::connect(provider)).await {
+        facts.developer_mode = with_timeout(mounter.query_developer_mode_status())
+            .await
+            .and_then(|r| r.ok());
+    }
+    if let Some(Ok(mut lockdown)) = with_timeout(LockdownClient::connect(provider)).await {
+        if let Some(Ok(pairing)) = with_timeout(provider.get_pairing_file()).await {
+            let _ = with_timeout(lockdown.start_session(&pairing)).await;
+        }
+        if facts.developer_mode.is_none() {
+            facts.developer_mode = with_timeout(
+                lockdown.get_value(Some("DeveloperModeStatus"), Some("com.apple.security.mac.amfi")),
+            )
+            .await
+            .and_then(|r| r.ok())
+            .and_then(|v| v.as_boolean());
+        }
+        facts.locked = with_timeout(lockdown.get_value(Some("PasswordProtected"), None))
+            .await
+            .and_then(|r| r.ok())
+            .and_then(|v| v.as_boolean());
+    }
+    facts
+}
+
+/// Developer services the tunnel does not offer. `Err` when the tunnel itself
+/// cannot be opened.
+async fn missing_services(s: &mut Session) -> Result<Vec<&'static str>, String> {
+    match s.ensure_tunnel().await {
+        Ok(tunnel) => Ok(NEEDED_SERVICES
+            .iter()
+            .filter(|name| !tunnel.rsd.services.contains_key(**name))
+            .copied()
+            .collect()),
+        Err(f) => Err(f.message),
+    }
+}
+
+fn hex_field(v: Option<&plist::Value>) -> Option<u64> {
+    match v? {
+        plist::Value::String(s) => u64::from_str_radix(s.trim_start_matches("0x"), 16).ok(),
+        plist::Value::Integer(i) => i.as_unsigned(),
+        _ => None,
+    }
+}
+
+/// Mount the personalized developer disk image that Xcode keeps on this Mac.
+///
+/// Written from the documented flow (match the build identity to the phone's
+/// board and chip, have Apple sign it, upload, mount). It could not be tried
+/// on the test phone, whose image was already mounted.
+async fn mount_ddi(provider: &dyn IdeviceProvider) -> anyhow::Result<()> {
+    use anyhow::{Context, anyhow};
+    let home = std::env::var("HOME").unwrap_or_default();
+    let restore = [
+        "/Library/Developer/DeveloperDiskImages/iOS_DDI/Restore".to_string(),
+        format!("{home}/Library/Developer/DeveloperDiskImages/iOS_DDI/Restore"),
+    ]
+    .into_iter()
+    .map(std::path::PathBuf::from)
+    .find(|p| p.join("BuildManifest.plist").exists())
+    .ok_or_else(|| anyhow!("no developer disk image on this Mac (Xcode is needed once)"))?;
+
+    let manifest_bytes = std::fs::read(restore.join("BuildManifest.plist"))?;
+    let manifest: plist::Value = plist::from_bytes(&manifest_bytes).context("BuildManifest.plist")?;
+
+    let mut lockdown = LockdownClient::connect(provider)
+        .await
+        .map_err(|e| anyhow!("lockdown: {e:?}"))?;
+    if let Ok(pairing) = provider.get_pairing_file().await {
+        let _ = lockdown.start_session(&pairing).await;
+    }
+    let number = |v: plist::Value| v.as_unsigned_integer();
+    let board = lockdown.get_value(Some("BoardId"), None).await.ok().and_then(number);
+    let chip = lockdown.get_value(Some("ChipID"), None).await.ok().and_then(number);
+    let ecid = lockdown
+        .get_value(Some("UniqueChipID"), None)
+        .await
+        .ok()
+        .and_then(number)
+        .ok_or_else(|| anyhow!("the phone did not report its chip id"))?;
+
+    let identities = manifest
+        .as_dictionary()
+        .and_then(|d| d.get("BuildIdentities"))
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("BuildManifest has no BuildIdentities"))?;
+    let identity = identities
+        .iter()
+        .filter_map(|i| i.as_dictionary())
+        .find(|i| hex_field(i.get("ApBoardID")) == board && hex_field(i.get("ApChipID")) == chip)
+        .ok_or_else(|| anyhow!("no developer disk image on this Mac matches this phone model"))?;
+    let path_of = |component: &str| -> anyhow::Result<std::path::PathBuf> {
+        identity
+            .get("Manifest")
+            .and_then(|m| m.as_dictionary())
+            .and_then(|m| m.get(component))
+            .and_then(|c| c.as_dictionary())
+            .and_then(|c| c.get("Info"))
+            .and_then(|i| i.as_dictionary())
+            .and_then(|i| i.get("Path"))
+            .and_then(|p| p.as_string())
+            .map(|p| restore.join(p))
+            .ok_or_else(|| anyhow!("BuildManifest has no path for {component}"))
+    };
+    let image = std::fs::read(path_of("PersonalizedDMG")?)?;
+    let trust_cache = std::fs::read(path_of("LoadableTrustCache")?)?;
+
+    let mut mounter = ImageMounter::connect(provider)
+        .await
+        .map_err(|e| anyhow!("image mounter: {e:?}"))?;
+    mounter
+        .mount_personalized(provider, image, trust_cache, &manifest_bytes, None, ecid)
+        .await
+        .map_err(|e| anyhow!("mount: {e:?}"))
+}
+
 pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
     let mut checks: Vec<Check> = Vec::new();
     let skip = |name: &'static str, required: bool, why: &str| {
@@ -118,65 +249,84 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
     });
 
     // 3. Developer Mode. If it is off, make the switch appear in Settings.
-    let mut dev_mode = None;
-    if let Ok(r) = &route {
-        if let Some(Ok(mut amfi)) = with_timeout(AmfiClient::connect(&*r.provider)).await {
-            dev_mode = with_timeout(amfi.get_developer_mode_status()).await.and_then(|r| r.ok());
-            if dev_mode == Some(false) {
-                let revealed = with_timeout(amfi.reveal_developer_mode_option_in_ui())
-                    .await
-                    .is_some_and(|r| r.is_ok());
-                let mut c = Check::new("developer_mode", true).status("fail").action(
-                    "설정 → 개인정보 보호 및 보안 → 개발자 모드 → 켜기 → 재시동 후 비밀번호를 입력하세요.",
-                    "Settings → Privacy & Security → Developer Mode → turn on → restart, then enter the passcode.",
-                );
-                c.auto_fixed = revealed;
-                if revealed {
-                    c = c.detail("the Developer Mode switch was made visible in Settings");
+    let facts = match &route {
+        Ok(r) => Some(lockdown_facts(&*r.provider).await),
+        Err(_) => None,
+    };
+    let dev_mode = facts.as_ref().and_then(|f| f.developer_mode);
+    checks.push(match dev_mode {
+        Some(true) => Check::new("developer_mode", true),
+        Some(false) => {
+            let mut revealed = false;
+            if let Ok(r) = &route {
+                if let Some(Ok(mut amfi)) = with_timeout(AmfiClient::connect(&*r.provider)).await {
+                    revealed = with_timeout(amfi.reveal_developer_mode_option_in_ui())
+                        .await
+                        .is_some_and(|r| r.is_ok());
                 }
-                checks.push(c);
             }
+            let mut c = Check::new("developer_mode", true).status("fail").action(
+                "설정 → 개인정보 보호 및 보안 → 개발자 모드 → 켜기 → 재시동 후 비밀번호를 입력하세요.",
+                "Settings → Privacy & Security → Developer Mode → turn on → restart, then enter the passcode.",
+            );
+            c.auto_fixed = revealed;
+            if revealed {
+                c = c.detail("the Developer Mode switch was made visible in Settings");
+            }
+            c
         }
-    }
-    match dev_mode {
-        Some(true) => checks.push(Check::new("developer_mode", true)),
-        Some(false) => {}
-        None => checks.push(if route.is_ok() {
-            Check::new("developer_mode", true)
-                .status("warn")
-                .detail("could not ask the phone; judged by the services below")
-        } else {
-            skip("developer_mode", true, "phone not reachable")
-        }),
-    }
+        None if route.is_ok() => Check::new("developer_mode", true)
+            .status("warn")
+            .detail("could not ask the phone; judged by the services below"),
+        None => skip("developer_mode", true, "phone not reachable"),
+    });
 
     // 4. Developer disk image: its services must be on offer over the tunnel.
     let mut services_ok = false;
-    if route.is_ok() {
-        match s.ensure_tunnel().await {
-            Ok(tunnel) => {
-                let missing: Vec<&str> = NEEDED_SERVICES
-                    .iter()
-                    .filter(|name| !tunnel.rsd.services.contains_key(**name))
-                    .copied()
-                    .collect();
-                services_ok = missing.is_empty();
-                checks.push(if services_ok {
-                    Check::new("developer_disk_image", true)
-                } else {
-                    Check::new("developer_disk_image", true)
-                        .status("fail")
-                        .detail(format!("missing services: {}", missing.join(", ")))
-                        .action(
-                            "Xcode를 열고 창 → 기기 및 시뮬레이터에서 이 폰을 한 번 선택하면 개발자 디스크 이미지가 연결됩니다. 그 뒤 다시 `iph doctor`를 실행하세요.",
-                            "Open Xcode → Window → Devices and Simulators and select this phone once; that mounts the developer disk image. Then run `iph doctor` again.",
-                        )
-                });
+    if route.is_ok() && dev_mode != Some(false) {
+        let mut missing = missing_services(s).await;
+        let mut mounted_now = false;
+        let mut mount_note = None;
+        if matches!(&missing, Ok(m) if !m.is_empty()) {
+            // Try to mount the image Xcode keeps on this Mac, then look again.
+            if let Ok(r) = &route {
+                match tokio::time::timeout(Duration::from_secs(180), mount_ddi(&*r.provider)).await {
+                    Ok(Ok(())) => {
+                        mounted_now = true;
+                        s.reset();
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        missing = missing_services(s).await;
+                    }
+                    Ok(Err(e)) => mount_note = Some(format!("automatic mount failed: {e:#}")),
+                    Err(_) => mount_note = Some("automatic mount timed out".to_string()),
+                }
             }
-            Err(f) => checks.push(
+        }
+        match missing {
+            Ok(m) if m.is_empty() => {
+                services_ok = true;
+                let mut c = Check::new("developer_disk_image", true);
+                c.auto_fixed = mounted_now;
+                if mounted_now {
+                    c = c.detail("mounted the developer disk image from Xcode's folder");
+                }
+                checks.push(c);
+            }
+            Ok(m) => {
+                let mut detail = format!("missing services: {}", m.join(", "));
+                if let Some(note) = mount_note {
+                    detail.push_str("; ");
+                    detail.push_str(&note);
+                }
+                checks.push(Check::new("developer_disk_image", true).status("fail").detail(detail).action(
+                    "Xcode를 열고 창 → 기기 및 시뮬레이터에서 이 폰을 한 번 선택하면 개발자 디스크 이미지가 연결됩니다. 그 뒤 다시 `iph doctor`를 실행하세요.",
+                    "Open Xcode → Window → Devices and Simulators and select this phone once; that mounts the developer disk image. Then run `iph doctor` again.",
+                ));
+            }
+            Err(message) => checks.push(
                 Check::new("developer_disk_image", true)
                     .status("fail")
-                    .detail(f.message)
+                    .detail(message)
                     .action(
                         "폰 잠금을 풀고 다시 시도하세요. 계속 실패하면 USB로 연결하세요.",
                         "Unlock the phone and try again. If it keeps failing, connect by USB.",
@@ -184,7 +334,11 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
             ),
         }
     } else {
-        checks.push(skip("developer_disk_image", true, "phone not reachable"));
+        checks.push(skip(
+            "developer_disk_image",
+            true,
+            if route.is_ok() { "Developer Mode is off" } else { "phone not reachable" },
+        ));
     }
 
     // 5. Wi-Fi (recommended): works without the cable.
@@ -208,9 +362,16 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
         None => skip("wifi", false, "phone not reachable"),
     });
 
-    // 6. Unlocked: Settings can be brought to the front and read.
+    // 6. Unlocked: lockdown says so, and Settings can be brought to the front.
     let mut front_ok = false;
-    if services_ok {
+    if facts.as_ref().and_then(|f| f.locked) == Some(true) {
+        checks.push(
+            Check::new("screen_unlocked", true)
+                .status("fail")
+                .detail("the phone reports that it is locked")
+                .action("폰 잠금을 풀어 주세요.", "Unlock the phone."),
+        );
+    } else if services_ok {
         let launched = s.cmd_launch(LaunchArgs { app: SETTINGS.into(), restart: false }).await;
         match launched {
             Ok(r) if r.get("foreground").and_then(|v| v.as_bool()) == Some(true) => {

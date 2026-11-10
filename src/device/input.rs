@@ -48,6 +48,15 @@ const TOUCH_GAP: Duration = Duration::from_millis(150);
 /// Time between registering the temporary keyboard and its first key.
 const KEYBOARD_ATTACH: Duration = Duration::from_millis(700);
 
+/// `WARMUP`, or `IPH_INPUT_WARMUP_MS` when set (for tuning).
+fn warmup() -> Duration {
+    std::env::var("IPH_INPUT_WARMUP_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(WARMUP)
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -177,8 +186,10 @@ impl InputSession {
             .map_err(|e| anyhow!("start video stream: {e:?}"))?;
 
         let drain = Drain::start(vec![audio_udp, video_udp]);
-        tokio::time::sleep(WARMUP).await;
 
+        // Connect the HID services first and only then wait: a report sent
+        // the instant a HID connection came up was sometimes lost, and with
+        // it the whole first gesture.
         let hid = UniversalHidServiceClient::connect_rsd(adapter, rsd)
             .await
             .map_err(|e| anyhow!("hid service: {e:?}"))?;
@@ -186,6 +197,7 @@ impl InputSession {
             .await
             .map_err(|e| anyhow!("hid service (keyboard): {e:?}"))?;
         let indigo = IndigoHidClient::connect_rsd(adapter, rsd).await.ok();
+        tokio::time::sleep(warmup()).await;
 
         Ok(Self {
             display,

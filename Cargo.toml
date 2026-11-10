@@ -29,6 +29,7 @@ idevice = { version = "=0.1.68", features = [
   "dvt",
   "amfi",
   "mobile_image_mounter",
+  "tss",
   "heartbeat",
 ] }
 tokio = { version = "1", features = ["full"] }
