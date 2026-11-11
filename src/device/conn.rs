@@ -81,6 +81,22 @@ fn recall_ip(udid: &str) -> Option<IpAddr> {
     std::fs::read_to_string(ip_cache(udid)).ok()?.trim().parse().ok()
 }
 
+/// What lockdown says about the passcode lock (`PasswordProtected`: true
+/// while the phone is locked). `None` when lockdown did not say. Read-only.
+pub async fn passcode_locked(provider: &dyn IdeviceProvider) -> Option<bool> {
+    use idevice::lockdown::LockdownClient;
+    let wait = |secs| Duration::from_secs(secs);
+    let mut lockdown = tokio::time::timeout(wait(8), LockdownClient::connect(provider)).await.ok()?.ok()?;
+    if let Ok(Ok(pairing)) = tokio::time::timeout(wait(8), provider.get_pairing_file()).await {
+        let _ = tokio::time::timeout(wait(8), lockdown.start_session(&pairing)).await;
+    }
+    tokio::time::timeout(wait(8), lockdown.get_value(Some("PasswordProtected"), None))
+        .await
+        .ok()?
+        .ok()?
+        .as_boolean()
+}
+
 pub struct Route {
     pub provider: Box<dyn IdeviceProvider>,
     /// "usb" | "wifi"

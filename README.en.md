@@ -56,7 +56,8 @@ iph setup                     # walks through what the phone needs
 | `connection` | yes | The phone is visible over USB or the same Wi-Fi |
 | `developer_mode` | yes | Settings → Privacy & Security → Developer Mode. If it is off, `iph doctor` makes that switch appear |
 | `developer_disk_image` | yes | Source of the accessibility, display and input services. When missing, `iph doctor` fetches and installs it (see Install) |
-| `screen_unlocked` | yes | The phone is unlocked |
+| `screen_unlocked` | yes | The phone is unlocked. Only lockdown's word decides a lock |
+| `settings_in_front` | yes | Settings comes to the front (fails when something covers it). When the screen cannot be read, `accessibility_tree` fails instead |
 | `accessibility_tree` | yes | Screen elements can really be read |
 | `touch_input` | yes | Scrolls the Settings list down one step and back to see that touch lands (`--no-touch-test` skips it) |
 | `wifi` | recommended | For working without the cable |
@@ -149,7 +150,7 @@ dnd_idle_secs = 300      # put it back after this long without a command; 0 = on
 input_idle_secs = 120    # close the input session after this long unused; 0 closes it after every command
 idle_exit_secs = 1800    # the resident process exits after this long without requests
 screen_video = false     # also take the screen video while sending input. Touches do not need it, and over Wi-Fi it clogs the tunnel
-restart_accessibility = true  # when the phone's accessibility daemon stops answering, end it so the phone starts a new one (takes about 20 s)
+restart_accessibility = true  # when the phone's accessibility daemon stops answering or answers only with empty readings, end it so the phone starts a new one (takes about 20 s)
 
 [script]
 timeout_secs = 300       # how long one script may run (840 at most)

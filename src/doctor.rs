@@ -114,11 +114,8 @@ async fn lockdown_facts(provider: &dyn IdeviceProvider) -> LockdownFacts {
             .and_then(|r| r.ok())
             .and_then(|v| v.as_boolean());
         }
-        facts.locked = with_timeout(lockdown.get_value(Some("PasswordProtected"), None))
-            .await
-            .and_then(|r| r.ok())
-            .and_then(|v| v.as_boolean());
     }
+    facts.locked = conn::passcode_locked(provider).await;
     facts
 }
 
@@ -205,6 +202,81 @@ async fn mount_ddi(provider: &dyn IdeviceProvider) -> anyhow::Result<()> {
         .mount_personalized(provider, image, trust_cache, &manifest_bytes, None, ecid)
         .await
         .map_err(|e| anyhow!("mount: {e:?}"))
+}
+
+/// The checks for "the phone is unlocked and Settings is in front", and
+/// whether Settings is in front.
+///
+/// `locked`: lockdown's word. `launched`: whether the launch of Settings was
+/// seen in front, or why it failed; `None` when not tried. `read`: when it was
+/// not seen, a reading taken after: whether Settings is in front on it, or why
+/// it failed.
+fn front_checks(
+    locked: Option<bool>,
+    launched: Option<Result<bool, String>>,
+    read: Option<Result<bool, String>>,
+) -> (Vec<Check>, bool) {
+    let mut out = Vec::new();
+    if locked == Some(true) {
+        out.push(
+            Check::new("screen_unlocked", true)
+                .status("fail")
+                .detail("the phone reports that it is locked")
+                .action("폰 잠금을 풀어 주세요.", "Unlock the phone."),
+        );
+        return (out, false);
+    }
+    let unlocked = match locked {
+        Some(false) => Check::new("screen_unlocked", true).detail("lockdown: not locked"),
+        _ => Check::new("screen_unlocked", true).detail("lockdown did not say; Settings came to the front"),
+    };
+    if launched == Some(Ok(true)) || read == Some(Ok(true)) {
+        out.push(unlocked);
+        return (out, true);
+    }
+    match (&launched, &read) {
+        (_, Some(Err(why))) => {
+            // The screen cannot be read: that is what to report, lock or not.
+            out.push(match locked {
+                Some(false) => Check::new("screen_unlocked", true).detail("lockdown: not locked"),
+                _ => Check::new("screen_unlocked", true)
+                    .status("skipped")
+                    .detail("lockdown did not say, and the screen cannot be read"),
+            });
+            out.push(
+                Check::new("accessibility_tree", true)
+                    .status("fail")
+                    .detail(why.clone())
+                    .action(
+                        "화면 읽기 응답이 없습니다(폰의 화면 읽기 서비스 axauditd). iph가 그 서비스를 다시 띄웠거나 2분 안에 다시 띄웁니다. 잠시 뒤 `iph doctor`를 다시 실행하고, 계속되면 폰을 재시동하세요.",
+                        "No answer from the phone's screen reading (its axauditd service). iph has restarted it or will within 2 minutes. Run `iph doctor` again shortly; if it keeps failing, restart the phone.",
+                    ),
+            );
+        }
+        (Some(Err(why)), _) => {
+            out.push(unlocked);
+            out.push(
+                Check::new("settings_in_front", true)
+                    .status("fail")
+                    .detail(why.clone())
+                    .action("설정 앱을 열지 못했습니다. 폰 화면을 확인하고 다시 시도하세요.", "Settings could not be opened. Check the phone's screen and try again."),
+            );
+        }
+        _ => {
+            // The screen reads, and shows something else.
+            out.push(unlocked);
+            out.push(
+                Check::new("settings_in_front", true)
+                    .status("fail")
+                    .detail("Settings was launched but another screen is in front")
+                    .action(
+                        "설정 앱이 앞에 나오지 않았습니다. 다른 창이나 알림이 가리고 있는지 폰 화면을 확인하세요.",
+                        "Settings did not come to the front. Check the phone's screen for a window or alert in the way.",
+                    ),
+            );
+        }
+    }
+    (out, false)
 }
 
 pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
@@ -373,33 +445,42 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
         None => skip("wifi", false, "phone not reachable"),
     });
 
-    // 6. Unlocked: lockdown says so, and Settings can be brought to the front.
+    // 6. Unlocked, and Settings comes to the front. Only lockdown's word
+    // makes this a lock: a launch that cannot be seen in front can as well
+    // be a screen that cannot be read (2026-11-11: 25 minutes of "unlock the
+    // phone" on an unlocked phone whose accessibility daemon answered only
+    // with empty readings).
+    let locked = facts.as_ref().and_then(|f| f.locked);
     let mut front_ok = false;
-    if facts.as_ref().and_then(|f| f.locked) == Some(true) {
-        checks.push(
-            Check::new("screen_unlocked", true)
-                .status("fail")
-                .detail("the phone reports that it is locked")
-                .action("폰 잠금을 풀어 주세요.", "Unlock the phone."),
-        );
-    } else if services_ok {
-        let launched = s.cmd_launch(LaunchArgs { app: SETTINGS.into(), restart: false }).await;
-        match launched {
-            Ok(r) if r.get("foreground").and_then(|v| v.as_bool()) == Some(true) => {
-                front_ok = true;
-                checks.push(Check::new("screen_unlocked", true));
+    let mut tree_reported = false;
+    if locked == Some(true) || services_ok {
+        let launched = if locked == Some(true) {
+            None
+        } else {
+            Some(match s.cmd_launch(LaunchArgs { app: SETTINGS.into(), restart: false }).await {
+                Ok(r) => Ok((
+                    r.get("foreground").and_then(|v| v.as_bool()) == Some(true),
+                    r.get("pid").and_then(|v| v.as_i64()),
+                )),
+                Err(f) => Err(f.message),
+            })
+        };
+        // Not seen in front: is the screen readable at all, and what is on it?
+        let read = match &launched {
+            None | Some(Ok((true, _))) => None,
+            Some(other) => {
+                let pid = other.as_ref().ok().and_then(|(_, pid)| *pid);
+                Some(match s.screen(Fresh::Force, false, BuildOptions::default()).await {
+                    Ok((_, screen)) => Ok(pid.is_some_and(|p| screen.apps.iter().any(|a| a.pid == p))),
+                    Err(f) => Err(f.message),
+                })
             }
-            Ok(_) => checks.push(Check::new("screen_unlocked", true).status("fail").action(
-                "폰 잠금을 풀어 주세요.",
-                "Unlock the phone.",
-            )),
-            Err(f) => checks.push(
-                Check::new("screen_unlocked", true)
-                    .status("fail")
-                    .detail(f.message)
-                    .action("폰 잠금을 풀어 주세요.", "Unlock the phone."),
-            ),
-        }
+        };
+        let launched = launched.map(|l| l.map(|(front, _)| front));
+        let (found, front) = front_checks(locked, launched, read);
+        tree_reported = found.iter().any(|c| c.check == "accessibility_tree");
+        front_ok = front;
+        checks.extend(found);
     } else {
         checks.push(skip("screen_unlocked", true, "developer services unavailable"));
     }
@@ -429,7 +510,7 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
                     ),
             ),
         }
-    } else {
+    } else if !tree_reported {
         checks.push(skip("accessibility_tree", true, "Settings is not in front"));
     }
 
@@ -513,4 +594,64 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
         "failing": failing,
         "checks": checks,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn says(checks: &[Check]) -> String {
+        checks
+            .iter()
+            .map(|c| format!("{} {} {}", c.check, c.status, c.user_action.as_deref().unwrap_or("")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn an_unreadable_screen_on_an_unlocked_phone_is_not_called_a_lock() {
+        // 2026-11-11: lockdown said unlocked, the launch could not be seen in
+        // front because no reading came, and doctor said "unlock the phone".
+        let (checks, front) = front_checks(
+            Some(false),
+            Some(Ok(false)),
+            Some(Err("no accessibility tree within 14000 ms (3 empty, 0 not understood)".into())),
+        );
+        let text = says(&checks);
+        assert!(!front);
+        assert!(!text.contains("잠금을 풀") && !text.contains("Unlock"), "{text}");
+        assert!(text.contains("screen_unlocked ok"), "{text}");
+        assert!(text.contains("accessibility_tree fail"), "{text}");
+        // Lockdown not answering is no reason to call it a lock either.
+        let (checks, _) = front_checks(None, Some(Ok(false)), Some(Err("ax_timeout".into())));
+        let text = says(&checks);
+        assert!(!text.contains("잠금을 풀") && !text.contains("Unlock"), "{text}");
+        assert!(text.contains("accessibility_tree fail"), "{text}");
+    }
+
+    #[test]
+    fn only_lockdown_makes_it_a_lock() {
+        let (checks, front) = front_checks(Some(true), None, None);
+        assert!(!front);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].check, "screen_unlocked");
+        assert_eq!(checks[0].status, "fail");
+        assert!(checks[0].user_action.is_some());
+    }
+
+    #[test]
+    fn another_screen_in_front_is_said_as_such() {
+        let (checks, front) = front_checks(Some(false), Some(Ok(false)), Some(Ok(false)));
+        let text = says(&checks);
+        assert!(!front);
+        assert!(text.contains("settings_in_front fail"), "{text}");
+        assert!(!text.contains("잠금을 풀") && !text.contains("Unlock"), "{text}");
+    }
+
+    #[test]
+    fn settings_in_front_passes() {
+        assert!(front_checks(Some(false), Some(Ok(true)), None).1);
+        // Seen only on the reading after the launch.
+        assert!(front_checks(None, Some(Ok(false)), Some(Ok(true))).1);
+    }
 }

@@ -59,7 +59,8 @@ iph setup                     # 폰 준비 상태를 차례로 확인하고, 할
 | `connection` | 필수 | USB 또는 같은 Wi-Fi에서 폰이 보여야 합니다 |
 | `developer_mode` | 필수 | 설정 → 개인정보 보호 및 보안 → 개발자 모드. 꺼져 있으면 `iph doctor`가 그 메뉴를 꺼내 줍니다 |
 | `developer_disk_image` | 필수 | 접근성 · 화면 · 입력 서비스가 여기서 나옵니다. 없으면 `iph doctor`가 받아서 연결합니다 (위 '설치') |
-| `screen_unlocked` | 필수 | 폰 잠금이 풀려 있어야 합니다 |
+| `screen_unlocked` | 필수 | 폰 잠금이 풀려 있어야 합니다. 잠김 여부는 lockdown의 값으로만 판정합니다 |
+| `settings_in_front` | 필수 | 설정 앱이 앞에 나와야 합니다 (다른 창이 가리면 실패). 화면을 읽을 수 없을 때는 이 대신 `accessibility_tree`가 실패합니다 |
 | `accessibility_tree` | 필수 | 화면 요소가 실제로 읽히는지 |
 | `touch_input` | 필수 | 설정 앱 목록을 한 칸 내렸다 올려서 터치가 실제로 먹는지 확인합니다 (`--no-touch-test`로 건너뜀) |
 | `wifi` | 권장 | 케이블 없이 쓰려면 |
@@ -152,7 +153,7 @@ dnd_idle_secs = 300      # 명령이 이만큼 없으면 되돌림. 0이면 iph 
 input_idle_secs = 120    # 입력 세션을 이만큼 안 쓰면 닫음. 0이면 명령마다 닫음
 idle_exit_secs = 1800    # 요청이 이만큼 없으면 상주 프로세스 종료
 screen_video = false     # 입력 중 화면 영상도 받을지. 터치에는 필요 없고, 무선에서는 터널을 막아 느려집니다
-restart_accessibility = true  # 폰의 접근성 서비스가 답을 멈추면 끝내서 폰이 새로 띄우게 함 (약 20초 걸림)
+restart_accessibility = true  # 폰의 접근성 서비스가 답을 멈추거나 빈 답만 보내면 끝내서 폰이 새로 띄우게 함 (약 20초 걸림)
 
 [script]
 timeout_secs = 300       # 스크립트 하나가 돌 수 있는 시간 (최대 840)

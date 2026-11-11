@@ -76,6 +76,29 @@ const AX_RESTART_GAP: Duration = Duration::from_secs(120);
 const REOPEN_GAP: Duration = Duration::from_millis(2000);
 const SECOND_PASS_WAIT: Duration = Duration::from_millis(2500);
 
+/// How the phone's accessibility daemon failed a reading, when that calls
+/// for ending it so the phone starts a new one.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub(crate) enum AxStall {
+    /// Not a word on a connection that is up.
+    Silent,
+    /// Only answers that carry nothing (no application, no element). That is
+    /// how it stayed for 25 minutes on 2026-11-11 (every reading
+    /// `ax_timeout`, three empty answers each) while the phone was unlocked
+    /// and showing Settings; a new daemon answered at once.
+    EmptyOnly,
+}
+
+/// `empty` and `unparsed`: answers of each kind during the failed reading.
+/// Answers that were not understood point at the parser, not the daemon.
+pub(crate) fn ax_stall(empty: u64, unparsed: u64) -> Option<AxStall> {
+    match (empty, unparsed) {
+        (0, 0) => Some(AxStall::Silent),
+        (_, 0) => Some(AxStall::EmptyOnly),
+        _ => None,
+    }
+}
+
 pub struct Session {
     pub udid: String,
     pub config: Config,
@@ -336,9 +359,16 @@ impl Session {
         let mut reconnects = 0;
         let mut second_pass_retries = 0;
         let mut fresh = fresh;
+        // The connection's counts of empty and not understood answers when
+        // this reading began on it: only what came during the reading tells
+        // how the phone is answering now.
+        let mut base: Option<(Instant, u64, u64)> = None;
         loop {
             self.ensure_ax().await?;
             let ax = self.ax.as_mut().unwrap();
+            if base.is_none_or(|(opened, _, _)| opened != ax.opened) {
+                base = Some((ax.opened, ax.empty_count(), ax.unparsed_count()));
+            }
             let usable = match (self.stale_before, ax.latest_arrival()) {
                 (Some(limit), Some(arrived)) => arrived >= limit,
                 _ => true,
@@ -390,23 +420,45 @@ impl Session {
                     self.reset();
                     continue;
                 }
-                let (empty, unparsed) = self
-                    .ax
-                    .as_ref()
-                    .map(|a| (a.empty_count(), a.unparsed_count()))
-                    .unwrap_or((0, 0));
-                // Not a word from the phone on a connection that is up: its
-                // accessibility daemon may be stuck. End it once and ask the
-                // new one.
-                let silent = empty == 0 && unparsed == 0 && self.ax.as_ref().is_some_and(|a| !a.is_closed());
+                let (empty, unparsed) = match (self.ax.as_ref(), base) {
+                    (Some(a), Some((_, e0, u0))) => {
+                        (a.empty_count().saturating_sub(e0), a.unparsed_count().saturating_sub(u0))
+                    }
+                    _ => (0, 0),
+                };
+                let up = self.ax.as_ref().is_some_and(|a| !a.is_closed());
+                let stall = if up { ax_stall(empty, unparsed) } else { None };
+                // Empty answers are also what a locked phone might send; a
+                // daemon that is fine is not ended for that.
+                let locked = match stall {
+                    Some(AxStall::EmptyOnly) => match conn::route(&self.udid).await {
+                        Ok(r) => conn::passcode_locked(&*r.provider).await,
+                        Err(_) => None,
+                    },
+                    _ => None,
+                };
                 let lately = self.ax_restarted_at.is_some_and(|at| at.elapsed() < AX_RESTART_GAP);
-                if silent && !restarted && !lately && self.config.daemon.restart_accessibility {
+                let mut why_not = "";
+                if stall.is_some() && locked != Some(true) {
+                    if restarted {
+                        why_not = "it was already ended once during this reading";
+                    } else if lately {
+                        why_not = "it was ended less than 2 minutes ago";
+                    } else if !self.config.daemon.restart_accessibility {
+                        why_not = "[daemon] restart_accessibility = false";
+                    }
+                }
+                if stall.is_some() && locked != Some(true) && why_not.is_empty() {
                     restarted = true;
                     let waited = started.elapsed().as_secs();
+                    let how = match stall {
+                        Some(AxStall::EmptyOnly) => format!("sent only empty answers ({empty})"),
+                        _ => "gave no answer".to_string(),
+                    };
                     match self.restart_ax_daemon().await {
                         Ok(pid) => {
                             eprintln!(
-                                "[{}] the phone's accessibility daemon gave no answer for {waited} s; ended it (pid {pid}) so the phone starts a new one",
+                                "[{}] the phone's accessibility daemon {how} for {waited} s; ended it (pid {pid}) so the phone starts a new one",
                                 crate::safety::now_utc()
                             );
                             self.ax_restarted_at = Some(Instant::now());
@@ -416,23 +468,36 @@ impl Session {
                             started = Instant::now();
                             continue;
                         }
-                        Err(e) => eprintln!(
-                            "[{}] the phone's accessibility daemon gave no answer for {waited} s and could not be restarted: {e}",
-                            crate::safety::now_utc()
-                        ),
+                        Err(e) => {
+                            eprintln!(
+                                "[{}] the phone's accessibility daemon {how} for {waited} s and could not be restarted: {e}",
+                                crate::safety::now_utc()
+                            );
+                            why_not = "ending it failed";
+                        }
                     }
                 }
-                return Err(Fail::not_sent(
+                let fail = Fail::not_sent(
                     "ax_timeout",
                     format!(
                         "no accessibility tree within {} ms ({empty} empty, {unparsed} not understood)",
                         started.elapsed().as_millis(),
                     ),
                 )
-                .hint(t(
-                    "폰 화면이 켜져 있고 잠금이 풀려 있는지 확인하세요.",
-                    "Check that the phone's screen is on and unlocked.",
-                )));
+                .with("phone_locked", locked.map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null));
+                return Err(if locked == Some(true) {
+                    fail.hint(t("폰이 잠겨 있습니다. 잠금을 풀어 주세요.", "The phone is locked. Unlock it."))
+                } else if stall.is_some() {
+                    fail.with("ax_restart_skipped", why_not).hint(t(
+                        "폰의 화면 읽기 서비스(axauditd)가 응답하지 않습니다. 폰이 잠긴 것은 아닙니다. 잠시 뒤 다시 시도하세요. iph가 2분에 한 번까지 그 서비스를 다시 띄웁니다.",
+                        "The phone's screen-reading service (axauditd) is not answering. The phone is not locked. Try again shortly; iph restarts that service at most every 2 minutes.",
+                    ))
+                } else {
+                    fail.hint(t(
+                        "화면 읽기 응답을 이해하지 못했습니다. `iph read --raw`로 확인하세요.",
+                        "The screen-reading answers were not understood. Look with `iph read --raw`.",
+                    ))
+                });
             };
             if !full {
                 return Ok((seq, dump));
@@ -760,7 +825,7 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use super::plain_path;
+    use super::{AxStall, ax_stall, plain_path};
 
     #[test]
     fn paths_compare_across_spellings() {
@@ -770,5 +835,16 @@ mod tests {
         );
         assert_eq!(plain_path("/Applications/Preferences.app"), "/Applications/Preferences.app");
         assert_eq!(plain_path("file:///Applications/%EB%A9%94%EB%AA%A8.app/x"), "/Applications/메모.app/x");
+    }
+
+    #[test]
+    fn a_daemon_that_sends_only_empty_answers_is_restarted_too() {
+        // Before: only a silent daemon was ended (`empty == 0 && unparsed == 0`),
+        // and one that sent three empty answers a reading stayed stuck.
+        assert_eq!(ax_stall(0, 0), Some(AxStall::Silent));
+        assert_eq!(ax_stall(3, 0), Some(AxStall::EmptyOnly));
+        // Answers the parser could not read are not the daemon's fault.
+        assert_eq!(ax_stall(0, 1), None);
+        assert_eq!(ax_stall(2, 1), None);
     }
 }
