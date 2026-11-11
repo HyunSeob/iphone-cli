@@ -28,7 +28,7 @@ $ iph run settings-version
 | | |
 |---|---|
 | 호스트 | macOS, Windows 10 · 11 (x64) |
-| 기기 | 실제 아이폰, iOS 18 이상 (검증은 **iPhone 15 Pro Max · iOS 27.0.1 한 대**에서만 했습니다) |
+| 기기 | 실제 아이폰, **iOS 27 이상** (검증은 **iPhone 15 Pro Max · iOS 27.0.1 한 대**에서만 했습니다). 터치 · 입력이 폰의 화면 공유 서비스(`com.apple.coredevice.displayservice`, iOS 27부터)를 거치기 때문에 iOS 26 이하에서는 입력이 안 될 것으로 봅니다 (돌려 보지는 않았습니다) |
 | 연결 | USB 또는 같은 Wi-Fi (맥은 Wi-Fi로, 윈도는 USB로만 검증) |
 | 범위 밖 | 시뮬레이터, 안드로이드, Linux 호스트, 가로 화면 |
 

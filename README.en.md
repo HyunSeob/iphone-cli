@@ -25,7 +25,7 @@ $ iph tap "General"
 | | |
 |---|---|
 | Host | macOS, Windows 10/11 (x64) |
-| Device | A real iPhone, iOS 18 or later (verified on **one iPhone 15 Pro Max with iOS 27.0.1** only, Korean interface) |
+| Device | A real iPhone, **iOS 27 or later** (verified on **one iPhone 15 Pro Max with iOS 27.0.1** only, Korean interface). Touch and text input go through the phone's screen-sharing service (`com.apple.coredevice.displayservice`, new in iOS 27), so input is not expected to work on iOS 26 or earlier (not tried) |
 | Connection | USB or the same Wi-Fi (verified over Wi-Fi on the Mac, over USB on Windows) |
 | Out of scope | Simulators, Android, Linux hosts, landscape |
 
