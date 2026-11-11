@@ -119,7 +119,7 @@ After `launch`, that app must stay in front; if another one comes up, the script
 
 ## Typing
 
-`iph type "글"` pastes into the field that has the keyboard, so tap the field first. `--clear` replaces the content, `--submit` presses Return. The result has `value` (what the field holds now) and `clipboard_restored`. The on-screen keyboard disappears for a moment while typing; that is expected.
+`iph type "글"` pastes into the field that has the keyboard, so tap the field first. `--clear` replaces the content, `--submit` presses Return. The result has `value` (what the field holds now) and `clipboard_restored`. When the user had copied something in an app, it cannot be put back (`clipboard_restored: false`, `clipboard_note`); tell the user. The on-screen keyboard disappears for a moment while typing; that is expected.
 
 ## Commands at a glance
 

@@ -1127,7 +1127,7 @@ impl Session {
                 .with("text_verified", true)
                 .with("clipboard_restored", restored));
         }
-        Ok(fields! {
+        let mut out = fields! {
             "sent": true,
             "verified": true,
             "text_verified": true,
@@ -1136,19 +1136,64 @@ impl Session {
             "submit_sent": submitted,
             "clipboard_restored": restored,
             "screen_changed": true,
-        })
+        };
+        if !restored && saved.unreadable() {
+            out.insert(
+                "clipboard_note".into(),
+                json!(t(
+                    "폰 클립보드에 앱에서 복사한 내용이 있었는데, 그 내용은 컴퓨터에서 읽을 수 없어(읽으면 폰 클립보드가 1분쯤 멈춤) 되돌리지 못했습니다. 입력한 글은 클립보드에서 지웠습니다.",
+                    "The phone's clipboard held something copied in an app, which cannot be read from here (reading it stalls the phone's clipboard for about a minute), so it could not be put back. The typed text was cleared from the clipboard.",
+                )),
+            );
+        }
+        Ok(out)
     }
 }
 
 const PASTEBOARD_SERVICE: &str = "com.apple.coredevice.pasteboardservice";
 
+/// Kinds of data the phone's clipboard service holds itself: what `iph type`
+/// puts there, and plain text or a picture. An item that carries any other kind
+/// (rich text, an app's own format) was copied in an app, and its bytes are
+/// only promised: the service asks that app for them when someone reads them.
+/// Read from here, that request never came back. Text copied in Notes stalled
+/// past 8 s for every kind on offer (rtf and plain text alike), and the
+/// service then answered nothing at all, writes included, for about a minute
+/// (2026-11-11: `iph type` right after ⌘C in Notes failed twice with "set
+/// clipboard: no answer" and lost the clipboard the third time). Such content
+/// is not read.
+const SERVICE_KINDS: [&str; 6] = [
+    "public.utf8-plain-text",
+    "public.plain-text",
+    "public.text",
+    "public.png",
+    "public.jpeg",
+    "public.tiff",
+];
+/// What the service's own items took to read: 75 ~ 124 ms.
+const RESOLVE_WAIT: Duration = Duration::from_secs(2);
+
+/// Whether an item with these kinds was copied in an app, so reading its
+/// bytes would wait on that app.
+fn app_provided(types: &[String]) -> bool {
+    types.iter().any(|t| !SERVICE_KINDS.contains(&t.as_str()))
+}
+
+/// What the clipboard holds, as far as it can be read without waiting on an app.
+#[derive(Debug, PartialEq)]
+enum Peek {
+    Empty,
+    Text(String),
+    Image(String, Vec<u8>),
+    /// Copied in an app; left unread (see `SERVICE_KINDS`).
+    AppContent,
+    /// No answer, or something not understood.
+    Unknown,
+}
+
 /// What the user had on the phone's clipboard before `iph type` borrowed it.
 struct Clipboard {
-    text: Option<String>,
-    image: Option<(String, Vec<u8>)>,
-    /// False when the old content could not be read completely; then it
-    /// cannot be put back.
-    restorable: bool,
+    before: Peek,
 }
 
 impl Clipboard {
@@ -1169,13 +1214,60 @@ impl Clipboard {
             .map_err(|e| format!("clipboard service: {e:?}"))
     }
 
-    async fn get_text(adapter: &idevice::tcp::handle::AdapterHandle, port: u16) -> Option<Option<String>> {
-        let mut clip = Self::connect(adapter, port).await.ok()?;
+    /// Look at the clipboard. Bytes come along only as promises, and only
+    /// those the service holds itself are fetched.
+    async fn peek(adapter: &idevice::tcp::handle::AdapterHandle, port: u16) -> Peek {
+        use idevice::core_device::{DataInclusionPolicy, PasteboardPayload};
         let general = idevice::core_device::GENERAL_PASTEBOARD;
-        match tokio::time::timeout(Duration::from_secs(8), clip.get(general)).await {
-            Ok(Ok(snapshot)) => Some(snapshot.text()),
-            _ => None,
+        let Ok(mut clip) = Self::connect(adapter, port).await else {
+            return Peek::Unknown;
+        };
+        let pulled = tokio::time::timeout(
+            Duration::from_secs(8),
+            clip.get_with_policy(general, DataInclusionPolicy::AllPromised),
+        )
+        .await;
+        let Ok(Ok(snap)) = pulled else {
+            return Peek::Unknown;
+        };
+        trace(|| {
+            let kinds: Vec<String> = snap.items.iter().map(|i| i.types.join(",")).collect();
+            format!("clipboard: kinds [{}]", kinds.join(" | "))
+        });
+        let Some(item) = snap.items.first() else {
+            return Peek::Empty;
+        };
+        if snap.items.iter().any(|i| app_provided(&i.types)) {
+            return Peek::AppContent;
         }
+        // Text before a picture, in the order of `SERVICE_KINDS`.
+        for kind in SERVICE_KINDS {
+            let Some(entry) = item.data.iter().find(|e| e.uti == kind) else {
+                continue;
+            };
+            let bytes = match &entry.payload {
+                PasteboardPayload::Inline(b) => Some(b.clone()),
+                PasteboardPayload::Promised { .. } => {
+                    match tokio::time::timeout(RESOLVE_WAIT, clip.resolve(general, item.index as i64, kind)).await {
+                        Ok(Ok(b)) => b,
+                        Ok(Err(_)) => None,
+                        // Whatever holds it up may hold up the service too.
+                        Err(_) => return Peek::Unknown,
+                    }
+                }
+                PasteboardPayload::Error(_) => None,
+            };
+            let Some(bytes) = bytes else { continue };
+            return if ["public.png", "public.jpeg", "public.tiff"].contains(&kind) {
+                Peek::Image(kind.to_string(), bytes)
+            } else {
+                match String::from_utf8(bytes) {
+                    Ok(text) => Peek::Text(text),
+                    Err(_) => continue,
+                }
+            };
+        }
+        Peek::Unknown
     }
 
     async fn set_text(adapter: &idevice::tcp::handle::AdapterHandle, port: u16, text: &str) -> Result<(), String> {
@@ -1189,23 +1281,13 @@ impl Clipboard {
     }
 
     async fn save(adapter: &idevice::tcp::handle::AdapterHandle, port: u16) -> Clipboard {
-        let general = idevice::core_device::GENERAL_PASTEBOARD;
-        let snapshot = match Self::connect(adapter, port).await {
-            Ok(mut clip) => tokio::time::timeout(Duration::from_secs(8), clip.get(general))
-                .await
-                .ok()
-                .and_then(|r| r.ok()),
-            Err(_) => None,
-        };
-        match snapshot {
-            Some(snap) => {
-                let text = snap.text();
-                let image = snap.image().map(|(uti, bytes)| (uti.to_string(), bytes));
-                let restorable = text.is_some() || image.is_some() || snap.items.is_empty();
-                Clipboard { text, image, restorable }
-            }
-            None => Clipboard { text: None, image: None, restorable: false },
-        }
+        Clipboard { before: Self::peek(adapter, port).await }
+    }
+
+    /// True when what was on the clipboard could not be read and is lost
+    /// once `iph type` puts its text there.
+    fn unreadable(&self) -> bool {
+        matches!(self.before, Peek::AppContent | Peek::Unknown)
     }
 
     /// Put the old content back. True when the clipboard is known to hold
@@ -1214,20 +1296,17 @@ impl Clipboard {
         if typed.is_empty() {
             return true;
         }
-        if !self.restorable {
-            return false;
-        }
         // Give the paste a moment to read the clipboard.
         tokio::time::sleep(Duration::from_millis(150)).await;
         // Only touch the clipboard if it still holds what we put there; the
         // user may have copied something else meanwhile.
-        if Self::get_text(adapter, port).await != Some(Some(typed.to_string())) {
+        if Self::peek(adapter, port).await != Peek::Text(typed.to_string()) {
             return false;
         }
         let general = idevice::core_device::GENERAL_PASTEBOARD;
-        let wrote = match (&self.text, &self.image) {
-            (Some(text), _) => Self::set_text(adapter, port, text).await.is_ok(),
-            (None, Some((uti, bytes))) => match Self::connect(adapter, port).await {
+        let wrote = match &self.before {
+            Peek::Text(text) => Self::set_text(adapter, port, text).await.is_ok(),
+            Peek::Image(uti, bytes) => match Self::connect(adapter, port).await {
                 Ok(mut clip) => {
                     matches!(
                         tokio::time::timeout(Duration::from_secs(8), clip.set_image(bytes, uti, general)).await,
@@ -1236,16 +1315,51 @@ impl Clipboard {
                 }
                 Err(_) => false,
             },
-            // The clipboard was empty: leave it without our text.
-            (None, None) => Self::set_text(adapter, port, "").await.is_ok(),
+            // The clipboard was empty, or what was there is gone: either way
+            // the typed text does not stay behind.
+            Peek::Empty | Peek::AppContent | Peek::Unknown => {
+                let _ = Self::set_text(adapter, port, "").await;
+                return matches!(self.before, Peek::Empty);
+            }
         };
         if !wrote {
             return false;
         }
-        match (Self::get_text(adapter, port).await, &self.text) {
-            (Some(now), Some(old)) => now.as_deref() == Some(old.as_str()),
-            (Some(now), None) => now.as_deref() != Some(typed),
-            (None, _) => false,
+        match (Self::peek(adapter, port).await, &self.before) {
+            (Peek::Text(now), Peek::Text(old)) => &now == old,
+            (Peek::Image(..), Peek::Image(..)) => true,
+            _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::app_provided;
+
+    fn kinds(k: &[&str]) -> Vec<String> {
+        k.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn notes_copy_is_app_content() {
+        // What ⌘C in Notes put on the clipboard (2026-11-11).
+        assert!(app_provided(&kinds(&[
+            "public.utf8-plain-text",
+            "com.apple.notes.richtext",
+            "com.apple.webarchive",
+            "com.apple.flat-rtfd",
+            "iOS rich content paste pasteboard type",
+            "public.html",
+            "net.daringfireball.markdown",
+            "public.rtf",
+        ])));
+    }
+
+    #[test]
+    fn what_iph_puts_there_is_not() {
+        // `set_text` writes these three kinds.
+        assert!(!app_provided(&kinds(&["public.utf8-plain-text", "public.plain-text", "public.text"])));
+        assert!(!app_provided(&kinds(&["public.png"])));
     }
 }

@@ -61,7 +61,7 @@ AI 에이전트가 **실제 아이폰**의 아무 앱이나 화면 요소(접근
 | `iph find <selector>` | 셀렉터에 맞는 요소 |
 | `iph tap <selector \| x,y>` | 요소 중심(또는 좌표) 탭. `--long <ms>`, `--double` |
 | `iph swipe <방향 \| x1,y1,x2,y2>` / `iph scroll <up\|down> [--until <selector>] [--max N]` | 밀기 · 찾을 때까지 스크롤 |
-| `iph type <text> [--clear] [--submit]` | 클립보드 붙여넣기로 입력(한글 지원), 사용자 클립보드는 원래대로 되돌림, 입력 후 필드 값 확인 |
+| `iph type <text> [--clear] [--submit]` | 클립보드 붙여넣기로 입력(한글 지원), 사용자 클립보드는 원래대로 되돌림(앱에서 복사한 서식 있는 내용은 예외: 읽을 수 없어 비움), 입력 후 필드 값 확인 |
 | `iph key <키>` / `iph button <home\|lock\|volume_up\|volume_down>` | 키 · 버튼 |
 | `iph launch <bundle_id \| 앱 이름>` / `iph apps` | 앱 실행 · 목록 |
 | `iph screenshot [-o file]` | 화면 캡처 (보조) |

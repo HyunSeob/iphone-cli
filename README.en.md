@@ -287,7 +287,7 @@ A reading takes more than a second because of the phone: after a request it wait
 - **There are stretches when the phone answers slowly.** On the morning of 2026-11-11 this happened four times in two hours (from a few minutes to 40): readings took 2 to 30 s or timed out, and input connections dropped. Once the Mac's CPU was fully used by other work; the cause of the others is unknown (often right after the resident process had been stopped and started several times in a row). In such a stretch a late reading of an earlier screen can be acted on: switching Do Not Disturb failed, Control Center was left open, or the app was left for the home screen. `iph stop`, a minute's wait and a new start brought it back. The record is in [docs/how-it-works.md](docs/how-it-works.md), section 7 (Korean).
 - Portrait only.
 - `iph apps` shows the names the phone reports (usually English). Launch by bundle id to be sure.
-- `iph type` puts back the clipboard's text (or one image). Rich content comes back as plain text.
+- `iph type` puts back the clipboard's text (or one image). **Content copied in an app (text from Notes, which comes with formatting) is not put back.** Reading it from the computer stalls the phone's clipboard for about a minute, so it is left unread and the clipboard is emptied after typing. The result says `clipboard_restored: false` with a `clipboard_note`.
 - Nothing works on a locked phone. Face ID and passcode prompts are never answered for you.
 - Mounting the developer disk image automatically is written but untested (the test phone already had it mounted).
 

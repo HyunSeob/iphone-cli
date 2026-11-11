@@ -109,7 +109,7 @@ fn tools() -> Vec<Value> {
         tool(
             "iph_type",
             "Type text into the field that has the keyboard (tap the field first). Pasted through the clipboard, so Korean and emoji work; \
-             the user's clipboard is put back and the field's value is checked.",
+             the user's clipboard is put back (not content copied in an app: see clipboard_note) and the field's value is checked.",
             json!({
                 "text": { "type": "string" },
                 "clear": { "type": "boolean", "description": "Replace what the field holds." },
