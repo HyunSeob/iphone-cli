@@ -142,13 +142,14 @@ dnd_idle_secs = 300      # put it back after this long without a command; 0 = on
 [daemon]
 input_idle_secs = 120    # close the input session after this long unused; 0 closes it after every command
 idle_exit_secs = 1800    # the resident process exits after this long without requests
+screen_video = false     # also take the screen video while sending input. Touches do not need it, and over Wi-Fi it clogs the tunnel
 
 [script]
 timeout_secs = 300       # how long one script may run (840 at most)
 memory_mb = 64           # how much memory a script may hold
 ```
 
-Sending input needs the phone to be in "screen sharing" state (an indicator shows at the top of the phone). For an app that hides its content or warns while the screen is shared, set `input_idle_secs = 0`: the phone is then in that state only while input is being sent, at the price of 3 to 4 s more per input. Reading does not depend on screen sharing.
+Sending input needs the phone to be in "screen sharing" state (an indicator shows at the top of the phone). iph sets that up with the audio stream alone and does not take the screen video (`screen_video`). For an app that hides its content or warns while the screen is shared, set `input_idle_secs = 0`: the phone is then in that state only while input is being sent, at the price of 3 to 4 s more per input. Reading does not depend on screen sharing.
 
 **Limit:** the guard reads labels and nothing else. A button without a label, or labelled differently (an icon-only pay button, "Next", "OK"), is not caught. In any flow where money or messages are at stake, mark that call `{confirm: true}` in the script yourself.
 

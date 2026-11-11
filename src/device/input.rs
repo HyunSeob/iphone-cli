@@ -80,21 +80,48 @@ impl Drain {
         let last_packet_ms = Arc::new(AtomicU64::new(0));
         let first_packet_ms: Vec<Arc<AtomicU64>> =
             sockets.iter().map(|_| Arc::new(AtomicU64::new(0))).collect();
-        let tasks = sockets
+        // Bytes and packets each stream has delivered (audio, then video when
+        // it is on), for the trace: the media crosses the same tunnel as
+        // everything else.
+        let counts: Vec<Arc<(AtomicU64, AtomicU64)>> =
+            sockets.iter().map(|_| Arc::new((AtomicU64::new(0), AtomicU64::new(0)))).collect();
+        let mut tasks: Vec<tokio::task::JoinHandle<()>> = sockets
             .into_iter()
             .zip(first_packet_ms.iter().cloned())
-            .map(|(s, first)| {
+            .zip(counts.iter().cloned())
+            .map(|((s, first), count)| {
                 let last = last_packet_ms.clone();
                 tokio::spawn(async move {
                     // The media itself is not needed; only that it keeps coming.
-                    while s.recv().await.is_ok() {
+                    while let Ok(packet) = s.recv().await {
                         let now = now_ms();
                         last.store(now, Ordering::Relaxed);
                         let _ = first.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
+                        count.0.fetch_add(packet.data.len() as u64, Ordering::Relaxed);
+                        count.1.fetch_add(1, Ordering::Relaxed);
                     }
                 })
             })
             .collect();
+        if std::env::var("IPH_TRACE").is_ok_and(|v| v == "1") {
+            tasks.push(tokio::spawn(async move {
+                let mut before: Vec<(u64, u64)> = counts.iter().map(|_| (0, 0)).collect();
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let now: Vec<(u64, u64)> = counts
+                        .iter()
+                        .map(|c| (c.0.load(Ordering::Relaxed), c.1.load(Ordering::Relaxed)))
+                        .collect();
+                    let rates: Vec<String> = now
+                        .iter()
+                        .zip(&before)
+                        .map(|(n, b)| format!("{} B/{} pkts", n.0 - b.0, n.1 - b.1))
+                        .collect();
+                    crate::device::ax::trace(|| format!("media in the last second: {}", rates.join(", ")));
+                    before = now;
+                }
+            }));
+        }
         Self {
             last_packet_ms,
             first_packet_ms,
@@ -147,7 +174,13 @@ pub fn normalize(v: f64, extent: f64) -> u16 {
 }
 
 impl InputSession {
-    pub async fn open(adapter: &mut AdapterHandle, rsd: &mut RsdHandshake) -> Result<Self> {
+    /// `video`: also start the screen video stream. The audio stream alone
+    /// sets up the screen-sharing session that makes touches count
+    /// (2026-11-11: taps, drags, long presses, keys and buttons all work
+    /// without the video; 24 of 24 first drags on a new session either way).
+    /// The video is up to 6 Mbit/s while the screen moves. Over Wi-Fi the
+    /// tunnel carried a seventh of that, and everything else queued behind it.
+    pub async fn open(adapter: &mut AdapterHandle, rsd: &mut RsdHandshake, video: bool) -> Result<Self> {
         let began = Instant::now();
         let began_ms = now_ms();
         let mut display = DisplayServiceClient::connect_rsd(adapter, rsd)
@@ -186,25 +219,29 @@ impl InputSession {
             .await
             .map_err(|e| anyhow!("start audio stream: {e:?}"))?;
 
-        let video_call = uuid::Uuid::new_v4().to_string().to_uppercase();
-        let ssrc = uuid::Uuid::new_v4().as_u128() as u32;
-        let video_offer = build_screen_video_offer(&video_call, &call_info, ssrc)
-            .map_err(|e| anyhow!("video offer: {e:?}"))?;
-        display
-            .start_media_stream(build_start_video_parameters(
-                &receiver_ip,
-                video_udp.local_port(),
-                &sender_ip,
-                50001,
-                video_offer,
-                CLIENT_SUPPORTED_FEATURES,
-                1,
-                session_id,
-            ))
-            .await
-            .map_err(|e| anyhow!("start video stream: {e:?}"))?;
+        let mut streams = vec![audio_udp];
+        if video {
+            let video_call = uuid::Uuid::new_v4().to_string().to_uppercase();
+            let ssrc = uuid::Uuid::new_v4().as_u128() as u32;
+            let video_offer = build_screen_video_offer(&video_call, &call_info, ssrc)
+                .map_err(|e| anyhow!("video offer: {e:?}"))?;
+            display
+                .start_media_stream(build_start_video_parameters(
+                    &receiver_ip,
+                    video_udp.local_port(),
+                    &sender_ip,
+                    50001,
+                    video_offer,
+                    CLIENT_SUPPORTED_FEATURES,
+                    1,
+                    session_id,
+                ))
+                .await
+                .map_err(|e| anyhow!("start video stream: {e:?}"))?;
+            streams.push(video_udp);
+        }
 
-        let drain = Drain::start(vec![audio_udp, video_udp]);
+        let drain = Drain::start(streams);
 
         // Connect the HID services first and only then wait, so the first
         // real report does not go out the instant the connection came up.

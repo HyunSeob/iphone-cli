@@ -453,9 +453,10 @@ impl Session {
             }
             let mut last = String::new();
             for attempt in 0..2 {
+                let video = self.config.daemon.screen_video;
                 let tunnel = self.ensure_tunnel().await?;
                 let mut adapter = tunnel.adapter.clone();
-                match bounded("input session", 20, InputSession::open(&mut adapter, &mut tunnel.rsd)).await {
+                match bounded("input session", 20, InputSession::open(&mut adapter, &mut tunnel.rsd, video)).await {
                     Ok(s) => {
                         self.input = Some(s);
                         break;

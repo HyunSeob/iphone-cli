@@ -77,6 +77,10 @@ pub struct DaemonConfig {
     pub input_idle_secs: u64,
     /// Exit the daemon after this many idle seconds.
     pub idle_exit_secs: u64,
+    /// Also take the screen video while an input session is open. Touches
+    /// count without it, so it is off: the video is megabits a second through
+    /// the same tunnel as everything else.
+    pub screen_video: bool,
 }
 
 impl Default for DaemonConfig {
@@ -84,6 +88,7 @@ impl Default for DaemonConfig {
         Self {
             input_idle_secs: 120,
             idle_exit_secs: 1800,
+            screen_video: false,
         }
     }
 }
