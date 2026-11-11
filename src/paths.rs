@@ -15,7 +15,7 @@ pub fn state_dir() -> PathBuf {
         .unwrap_or_else(|| home().join("Library/Application Support/iph"))
 }
 
-/// `config.toml` and personal recipes. `IPH_CONFIG_DIR` overrides it (tests).
+/// `config.toml` and personal scripts. `IPH_CONFIG_DIR` overrides it (tests).
 pub fn config_dir() -> PathBuf {
     std::env::var_os("IPH_CONFIG_DIR")
         .map(PathBuf::from)
@@ -47,8 +47,8 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config.toml")
 }
 
-pub fn personal_recipes() -> PathBuf {
-    config_dir().join("recipes")
+pub fn personal_scripts() -> PathBuf {
+    config_dir().join("scripts")
 }
 
 /// Create a directory only the user can enter.

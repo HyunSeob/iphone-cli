@@ -8,10 +8,10 @@ use iphone_cli::{
     ax::tree::Screen,
     config::{Config, SafetyConfig},
     device::session::Session,
-    recipe::RunOptions,
     reply::Outcome,
     safety,
     selector::Selector,
+    steps::RunOptions,
 };
 use serde_json::{Map, json};
 
@@ -131,6 +131,22 @@ fn bad_op_ids_are_rejected() {
 }
 
 #[test]
+fn a_swipe_that_stays_on_a_guarded_button_is_refused() {
+    let s = session();
+    let screen = screen();
+    // The pay button spans x 225..410, y 780..836.
+    let fail = s.guard_drag(&screen, (300.0, 800.0), (300.0, 800.0)).unwrap_err();
+    assert_eq!((fail.outcome, fail.code.as_str()), (Outcome::Blocked, "confirm_required"));
+    assert_eq!(fail.extra["matched_word"], "결제하기");
+    assert!(s.guard_drag(&screen, (240.0, 790.0), (400.0, 830.0)).is_err());
+    // Leaving the button, staying on an ordinary one, or crossing bare
+    // screen is a swipe like any other.
+    assert!(s.guard_drag(&screen, (300.0, 800.0), (300.0, 400.0)).is_ok());
+    assert!(s.guard_drag(&screen, (40.0, 800.0), (180.0, 800.0)).is_ok());
+    assert!(s.guard_drag(&screen, (215.0, 600.0), (215.0, 400.0)).is_ok());
+}
+
+#[test]
 fn removed_words_stop_guarding_and_added_words_start() {
     isolate();
     let config = Config {
@@ -150,7 +166,7 @@ fn removed_words_stop_guarding_and_added_words_start() {
 }
 
 #[tokio::test]
-async fn a_recipe_step_marked_confirm_stops_without_an_op_id() {
+async fn a_batch_step_marked_confirm_stops_without_an_op_id() {
     let mut s = session();
     let steps = [json!({ "key": "return", "confirm": true })];
     let fail = s
@@ -164,10 +180,10 @@ async fn a_recipe_step_marked_confirm_stops_without_an_op_id() {
 }
 
 #[tokio::test]
-async fn a_recipe_op_id_is_spent_even_when_the_step_could_not_be_sent() {
+async fn a_step_op_id_is_spent_even_when_the_step_could_not_be_sent() {
     let mut s = session();
     let steps = [json!({ "key": "return", "confirm": true })];
-    let opts = RunOptions { confirm: Some("fixture-recipe-001".into()), batch: false };
+    let opts = RunOptions { confirm: Some("fixture-steps-001".into()), batch: false };
     // No such phone: the step fails before anything is sent …
     let first = s.run_steps(&steps, &Map::new(), &opts).await.unwrap_err();
     assert_eq!(first.outcome, Outcome::NotSent);
@@ -175,6 +191,6 @@ async fn a_recipe_op_id_is_spent_even_when_the_step_could_not_be_sent() {
     let second = s.run_steps(&steps, &Map::new(), &opts).await.unwrap_err();
     assert_eq!(second.outcome, Outcome::Blocked);
     assert_eq!(second.extra["reason"]["code"], "op_already_used");
-    let records = safety::lookup("fixture-recipe-001#1").unwrap();
+    let records = safety::lookup("fixture-steps-001#1").unwrap();
     assert_eq!(records.iter().map(|r| r.state.as_str()).collect::<Vec<_>>(), ["started", "not_sent"]);
 }

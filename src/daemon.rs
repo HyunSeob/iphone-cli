@@ -23,8 +23,9 @@ use crate::{
     config::Config,
     device::session::Session,
     doctor, fields, paths,
-    recipe::RunOptions,
     reply::{Fail, Res, envelope},
+    script,
+    steps::RunOptions,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,16 +79,8 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
                 .ok_or_else(|| Fail::invalid("batch needs a JSON array of steps"))?;
             Box::pin(s.run_steps(steps, &Map::new(), &RunOptions { confirm: None, batch: true })).await
         }
-        "run" => {
-            let name = args
-                .get("recipe")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| Fail::invalid("run needs a recipe name"))?;
-            let empty = Map::new();
-            let given = args.get("args").and_then(|v| v.as_object()).unwrap_or(&empty);
-            let confirm = args.get("confirm").and_then(|v| v.as_str()).map(String::from);
-            Box::pin(s.cmd_run(name, given, confirm)).await
-        }
+        // `iph script` and `iph run`: whoever asks sends the code along.
+        "script" => Box::pin(s.serve_script(args)).await,
         "doctor" => Box::pin(doctor::run(s, parse_args(args)?)).await,
         "dnd" => Box::pin(s.cmd_dnd(parse_args(args)?)).await,
         "status" => Ok(fields! {
@@ -116,7 +109,9 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
 /// How long one request may run before the daemon gives up on it.
 pub fn budget(cmd: &str) -> Duration {
     match cmd {
-        "run" | "batch" => Duration::from_secs(600),
+        // A script stops itself first, at [script] timeout_secs.
+        "script" => Duration::from_secs(script::MAX_TIMEOUT_SECS + 60),
+        "batch" => Duration::from_secs(600),
         "doctor" => Duration::from_secs(120),
         _ => Duration::from_secs(90),
     }

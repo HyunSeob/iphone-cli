@@ -56,8 +56,8 @@ const TIDY_LIMIT: Duration = Duration::from_secs(25);
 /// After a failed attempt to put the earlier Focus back, wait this long.
 const RETRY_RESTORE: Duration = Duration::from_secs(120);
 /// Commands that send input, and so are worth going quiet for.
-const INPUT_COMMANDS: [&str; 9] = [
-    "tap", "swipe", "scroll", "type", "key", "button", "launch", "batch", "run",
+const INPUT_COMMANDS: [&str; 8] = [
+    "tap", "swipe", "scroll", "type", "key", "button", "launch", "batch",
 ];
 /// Failures that say the phone cannot be reached at all. The command that
 /// follows reports them itself; they are not counted against Do Not Disturb.

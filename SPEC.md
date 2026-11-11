@@ -5,7 +5,7 @@
 
 ## 1. 한 줄
 
-AI 에이전트가 **실제 아이폰**의 아무 앱이나 화면 요소(접근성 트리)로 읽고 누르게 해 주는 CLI + MCP 서버. **XCUITest · WebDriverAgent · Xcode 서명 없이**, Xcode가 쓰는 애플 개발자 서비스에 직접 붙는다 (Poki의 원리를 따름). 자주 하는 순서는 **레시피**로 묶어 AI 왕복 없이 한 번에 실행한다.
+AI 에이전트가 **실제 아이폰**의 아무 앱이나 화면 요소(접근성 트리)로 읽고 누르게 해 주는 CLI + MCP 서버. **XCUITest · WebDriverAgent · Xcode 서명 없이**, Xcode가 쓰는 애플 개발자 서비스에 직접 붙는다 (Poki의 원리를 따름). 자주 하는 순서는 **스크립트**(자바스크립트)로 적어 AI 왕복 없이 한 번에 실행한다.
 
 ## 2. 정한 것
 
@@ -14,10 +14,10 @@ AI 에이전트가 **실제 아이폰**의 아무 앱이나 화면 요소(접근
 | 언어 · 바탕 | Rust + [`idevice`](https://github.com/jkcoxson/idevice) (MIT) |
 | 주 사용자 | AI 에이전트 (Claude Code · Codex). CLI 출력은 JSON 기본, `iph mcp`로 MCP 서버, 에이전트용 스킬 문서 동봉. 사람은 디버깅 때만 |
 | 명령 · 저장소 | 명령 `iph`, 저장소 · 크레이트 `iphone-cli` (crates.io · PyPI · npm 모두 비어 있음, 이 맥에 `iph` 없음: 11-10 확인) |
-| 첫 버전 범위 | 기본 동작 + 레시피(YAML). 자동 경로 학습(Poki routes 같은 것)은 다음 버전 |
+| 첫 버전 범위 | 기본 동작 + 스크립트(자바스크립트, §9. 2026-11-11에 YAML 레시피에서 바꿈). 자동 경로 학습(Poki routes 같은 것)은 다음 버전 |
 | 안전장치 | 위험 단어 이름표 확인 (§7) |
 | 라이선스 · 공개 | MIT. `HyunSeob/iphone-cli` **비공개**로 시작, 영상 올릴 때 공개. README에 "Poki(https://github.com/JosssphZhou/poki)의 원리를 따라 만들었다" 명시 |
-| 레시피 공개 | 저장소에는 기본 앱(설정 · 계산기 · 메모 · 시계) 예제만. 토스 · 배달 등 개인 레시피는 `~/.config/iph/recipes/` (저장소 밖) |
+| 스크립트 공개 | 저장소에는 기본 앱(설정 · 계산기 · 메모 · 시계) 예제만. 토스 · 배달 등 개인 스크립트는 `~/.config/iph/scripts/` (저장소 밖) |
 | 지원 | macOS 호스트 + 실제 아이폰 iOS 18+ (검증은 iOS 27에서만). 범위 밖: 시뮬레이터, 안드로이드, Windows/Linux 호스트 |
 | 온보딩 | `iph setup` (대화형) + `iph doctor --json` (§8) |
 | 안내 문구 언어 | 시스템 언어를 따름: 한국어 맥은 한국어, 그 외 영어. JSON 키 · 오류 코드는 항상 영어 |
@@ -65,20 +65,27 @@ AI 에이전트가 **실제 아이폰**의 아무 앱이나 화면 요소(접근
 | `iph key <키>` / `iph button <home\|lock\|volume_up\|volume_down>` | 키 · 버튼 |
 | `iph launch <bundle_id \| 앱 이름>` / `iph apps` | 앱 실행 · 목록 |
 | `iph screenshot [-o file]` | 화면 캡처 (보조) |
-| `iph batch <file \| ->` | JSON 단계 배열을 한 번에 |
-| `iph run <recipe> [--arg k=v] [--confirm <op_id>]` / `iph recipes` | 레시피 실행 · 목록 |
+| `iph batch <file \| ->` | JSON 단계 배열을 한 번에 (일단 그대로 둠. 스크립트와 겹치므로 없앨지는 따로 정함) |
+| `iph script <file \| -> [--arg k=v] [--confirm <op_id>]` | 자바스크립트를 바로 실행 (§9) |
+| `iph run <이름> [--arg k=v] [--confirm <op_id>]` / `iph scripts` | 저장된 스크립트 실행 · 목록 |
 | `iph mcp` | MCP 서버(stdio) |
 
 - **셀렉터:** `label="정확히"`, `label~="포함"`, `label/정규식/`, `role=button`, `id=...`(identifier), `value~=...`, `within=<셀렉터>`, `index=N`. 문자열 하나만 주면 `label="..."`로 본다. 여러 개가 맞으면 오류 + 후보 목록 (멋대로 첫 번째를 누르지 않는다)
 - **모든 입력 뒤 확인:** 탭 · 입력 · 스크롤은 트리를 다시 읽어 `screen_changed: true|false`를 결과에 넣는다. 터치 신호는 기기가 응답하지 않으므로 `sent`와 `verified`를 구분한다
 - **결과 공통 형태:** `{ok, outcome: "done"|"not_sent"|"unknown"|"blocked", error?: {code, message, hint}, elapsed_ms, ...}`
-- **MCP 도구:** CLI와 1:1 (`iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_button`, `iph_launch`, `iph_batch`, `iph_run`, `iph_recipes`, `iph_doctor`). 속도 비교 실험의 A 방식(에이전트가 단계마다 판단)은 이 MCP 기본 도구로, B 방식은 `iph_run`으로 한다
+- **MCP 도구:** CLI와 1:1 (`iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_button`, `iph_launch`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`). `iph_script`는 `code` + `args`, `iph_run`은 `name` + `args`. 속도 비교 실험의 A 방식(에이전트가 단계마다 판단)은 이 MCP 기본 도구로, B 방식은 `iph_run`으로 한다
 
 ## 7. 안전장치
 
 - 누르려는 요소의 이름표가 **위험 단어**(기본: 결제, 결제하기, 송금, 보내기, 이체, 주문, 주문하기, 구매, 구매하기, 결제 완료, 지불, 충전, pay, purchase, buy, send money, transfer, place order)와 맞으면 누르지 않고 `outcome: "blocked"`, `error.code: "confirm_required"`
 - `--confirm <op_id>`를 주면 누른다. 같은 `op_id`는 다시 누르지 않는다 (기록: `~/Library/Application Support/iph/ops.jsonl`, 0600). 결과가 불확실하면 새 ID로 재시도하지 말고 `iph op <op_id>`로 조회만
-- 레시피 단계에 `confirm: true`를 달면 그 단계는 `iph run ... --confirm <op_id>` 없이는 멈춘다
+- **스크립트 (§9):** 호출은 상주 프로세스 안에서 CLI 명령과 같은 함수로 실행되므로, 입력마다 위험 단어 검사를 그대로 거친다
+  - **표시:** 스크립트는 누를 호출에 `{confirm: true}`만 적을 수 있다 (예전 YAML 단계의 `confirm: true`). 표시된 호출은 위험 단어가 아니어도 op_id가 있어야 실행된다
+  - **op_id는 사람만:** op_id는 `iph run/script … --confirm <op_id>`(MCP는 도구의 `confirm`)로 줄 때만 유효하다. 스크립트가 `confirm`에 `true` 말고 다른 값을 넣으면 폰에 닿기 전에 `confirm_not_allowed`로 거절한다. 막힌 결과에서 읽은 값이든 지어낸 값이든 같다
+  - **하나에 한 번:** op_id 하나는 표시된 호출 하나만 누른다. 누를 것이 여럿이면 `--confirm`을 그 수만큼 주고, 순서대로 쓴다. 다 쓰면 다음 표시된 호출은 `confirm_required`. 반복문으로 한 번의 확인을 늘려 쓸 수 없다
+  - **표시 없는 위험 탭:** 위험 단어 이름표인데 `{confirm: true}`가 없는 탭은 `--confirm`을 줬어도 막힌다 (사람이 확인한 것은 스크립트가 표시한 호출뿐이다)
+  - **`unknown` 뒤:** 입력이 나갔는지 모르는 호출 뒤에는 스크립트를 끝낸다. 스크립트가 예외를 잡아도 그 뒤 호출은 폰에 가지 않는다 (다시 보내지 않는 규칙)
+- **스와이프:** 시작과 끝이 같은 요소 위인 스와이프는 탭처럼 눌릴 수 있어, 그 요소가 위험 단어 이름표면 막는다 (2026-11-11 추가)
 - 위험 단어 목록: `~/.config/iph/config.toml`에서 추가 · 제거
 - 한계를 문서에 적는다: 이름표가 없거나 다른 말로 붙은 버튼은 못 막는다
 
@@ -99,26 +106,30 @@ AI 에이전트가 **실제 아이폰**의 아무 앱이나 화면 요소(접근
 - 각 항목은 `required` / `recommended`로 표시한다. **어느 항목이 정말 필수인지는 구현 중 실제로 가려 문서에 적는다** (지금은 추정)
 - `iph doctor --json`은 에이전트가 사용자를 안내할 수 있게 `{check, status, required, user_action, auto_fixed}` 배열을 낸다
 
-## 9. 레시피 (YAML)
+## 9. 스크립트 (JavaScript)
 
-```yaml
-name: settings-version          # 저장소 예제
-description: 설정에서 iOS 버전 읽기
-app: com.apple.Preferences
-args: {}
-steps:
-  - launch: com.apple.Preferences
-  - wait_for: {label: "일반"}
-  - tap: {label: "일반"}
-  - tap: {label: "정보"}
-  - read_field: {name: ios_version, selector: {label: "iOS 버전"}, take: value}
-output: [ios_version]
+2026-11-11 운영자 결정: YAML 레시피를 없애고 `iph` 안에 넣은 자바스크립트 엔진(QuickJS, `rquickjs`)으로 바꾼다. 날짜 계산 · 조건 · 반복이 필요할 때마다 YAML에 문법을 덧붙이는 대신 언어를 그대로 쓴다. "똑같은 건 두 개 필요 없다"로 YAML은 남기지 않는다. 이름도 '레시피'에서 '스크립트'로 바꿨다 (명령 `iph scripts`, 폴더 `scripts/`).
+
+```js
+// 설정에서 iOS 버전 읽기            ← 첫 주석 줄이 `iph scripts`의 설명
+launch("com.apple.Preferences", { restart: true });
+scroll("down", { until: "일반" });
+tap("일반");
+tap("정보");
+return { ios_version: readField({ selector: { label: "iOS 버전" }, take: "value" }) };
 ```
 
-단계 종류: `launch`, `wait_for`(타임아웃), `tap`, `type`, `swipe`, `scroll_until`, `read_field`(고정 값), `read_list`(목록: 행 셀렉터 + 열 → 스크롤하며 중복 없이 모음, 끝 조건), `assert`(이 요소가 있어야 진행), `button`, `sleep`(최소한으로), `confirm: true`(§7).
-- 단계마다 실패하면 즉시 멈추고 `{failed_step, reason, screen_summary}`를 돌려준다. 화면이 예상과 다르면 추측해서 진행하지 않는다
-- 찾는 곳: 저장소 `recipes/`(예제) → `~/.config/iph/recipes/`(개인). 같은 이름이면 개인 쪽 우선
-- 기록: 단계별 `elapsed_ms`를 결과에 넣는다 (영상 속도 비교에 씀)
+- **실행:** `iph script <파일 | ->`(바로 실행, heredoc 가능), `iph run <이름>`(저장된 것), `iph scripts`(목록). MCP는 `iph_script`(`code` + `args`), `iph_run`(`name` + `args`), `iph_scripts`
+- **찾는 곳:** `~/.config/iph/scripts/<이름>.js`(개인, 우선) → 저장소 `scripts/`(예제, 바이너리에 포함)
+- **인자와 결과:** `--arg k=v`는 `args.k`(문자열). `return`한 객체와 `output(k, v)`가 결과의 `outputs`, `log(...)`가 `logs`. 결과에는 `calls`(호출 수)와 `inputs_sent`(입력을 보낸 호출 수)도 들어간다
+- **함수 = 명령:** `read`, `find`, `tap`, `swipe`, `scroll`(`until` 포함), `type`, `key`, `button`, `launch`, `apps`. 인자 이름과 돌려주는 객체는 CLI · MCP와 같다. 셀렉터는 문자열 · 객체 둘 다
+- **스크립트에만 있는 것:** `waitFor(selector, {timeout_ms})`, `readField({selector, take, regex})` → 문자열, `readList({row, columns, key, group, stop_below, …})` → `{rows, scrolls, ended}`, `sleep(ms)`, `log(...)`, `output(k, v)`. `tap`은 셀렉터가 나타날 때까지 최대 5초 기다리고 자리가 멈춘 뒤 누르며(`timeout_ms`, `settle`), 배열을 주면 다시 읽지 않고 이어서 누른다. 어느 호출이든 `hint`를 줄 수 있다
+- **실패는 예외:** 실패한 호출은 `Error`를 던진다 (`e.code`, `e.outcome`, `e.hint`, `e.result` = 결과 객체 전체). 잡지 않으면 스크립트가 멈추고 `{failed_call: {cmd, line, outcome}, reason: {code, message}, screen_summary, inputs_sent, outputs, logs}`를 돌려준다. 화면이 예상과 다르면 추측해서 진행하지 않는다
+- **멈춘 스크립트의 `outcome`:** 막힌 호출로 끝나면 `blocked`. 그 밖에 입력을 하나라도 보낸 뒤 멈추면 `unknown`(다시 실행하면 그 입력을 또 보낸다), 아무것도 안 보냈으면 `not_sent`
+- **칸막이:** 파일 · 네트워크 · 프로세스 접근 없음 (모듈 로더 · 타이머 없음, 폰으로 가는 문은 위 함수들뿐). 실행 시간 `[script] timeout_secs`(기본 300, 최대 840), 메모리 `[script] memory_mb`(기본 64). 넘으면 중단하고, 입력을 이미 보낸 뒤였으면 `outcome: "unknown"`
+- **방해금지 모드:** 입력을 보내는 첫 호출 앞에서 켠다 (읽기만 하는 스크립트는 건드리지 않는다). 이 전환은 시간 제한 밖에서 끝까지 한다: 도중에 끊으면 제어 센터가 열린 채 남는다
+- **안전:** §7. `{confirm: true}` 표시, 사람이 준 op_id만 유효, 하나에 한 번, `unknown` 뒤 중단
+- `launch` 뒤 다른 앱이 앞에 나오면 입력과 `readField` · `readList`가 `unexpected_app`으로 멈춘다
 
 ## 10. 완료 기준 (오늘 밤, 사람 없이)
 
@@ -129,13 +140,13 @@ output: [ios_version]
 3. `iph tap "일반"` → 화면 바뀜 `screen_changed: true`, 뒤로 가기까지 20회 반복 중 놓침 횟수 기록
 4. `iph type`: 메모에 한글 · 영문 · 이모지 섞인 글 입력 → 필드 값 일치, 클립보드 원복 확인 → 메모 삭제
 5. `iph scroll --until`: 설정에서 화면 밖 항목 찾기
-6. 예제 레시피 2개 이상(설정 iOS 버전 읽기, 계산기 `12×34=` 결과 읽기 등)이 3회 연속 성공
+6. 예제 레시피(지금은 스크립트) 2개 이상(설정 iOS 버전 읽기, 계산기 `12×34=` 결과 읽기 등)이 3회 연속 성공
 7. 안전장치: 위험 단어 요소는 fixture 트리로 단위 시험(실제 결제 화면 안 씀). `--confirm` 재사용 거부 시험
 8. `iph mcp`를 Claude Code와 Codex 둘 다에 붙여 `iph_read` · `iph_tap` 호출 성공
 9. Wi-Fi만으로 동작 (케이블 없이)
 10. README(한국어 · 영어), 에이전트 스킬 문서, Poki 원리 명시, 설치 방법
 
-내일 아침 운영자와 함께: 토스 인증 후 `toss-spending` 개인 레시피(이번 달 지출 목록) 맞추기.
+내일 아침 운영자와 함께: 토스 인증 후 `toss-spending` 개인 스크립트(이번 달 지출 목록) 맞추기.
 
 ## 11. 작업하며 먼저 확인할 것 (막히면 보고)
 

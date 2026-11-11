@@ -6,9 +6,9 @@ use clap::{Parser, Subcommand};
 use iphone_cli::{
     client, daemon, devices, dnd, fields, human,
     i18n::t,
-    mcp, recipe,
+    mcp,
     reply::{Fail, envelope},
-    safety, setup,
+    safety, script, setup,
 };
 use serde_json::{Map, Value, json};
 
@@ -131,18 +131,28 @@ enum Cmd {
     },
     /// Run a JSON array of steps from a file or stdin (-).
     Batch { file: String },
-    /// Run a recipe.
-    Run {
-        recipe: String,
-        /// Recipe argument, repeatable: --arg name=value
+    /// Run JavaScript from a file or stdin (-): read(), tap(), scroll() … as functions.
+    Script {
+        file: String,
+        /// Argument the script reads as `args.name`, repeatable: --arg name=value
         #[arg(long = "arg", value_name = "K=V")]
         args: Vec<String>,
-        /// One-time id for steps marked `confirm: true`.
-        #[arg(long)]
-        confirm: Option<String>,
+        /// One-time id for a call the script marks `confirm: true`; one per such call.
+        #[arg(long, value_name = "OP_ID")]
+        confirm: Vec<String>,
     },
-    /// List recipes.
-    Recipes,
+    /// Run a saved script by name (see `iph scripts`).
+    Run {
+        name: String,
+        /// Argument the script reads as `args.name`, repeatable: --arg name=value
+        #[arg(long = "arg", value_name = "K=V")]
+        args: Vec<String>,
+        /// One-time id for a call the script marks `confirm: true`; one per such call.
+        #[arg(long, value_name = "OP_ID")]
+        confirm: Vec<String>,
+    },
+    /// List saved scripts.
+    Scripts,
     /// Look up what happened to a confirmed operation.
     Op { op_id: String },
     /// Serve the same commands as MCP tools over stdio.
@@ -188,6 +198,19 @@ fn exit_code(value: &Value) -> i32 {
         Some("blocked") => 3,
         _ => 1,
     }
+}
+
+/// `--arg name=value` pairs as the object a script reads as `args`. Values
+/// stay text; a script that wants a number says `Number(args.n)`.
+fn script_args(pairs: &[String]) -> Result<Map<String, Value>, Fail> {
+    let mut map = Map::new();
+    for pair in pairs {
+        let Some((k, v)) = pair.split_once('=') else {
+            return Err(Fail::invalid(format!("--arg expects name=value, got `{pair}`")));
+        };
+        map.insert(k.to_string(), json!(v));
+    }
+    Ok(map)
 }
 
 fn swipe_args(direction: &str, duration: Option<u64>, drag: bool) -> Result<Value, Fail> {
@@ -237,9 +260,9 @@ async fn run(cli: Cli) -> i32 {
 
     // Commands that need no phone.
     match &cli.command {
-        Cmd::Recipes => {
-            let v = envelope(recipe::cmd_recipes(), started);
-            print(&v, human_out, "recipes");
+        Cmd::Scripts => {
+            let v = envelope(script::cmd_scripts(), started);
+            print(&v, human_out, "scripts");
             return exit_code(&v);
         }
         Cmd::Op { op_id } => {
@@ -385,22 +408,39 @@ async fn run(cli: Cli) -> i32 {
                 }
             }
         }
-        Cmd::Run { recipe, args, confirm } => {
-            let mut map = Map::new();
-            for pair in args {
-                let Some((k, v)) = pair.split_once('=') else {
-                    let v = envelope(
-                        Err(Fail::invalid(format!("--arg expects name=value, got `{pair}`"))),
-                        started,
-                    );
-                    print(&v, human_out, "run");
+        Cmd::Script { file, args, confirm } => {
+            let code = if file == "-" {
+                let mut s = String::new();
+                std::io::stdin().read_to_string(&mut s).map(|_| s)
+            } else {
+                std::fs::read_to_string(&file)
+            };
+            let request = code
+                .map_err(|e| Fail::invalid(format!("{file}: {e}")))
+                .and_then(|code| Ok(script::request(&code, &script_args(&args)?, &confirm, None)));
+            match request {
+                Ok(request) => ("script", request),
+                Err(f) => {
+                    let v = envelope(Err(f), started);
+                    print(&v, human_out, "script");
                     return exit_code(&v);
-                };
-                map.insert(k.to_string(), json!(v));
+                }
             }
-            ("run", json!({ "recipe": recipe, "args": map, "confirm": confirm }))
         }
-        Cmd::Recipes | Cmd::Op { .. } | Cmd::Devices => unreachable!(),
+        Cmd::Run { name, args, confirm } => {
+            let request = script::load(&name).and_then(|(code, source)| {
+                Ok(script::request(&code, &script_args(&args)?, &confirm, Some((&name, &source))))
+            });
+            match request {
+                Ok(request) => ("script", request),
+                Err(f) => {
+                    let v = envelope(Err(f), started);
+                    print(&v, human_out, "script");
+                    return exit_code(&v);
+                }
+            }
+        }
+        Cmd::Scripts | Cmd::Op { .. } | Cmd::Devices => unreachable!(),
     };
 
     let value = client::request(&udid, cmd, args).await;

@@ -1,5 +1,5 @@
 //! The commands themselves, shared by the CLI, the MCP server, `batch` and
-//! recipes. Each takes JSON arguments and returns the fields of its result.
+//! scripts. Each takes JSON arguments and returns the fields of its result.
 
 use std::time::{Duration, Instant};
 
@@ -318,7 +318,7 @@ impl Session {
     /// Some apps make the phone send dumps unasked while they change
     /// (Calculator on every key). Such a dump shows the screen as it was a
     /// moment earlier and can arrive late enough to pass for the answer; the
-    /// calculator recipe then read "12×3" instead of "408". So with `careful`
+    /// calculator example then read "12×3" instead of "408". So with `careful`
     /// (inputs that change the screen several times), or when the phone has
     /// lately sent unasked dumps, the screen is read until two readings in a
     /// row agree.
@@ -373,7 +373,7 @@ impl Session {
                 "confirm_required",
                 match &matched {
                     Some(w) => format!("the target's label contains the guarded word \"{w}\""),
-                    None => "this step is marked confirm: true".to_string(),
+                    None => "this tap is marked `confirm: true`".to_string(),
                 },
             )
             .hint(t(
@@ -413,6 +413,24 @@ impl Session {
             .with("records", json!(earlier))),
             Err(e) => Err(Fail::not_sent("ops_log_failed", format!("{e:#}"))),
         }
+    }
+
+    /// A drag that begins and ends on one element can press it, just as a
+    /// tap would. On a guarded label it is refused: a swipe has no
+    /// `--confirm`, and whoever means to press it can say so with a tap.
+    pub fn guard_drag(&self, screen: &Screen, from: (f64, f64), to: (f64, f64)) -> Res<()> {
+        let (Some(a), Some(b)) = (screen.element_at(from.0, from.1), screen.element_at(to.0, to.1)) else {
+            return Ok(());
+        };
+        if a.id != b.id {
+            return Ok(());
+        }
+        self.guard_tap(Some(a), None, "swipe", false).map(|_| ()).map_err(|f| {
+            f.hint(t(
+                "스와이프의 시작과 끝이 같은 요소 위라 탭처럼 눌릴 수 있습니다. 정말 눌러야 한다면 사람에게 확인받고 `tap --confirm`을 쓰세요.",
+                "This swipe begins and ends on one element and could press it like a tap. If it must be pressed, get a person's approval and use `tap --confirm`.",
+            ))
+        })
     }
 
     pub fn finish_op(rec: Option<OpRecord>, state: &str) {
@@ -497,8 +515,9 @@ impl Session {
         Ok(again)
     }
 
-    /// `force_confirm`: the caller (a recipe step with `confirm: true`)
-    /// requires an op_id even when the label is not a guarded word.
+    /// `force_confirm`: the caller (a script call or a batch step marked
+    /// `confirm: true`) requires an op_id even when the label is not a
+    /// guarded word.
     pub(crate) async fn tap_impl(&mut self, args: TapArgs, force_confirm: bool) -> Res {
         if args.double && args.long_ms.is_some() {
             return Err(Fail::invalid("--double and --long cannot be combined"));
@@ -595,7 +614,11 @@ impl Session {
         let input_began = Instant::now();
         for (i, (nx, ny)) in normalized.iter().enumerate() {
             let tap = Gesture::Tap { x: *nx, y: *ny, hold: Duration::from_millis(50) };
-            if let Err(fail) = self.send_gesture(tap).await {
+            if let Err(mut fail) = self.send_gesture(tap).await {
+                if i > 0 {
+                    // The earlier taps of the list did go out.
+                    fail.outcome = crate::reply::Outcome::Unknown;
+                }
                 return Err(fail
                     .hint(t(
                         "입력이 일부 나갔을 수 있습니다. 다시 보내지 말고 `iph read`로 화면을 확인하세요.",
@@ -645,6 +668,7 @@ impl Session {
             }
         }
         self.check_front_allowed(&screen).await?;
+        self.guard_drag(&screen, from, to)?;
         let before = screen.signature();
         let a = (normalize(from.0, screen.width), normalize(from.1, screen.height));
         let b = (normalize(to.0, screen.width), normalize(to.1, screen.height));

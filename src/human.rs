@@ -109,6 +109,18 @@ fn render_result(cmd: &str, v: &Value) -> String {
         if let Some(step) = v["failed_step"].as_object() {
             out.push(format!("  step {} ({})", s(&step["index"]), s(&step["kind"])));
         }
+        if let Some(call) = v["failed_call"].as_object() {
+            out.push(match call["line"].as_u64() {
+                Some(line) => format!("  line {line}: {}", s(&call["cmd"])),
+                None => format!("  in {}", s(&call["cmd"])),
+            });
+        }
+        if let Some(line) = v["line"].as_u64() {
+            out.push(format!("  line {line}"));
+        }
+        if let Some(sent) = v["inputs_sent"].as_u64().filter(|n| *n > 0) {
+            out.push(format!("  {sent} calls had already sent input"));
+        }
         if let Some(labels) = v["screen_summary"]["labels"].as_array() {
             let l: Vec<String> = labels.iter().map(s).collect();
             out.push(format!("  on screen: {}", l.join(" · ")));
@@ -180,12 +192,15 @@ fn render_result(cmd: &str, v: &Value) -> String {
                 out.push(format!("{:<44} {}", s(&a["bundle_id"]), s(&a["name"])));
             }
         }
-        "recipes" => {
-            for r in v["recipes"].as_array().into_iter().flatten() {
+        "scripts" => {
+            for r in v["scripts"].as_array().into_iter().flatten() {
                 out.push(format!("{:<24} {}  [{}]", s(&r["name"]), s(&r["description"]), s(&r["source"])));
             }
         }
-        "run" | "batch" => {
+        "script" | "batch" => {
+            for line in v["logs"].as_array().into_iter().flatten() {
+                out.push(format!("  {}", s(line)));
+            }
             for st in v["steps"].as_array().into_iter().flatten() {
                 out.push(format!(
                     "✓ {:>2} {:<13} {:>5} ms",

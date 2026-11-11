@@ -6,9 +6,31 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::{client, recipe, reply::envelope};
+use crate::{
+    client,
+    reply::{Fail, envelope},
+    script,
+};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
+
+const SCRIPT_DOC: &str = "Run JavaScript that drives the phone, in one call: loops, conditions and several steps without a round trip each. \
+The commands are functions that return what the tool of the same name returns: read(opts), find(selector), tap(target, opts), swipe(direction | {from, to}, opts), \
+scroll(direction, {until, max}), type(text, {clear, submit}), key(name), button(name), launch(app, {restart}), apps(). Also waitFor(selector, {timeout_ms}), \
+readField({selector, take, regex}) → text, readList({row, columns, group, stop_below, max_scrolls}) → {rows, scrolls, ended}, sleep(ms), log(…), output(key, value). \
+tap(target) waits up to 5 s for a selector to appear and hold still; tap([a, b, c]) presses a keypad without re-reading. \
+A call that fails throws an Error with .code, .outcome, .hint and .result (the full result object); uncaught, it ends the script and the result says which call and line. \
+After a call whose outcome is \"unknown\" the script is stopped and cannot go on. A tap on a guarded label is refused unless the call says {confirm: true} AND the person \
+approved it: then pass their one-time op_id in this tool's `confirm`. The script itself can never supply an op_id. \
+No files, network or timers; Date, JSON, RegExp, Map and the rest of the language are there. The result has outputs (the returned object, plus output() calls), logs, calls and inputs_sent.";
+
+static CONFIRM_DOC: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    json!({
+        "description": "One-time op_id, or a list of them, for calls the script marks {confirm: true}: one id per such call, in order. Only after the user approved what will be pressed.",
+        "type": ["string", "array"],
+        "items": { "type": "string" },
+    })
+});
 
 const SELECTOR_DOC: &str = "Selector: a plain string is an exact label (the name part of a \"name, value\" row also counts). \
 Or combine terms: label=\"exact\", label~=\"contains\", label/regex/, role=button, id=<identifier or element id>, \
@@ -140,16 +162,26 @@ fn tools() -> Vec<Value> {
             &["steps"],
         ),
         tool(
-            "iph_run",
-            "Run a named recipe (see iph_recipes) in one call and get its outputs with per-step timing.",
+            "iph_script",
+            SCRIPT_DOC,
             json!({
-                "recipe": { "type": "string" },
-                "args": { "type": "object", "description": "Recipe arguments, name → value." },
-                "confirm": { "type": "string", "description": "One-time op_id for steps marked confirm: true." },
+                "code": { "type": "string", "description": "JavaScript. The body of a function: `return` ends it and its value becomes `outputs`." },
+                "args": { "type": "object", "description": "What the script reads as `args`." },
+                "confirm": CONFIRM_DOC.clone(),
             }),
-            &["recipe"],
+            &["code"],
         ),
-        tool("iph_recipes", "List available recipes.", json!({}), &[]),
+        tool(
+            "iph_run",
+            "Run a saved script by name (see iph_scripts) in one call and get its outputs. Same result as iph_script.",
+            json!({
+                "name": { "type": "string" },
+                "args": { "type": "object", "description": "What the script reads as `args`." },
+                "confirm": CONFIRM_DOC.clone(),
+            }),
+            &["name"],
+        ),
+        tool("iph_scripts", "List saved scripts: name, what each does, and where it lives.", json!({}), &[]),
         tool(
             "iph_doctor",
             "Check that the phone is ready. Each check says what the user must do when it fails.",
@@ -163,19 +195,49 @@ async fn call(udid: &str, name: &str, args: Value) -> Value {
     let started = std::time::Instant::now();
     let args = if args.is_null() { json!({}) } else { args };
     match name {
-        "iph_recipes" => envelope(recipe::cmd_recipes(), started),
+        "iph_scripts" => envelope(script::cmd_scripts(), started),
+        "iph_script" | "iph_run" => match script_request(name, &args) {
+            Ok(request) => client::request(udid, "script", request).await,
+            Err(f) => envelope(Err(f), started),
+        },
         "iph_read" | "iph_find" | "iph_tap" | "iph_swipe" | "iph_scroll" | "iph_type" | "iph_key"
-        | "iph_button" | "iph_launch" | "iph_apps" | "iph_screenshot" | "iph_batch" | "iph_run"
-        | "iph_doctor" | "iph_dnd" => {
+        | "iph_button" | "iph_launch" | "iph_apps" | "iph_screenshot" | "iph_batch" | "iph_doctor"
+        | "iph_dnd" => {
             let cmd = name.trim_start_matches("iph_");
             let args = if cmd == "apps" { Value::Null } else { args };
             client::request(udid, cmd, args).await
         }
-        other => envelope(
-            Err(crate::reply::Fail::invalid(format!("unknown tool `{other}`"))),
-            started,
-        ),
+        other => envelope(Err(Fail::invalid(format!("unknown tool `{other}`"))), started),
     }
+}
+
+/// What `iph_script` and `iph_run` send on: the code itself, or the saved
+/// script the name stands for.
+fn script_request(tool: &str, args: &Value) -> Result<Value, Fail> {
+    let empty = Map::new();
+    let given = match args.get("args") {
+        None | Some(Value::Null) => &empty,
+        Some(Value::Object(map)) => map,
+        Some(_) => return Err(Fail::invalid("`args` takes an object")),
+    };
+    let confirm = script::confirm_ids(args.get("confirm"))?;
+    let text = |key: &str| {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Fail::invalid(format!("{tool} needs `{key}`")))
+    };
+    if tool == "iph_script" {
+        // `script` is accepted for `code`: a model that goes by the tool's
+        // name rather than its schema sends that (Codex did, 2026-11-11).
+        let code = match args.get("script").and_then(|v| v.as_str()) {
+            Some(code) if args.get("code").is_none() => code,
+            _ => text("code")?,
+        };
+        return Ok(script::request(code, given, &confirm, None));
+    }
+    let name = text("name")?;
+    let (code, source) = script::load(name)?;
+    Ok(script::request(&code, given, &confirm, Some((name, &source))))
 }
 
 fn response(id: &Value, result: Value) -> Value {
@@ -216,7 +278,7 @@ async fn handle(udid: &str, only: &[String], msg: &Value) -> Option<Value> {
                     "capabilities": { "tools": {} },
                     "serverInfo": { "name": "iph", "version": env!("CARGO_PKG_VERSION") },
                     "instructions": "Operate a real iPhone through its accessibility tree. Read the screen with iph_read, act with iph_tap / iph_type / iph_scroll, \
-                                     and check `screen_changed` in each result. For a known sequence prefer iph_run or iph_batch: one call instead of one per step. \
+                                     and check `screen_changed` in each result. For a known sequence prefer one iph_script (or a saved one with iph_run): one call instead of one per step. \
                                      Outcome \"unknown\" means input may have gone out: read the screen, never resend. Outcome \"blocked\" means the safety guard \
                                      stopped a pay/send/order tap: ask the user before confirming.",
                 }),
@@ -281,7 +343,7 @@ mod tests {
             .collect();
         for expected in [
             "iph_read", "iph_find", "iph_tap", "iph_swipe", "iph_scroll", "iph_type", "iph_button",
-            "iph_launch", "iph_batch", "iph_run", "iph_recipes", "iph_doctor",
+            "iph_launch", "iph_batch", "iph_script", "iph_run", "iph_scripts", "iph_doctor",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
@@ -289,6 +351,23 @@ mod tests {
             assert_eq!(t["inputSchema"]["type"], "object");
             assert!(!t["description"].as_str().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn a_script_request_takes_code_or_a_saved_name() {
+        let req = script_request("iph_script", &json!({"code": "return 1", "args": {"n": 2}, "confirm": "ok-1"})).unwrap();
+        assert_eq!(req, json!({"code": "return 1", "args": {"n": 2}, "confirm": ["ok-1"]}));
+        // The name a model guesses from the tool's name works too.
+        let req = script_request("iph_script", &json!({"script": "return 2"})).unwrap();
+        assert_eq!(req["code"], "return 2");
+        let req = script_request("iph_run", &json!({"name": "settings-version"})).unwrap();
+        assert_eq!(req["script"], "settings-version");
+        assert_eq!(req["source"], "builtin:settings-version");
+        assert!(req["code"].as_str().unwrap().contains("launch("));
+        for bad in [json!({}), json!({"code": 1}), json!({"code": "x", "args": [1]}), json!({"code": "x", "confirm": "a b"})] {
+            assert_eq!(script_request("iph_script", &bad).unwrap_err().code, "invalid_argument", "{bad}");
+        }
+        assert_eq!(script_request("iph_run", &json!({"name": "nope"})).unwrap_err().code, "script_not_found");
     }
 
     #[tokio::test]

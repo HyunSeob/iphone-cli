@@ -11,6 +11,23 @@ pub struct Config {
     pub udid: Option<String>,
     pub safety: SafetyConfig,
     pub daemon: DaemonConfig,
+    pub script: ScriptConfig,
+}
+
+/// Limits for `iph script` and `iph run`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ScriptConfig {
+    /// A script is stopped after this many seconds (at most 840).
+    pub timeout_secs: u64,
+    /// A script is stopped when it holds more than this many megabytes.
+    pub memory_mb: u64,
+}
+
+impl Default for ScriptConfig {
+    fn default() -> Self {
+        Self { timeout_secs: 300, memory_mb: 64 }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -99,6 +116,7 @@ mod tests {
         assert_eq!(c.daemon.input_idle_secs, 120);
         assert!(c.safety.dnd);
         assert_eq!(c.safety.dnd_idle_secs, 300);
+        assert_eq!((c.script.timeout_secs, c.script.memory_mb), (300, 64));
     }
 
     #[test]

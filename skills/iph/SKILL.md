@@ -1,6 +1,6 @@
 ---
 name: iph
-description: 사용자의 실제 아이폰(시뮬레이터 아님)에서 앱 화면을 읽고 조작한다. `iph` CLI나 iph_* MCP 도구로 화면 요소(접근성 트리)를 읽고 탭 · 입력 · 스크롤하며, 되풀이하는 순서는 레시피로 굳힌다. "아이폰에서 ○○ 해 줘", "폰에서 확인해 줘", "폰 앱에 있는 내역 · 목록 가져와 줘", "폰 앱 자동화", "iph 레시피 만들어 줘"처럼 사용자의 실제 폰 화면을 보거나 눌러야 하는 요청이면 iph를 말하지 않아도 이 스킬을 쓴다. 실제 아이폰 작업에는 mobile-mcp나 스크린샷을 보고 좌표를 누르는 방식보다 이 스킬을 먼저 쓴다. iOS 시뮬레이터, 안드로이드, 앱 빌드 · 설치에는 쓰지 않는다.
+description: 사용자의 실제 아이폰(시뮬레이터 아님)에서 앱 화면을 읽고 조작한다. `iph` CLI나 iph_* MCP 도구로 화면 요소(접근성 트리)를 읽고 탭 · 입력 · 스크롤하며, 여러 단계는 자바스크립트 스크립트 한 번으로 실행하고, 되풀이할 순서는 저장해 둔다. "아이폰에서 ○○ 해 줘", "폰에서 확인해 줘", "폰 앱에 있는 내역 · 목록 가져와 줘", "폰 앱 자동화", "iph 스크립트 만들어 줘"처럼 사용자의 실제 폰 화면을 보거나 눌러야 하는 요청이면 iph를 말하지 않아도 이 스킬을 쓴다. 실제 아이폰 작업에는 mobile-mcp나 스크린샷을 보고 좌표를 누르는 방식보다 이 스킬을 먼저 쓴다. iOS 시뮬레이터, 안드로이드, 앱 빌드 · 설치에는 쓰지 않는다.
 ---
 
 # iph: operate the user's real iPhone
@@ -48,68 +48,72 @@ A tap on an element labelled with 결제 · 송금 · 보내기 · 이체 · 주
 
 - Confirming is the user's decision, not yours. Show them what would be pressed (`element`, `matched_word`) and ask.
 - After they say yes, repeat the same tap with `--confirm <op_id>` (MCP: `"confirm": "<op_id>"`), using a new id such as `order-20261111-1`.
+- In a script, mark the call that pays, sends or orders: `tap("보내기", { confirm: true })`. A script cannot confirm by itself: an op_id written into the script is refused (`confirm_not_allowed`), wherever it came from. Run the script without `--confirm` first; it stops at the marked call with `outcome: "blocked"` and shows what would be pressed. Ask the user, then run it again with `--confirm <new id>` (MCP: `confirm`). One id presses one marked call; a script with two needs two `--confirm`. Because the second run starts over, begin such scripts from a known screen (`launch(app, { restart: true })`).
 - An `op_id` works once. If the result is `unknown`, do not make a new id and try again: run `iph op <op_id>`, read the screen, and report.
 - The guard only reads labels. A button with no label or a neutral one ("다음", "확인") passes it, so on any screen that moves money or sends something, stop and ask even when the guard is silent.
 - Never answer a Face ID, passcode or payment-authentication prompt. Tell the user the phone is waiting for them.
 
 ## What is on the screen belongs to the user
 
-Answer with what was asked for. Do not copy readings of banking, messaging or account screens into a repository, a recipe file or notes you keep; a recipe holds the steps, never the data it read.
+Answer with what was asked for. Do not copy readings of banking, messaging or account screens into a repository, a script file or notes you keep; a saved script holds the steps, never the data it read.
 
-## Fewer, bigger calls
+## One action, then one script, then a saved script
 
-A fresh reading takes 1 to 2 s and a checked tap about 2 s; that is the phone's pace, not something to retry around. For a sequence you already know, make one `iph batch` or `iph run` call instead of one per step.
+A fresh reading takes 1 to 2 s and a checked tap about 2 s; that is the phone's pace, not something to retry around. What you can save is the model turn between steps. Work in this order:
 
-`iph batch -` (MCP: `iph_batch`) takes a JSON array of steps and stops at the first failure:
+1. **One action at a time** while the screen is new to you: `iph read`, one `iph tap`, read again. Note the labels you see; the script will use them.
+2. **One script** once you know the way: put the steps into a single `iph script -` call (MCP: `iph_script` with `code` and `args`). Loops, conditions and date arithmetic run inside that one call.
+3. **Save it** when the user will want the same thing again: write the code to `~/.config/iph/scripts/<name>.js`, first line a `// comment` that says what it does, and run it with `iph run <name> [--arg k=v]` (MCP: `iph_run`). `iph scripts` lists what exists; look there before writing a new one. Personal scripts live in that folder, not in a repository. Run a new script three times before calling it done: one that passes once can still break on a slow screen.
 
-```json
-[{"launch": "com.apple.Preferences"},
- {"scroll_until": {"label": "일반"}},
- {"tap": {"label": "일반"}},
- {"tap": {"label": "정보"}},
- {"read_field": {"name": "ios_version", "selector": {"label": "iOS 버전"}, "take": "value"}}]
+```sh
+iph script - <<'EOF'
+launch("com.apple.Preferences", { restart: true });
+scroll("down", { until: "일반" });
+tap("일반");
+tap("정보");
+return { ios_version: readField({ selector: { label: "iOS 버전" }, take: "value" }) };
+EOF
 ```
 
-The result has `steps[]` (each with `elapsed_ms`) and `outputs`. On failure: `failed_step`, `reason`, `screen_summary`, and `inputs_sent` (how many earlier steps had already sent input, so think before running the whole thing again).
+The result: `outputs` (what the script returned), `logs`, `calls`, `inputs_sent`.
 
-Steps: `launch`, `wait_for`, `tap` (a selector, or a list of selectors tapped in a row without re-reading, for keypads), `type`, `swipe`, `scroll_until`, `read_field` (`take`: `value` | `label` | `identifier` | `text`, optional `regex` with one capture group), `read_list` (`row` selector, `columns: {name: {take, regex}}`; scrolls and collects each row once), `assert`, `button`, `key`, `sleep` (ms).
+### What a script can call
 
-## Turning a flow into a recipe
+A script is the body of a function, so `return` ends it. The commands are functions that take the same arguments and return the same result objects as the CLI:
 
-When the user will want the same thing again, freeze it: `iph recipes` lists what exists, `iph run <name> [--arg k=v]` runs one without a model in the loop.
+- `read(opts)`, `find(selector)`, `tap(target, opts)`, `swipe(direction | {from, to}, opts)`, `scroll(direction, {until, max})`, `type(text, {clear, submit})`, `key(name)`, `button(name)`, `launch(app, {restart})`, `apps()`. For example `read({ app: true }).elements`, `tap("일반").screen_changed`, `find("label~=업데이트").count`.
+- `tap(selector)` waits up to 5 s for the element and taps once it holds still (a screen that has just come up may still shift its rows); `{timeout_ms, settle: false}` change that. `tap([a, b, c])` presses several targets in a row without re-reading, for keypads.
+- `waitFor(selector, {timeout_ms})` waits for an element (8 s by default) and sits out a system panel that covers the app for a moment.
+- `readField({selector, take, regex})` returns one text. `take`: `value` | `label` | `identifier` | `text`; `regex` keeps its first capture group.
+- `readList({row, columns, key, group, stop_below, max_scrolls})` scrolls a list and returns `{rows, scrolls, ended}` with each row once. `columns: {name: {take, regex}}`, or `{name: {value: "…"}}` for a constant. `group: {selector, regex, as}` gives each row the heading it stands under (a date line), and `stop_below: N` stops once a heading's number falls below N. `key: "column"` names the column that identifies a row; use it when rows change while the list is read (a clock, time left).
+- `args` holds the `--arg k=v` values as text (`Number(args.n)` for a number). Return an object, or call `output(key, value)`, and it comes back as `outputs`. `log(…)` lines come back as `logs`. `sleep(ms)` waits.
+- Any call takes `hint: "…"`: what to tell the person if the script stops there. A screen that waits for Face ID: `waitFor(sel, { timeout_ms: 40000, hint: "폰을 봐 주세요" })`.
+- There are no files, no network and no timers. `Date`, `JSON`, `RegExp` and the rest of the language work.
 
-1. Do the flow once with single commands and note the labels `iph read` shows.
-2. Write the same steps as YAML in `~/.config/iph/recipes/<name>.yaml` (personal recipes live there, not in a repository).
-3. Run it three times. A recipe that passes once can still break on a slow screen; add `wait_for` where it did.
+### When a call fails
 
-```yaml
-name: my-flow
-description: what it does
-app: com.example.app
-args: {query: null}          # null = required, anything else is the default
-steps:
-  - launch: com.example.app
-  - tap: {label: "검색"}
-  - type: {text: "{{query}}", submit: true}
-  - read_list:
-      name: results
-      row: {role: button, label_regex: "원$"}
-      columns:
-        title: {take: label, regex: "^([^,]+)"}
-        price: {take: label, regex: "([0-9,]+)원"}
-      max_scrolls: 10
-output: [results]
+A failed call throws an `Error` with `code`, `outcome`, `hint` and `result` (the full result object). Leave it uncaught unless the step is truly optional. The script then stops, and its result says where and why: `failed_call` (`cmd`, `line`, `outcome`), `reason` (`code`, `message`), `screen_summary`, `inputs_sent`. Do not wrap a whole script in `try`: one that swallows errors goes on acting on a screen it did not expect.
+
+```js
+// Optional: dismiss a notice only if it is there.
+try { tap("닫기", { timeout_ms: 1500 }); } catch (e) { if (e.code !== "wait_timeout") throw e; }
 ```
 
-More for recipes: `{{today.day}}`, `{{ago.6.month}}` and the like fill in dates; any step may add `when: "a == b"` (or `!=`) to run only then and `hint: "…"` to tell the person what to do if it stops there (a screen that waits for Face ID: follow the tap with a `wait_for` that has a long `timeout_ms` and such a hint). `read_list` takes `group: {selector, regex, as}` to give each row the heading it stands under (a date line), `stop_below: N` to stop once a heading's number falls below N, and `{value: "…"}` columns for a constant.
+The `outcome` of a script that stopped:
 
-Mark a step that pays, sends or orders with `confirm: true`; it then runs only with `iph run … --confirm <op_id>`, which the user must approve.
+- `blocked`: the safety guard stopped a call. See "Money, messages, orders".
+- `unknown`: input had gone out before it stopped. Running it again would send that input again, so read the screen first. After a call whose own outcome is `unknown` the script is ended and cannot go on, even if it catches the error.
+- `not_sent`: nothing had been sent. Fix the cause and run it again.
+
+After `launch`, that app must stay in front; if another one comes up, the script stops with `unexpected_app`.
+
+`iph batch` (a JSON list of steps, MCP `iph_batch`) still works for a short fixed sequence, but a script does the same and more.
 
 ## Selectors
 
 - A plain string is an exact label: `"일반"`. A row labelled `"Wi-Fi, HomeNet"` also matches `"Wi-Fi"`.
 - `label~="contains"`, `label/regex/`, `role=button`, `value~="…"`, `id=<identifier or element id>`, `within="<selector>"`, `index=N`, combined with spaces: `role=button label~="삭제"`.
-- In MCP, batch and recipes an object works too: `{"label": "일반", "role": "button"}`, with `label_contains`, `label_regex`, `value`, `value_contains`, `id`, `id_contains`, `id_regex`, `within`, `index`.
+- In scripts, MCP and batch an object works too: `{"label": "일반", "role": "button"}`, with `label_contains`, `label_regex`, `value`, `value_contains`, `id`, `id_contains`, `id_regex`, `within`, `index`.
 - Several matches are an error, never a guess. Read the `candidates` and narrow.
 - `id=` needs identifiers, which arrive about 0.5 s after the labels (`iph read --full`).
 
@@ -119,7 +123,7 @@ Mark a step that pays, sends or orders with `confirm: true`; it then runs only w
 
 ## Commands at a glance
 
-`read`, `find`, `tap`, `swipe`, `scroll`, `type`, `key`, `button`, `launch`, `apps` (bundle ids), `screenshot`, `batch`, `run`, `recipes`, `op`, `dnd`, `doctor`, `devices`, `stop`. `iph <command> --help` has the flags; add `--human` to read a result yourself.
+`read`, `find`, `tap`, `swipe`, `scroll`, `type`, `key`, `button`, `launch`, `apps` (bundle ids), `screenshot`, `script`, `run`, `scripts`, `batch`, `op`, `dnd`, `doctor`, `devices`, `stop`. `iph <command> --help` has the flags; add `--human` to read a result yourself.
 
 ## When something is off
 

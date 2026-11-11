@@ -5,7 +5,7 @@
 //! spaces. `label`, `value` and `id` all take `=`, `~=` and `/regex/`. A
 //! string with none of these is an exact label.
 //!
-//! Structured form (recipes, MCP, batch): `{label, label_contains,
+//! Structured form (scripts, MCP, batch): `{label, label_contains,
 //! label_regex, value, value_contains, value_regex, role, id, id_contains,
 //! id_regex, within, index}`.
 

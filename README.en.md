@@ -1,6 +1,6 @@
 # iphone-cli (`iph`)
 
-A CLI and MCP server that lets AI agents read and operate any app on a **real iPhone** through its accessibility tree. No XCUITest, no WebDriverAgent, no Xcode signing: it talks directly to the Apple developer services Xcode itself uses. Sequences you run often become **recipes** that execute in one call, without a round trip to the model between steps.
+A CLI and MCP server that lets AI agents read and operate any app on a **real iPhone** through its accessibility tree. No XCUITest, no WebDriverAgent, no Xcode signing: it talks directly to the Apple developer services Xcode itself uses. Sequences you run often become **scripts** (JavaScript) that execute in one call, without a round trip to the model between steps.
 
 Built on the principle of [Poki](https://github.com/JosssphZhou/poki). No Poki code is used; this is a new implementation from the behaviour Poki's documentation describes and from experiments on a device. Device communication relies on [idevice](https://github.com/jkcoxson/idevice) (MIT).
 
@@ -80,7 +80,8 @@ Every command prints JSON; add `--human` for people. The device is chosen by `--
 | `iph launch <bundle id \| name> [--restart]` / `iph apps` | Launch an app, list apps |
 | `iph screenshot [-o file]` | PNG capture |
 | `iph batch <file \| ->` | A JSON array of steps in one call |
-| `iph run <recipe> [--arg k=v] [--confirm op_id]` / `iph recipes` | Run a recipe, list recipes |
+| `iph script <file \| -> [--arg k=v] [--confirm op_id]` | Run JavaScript as given (`-` reads stdin) |
+| `iph run <name> [--arg k=v] [--confirm op_id]` / `iph scripts` | Run a saved script, list saved scripts |
 | `iph op <op_id>` | Look up a confirmed operation |
 | `iph mcp [--tools a,b]` | MCP server on stdio |
 | `iph dnd <on\|off\|status>` | Turn Do Not Disturb on, put the earlier Focus back, or show the current state. Normally iph does this by itself |
@@ -98,7 +99,7 @@ Every command prints JSON; add `--human` for people. The device is chosen by `--
 
 Rows labelled `"name, value"` (as in Settings: `"Wi-Fi, HomeNet"`) also match `label="Wi-Fi"`.
 
-Recipes, MCP and batch also take an object: `{label, label_contains, label_regex, value, value_contains, value_regex, role, id, id_contains, id_regex, within, index}`.
+Scripts, MCP and batch also take an object: `{label, label_contains, label_regex, value, value_contains, value_regex, role, id, id_contains, id_regex, within, index}`.
 
 ### Results
 
@@ -120,7 +121,8 @@ The phone does not acknowledge touch reports. So results separate `sent` from `v
 
 - **Guarded words:** a tap whose target label contains 결제, 결제하기, 송금, 보내기, 이체, 주문, 주문하기, 구매, 구매하기, 결제 완료, 지불, 충전, pay, purchase, buy, send money, transfer or place order is not sent; the result is `outcome: "blocked"`, `error.code: "confirm_required"`. Korean words match anywhere in the label, English ones as whole words ("Payment methods" passes).
 - **`--confirm <op_id>`:** after a person approved, a new id lets the tap through. The same `op_id` is never pressed twice: it is written to `~/Library/Application Support/iph/ops.jsonl` (0600) before the tap goes out, so it stays spent even if the process dies halfway. When the outcome is uncertain, look it up with `iph op <op_id>` instead of retrying with a new id.
-- **`confirm: true` on a recipe step:** the step stops unless the run has `--confirm <op_id>`.
+- **`{confirm: true}` in a script:** a script can only mark a call `confirm: true`; the op_id counts only when a person passes it with `iph run/script … --confirm <op_id>`. A script that puts an op_id into `confirm` itself (read from a blocked result or made up) is refused with `confirm_not_allowed`. One op_id presses one marked call, so two presses need two `--confirm`. A tap on a guarded label that the script did not mark stays blocked even when `--confirm` was given.
+- **Swipes:** a swipe that begins and ends on one element can press it like a tap, so it is refused when that element's label is a guarded word.
 - **`only_apps`:** when set in `~/.config/iph/config.toml`, only those apps are launched, and input is refused while anything else is in front.
 - **Do Not Disturb:** turned on before input and put back afterwards (below).
 
@@ -140,15 +142,19 @@ dnd_idle_secs = 300      # put it back after this long without a command; 0 = on
 [daemon]
 input_idle_secs = 120    # close the input session after this long unused; 0 closes it after every command
 idle_exit_secs = 1800    # the resident process exits after this long without requests
+
+[script]
+timeout_secs = 300       # how long one script may run (840 at most)
+memory_mb = 64           # how much memory a script may hold
 ```
 
 Sending input needs the phone to be in "screen sharing" state (an indicator shows at the top of the phone). For an app that hides its content or warns while the screen is shared, set `input_idle_secs = 0`: the phone is then in that state only while input is being sent, at the price of 3 to 4 s more per input. Reading does not depend on screen sharing.
 
-**Limit:** the guard reads labels and nothing else. A button without a label, or labelled differently (an icon-only pay button, "Next", "OK"), is not caught. In any flow where money or messages are at stake, mark the last step `confirm: true` yourself.
+**Limit:** the guard reads labels and nothing else. A button without a label, or labelled differently (an icon-only pay button, "Next", "OK"), is not caught. In any flow where money or messages are at stake, mark that call `{confirm: true}` in the script yourself.
 
 ### Do Not Disturb
 
-- **Turned on:** when a command that sends input (`tap`, `swipe`, `scroll`, `type`, `key`, `button`, `launch`, `batch`, `run`) first runs in the resident process. If Do Not Disturb is already on, nothing changes.
+- **Turned on:** when a command that sends input (`tap`, `swipe`, `scroll`, `type`, `key`, `button`, `launch`, `batch`) first runs in the resident process. A script turns it on before its first call that sends input; a script that only reads leaves it alone. If Do Not Disturb is already on, nothing changes.
 - **Put back:** at `iph stop`, after `dnd_idle_secs` (5 minutes by default) without a command, when the resident process exits on its own, or with `iph dnd off`. Later input turns it on again.
 - **Put back to what:** the Focus that was on before (or none) is written to `~/Library/Application Support/iph/<udid>.dnd.json` and restored as it was. If the phone was already in Do Not Disturb, iph leaves it alone; if a person switched to another Focus meanwhile, that one stays.
 - **How:** no service on the phone offers this, so iph does what a person does: pull Control Center down, hold the Focus control, pick the mode in the list, press Home twice. Control Center is therefore visible for a moment, and one switch usually takes 11 to 15 s, or 19 to 36 s when the resident process has just started. This errand is exempt from `only_apps` and the guarded words.
@@ -158,52 +164,83 @@ Sending input needs the phone to be in "screen sharing" state (an indicator show
 - **Not covered:** whatever comes through Do Not Disturb (alarms and timers, emergency alerts, people and apps allowed in the Do Not Disturb settings) and system pop-ups. That is why `only_apps` and `app_changed` stay. Whether banners really stay away while Do Not Disturb is on was not tested separately (it relies on how iOS behaves).
 - **Turning it off:** `[safety] dnd = false`. Then turn a Focus on yourself while iph works.
 
-## Recipes
+## Scripts
 
-```yaml
-name: settings-version
-description: Read the iOS version from Settings
-app: com.apple.Preferences
-args: {}
-steps:
-  - launch: {app: com.apple.Preferences, restart: true}
-  - scroll_until: {label: "일반"}
-  - tap: {label: "일반"}
-  - tap: {label: "정보"}
-  - read_field: {name: ios_version, selector: {label: "iOS 버전"}, take: value}
-output: [ios_version]
+A sequence you run often is written in JavaScript and runs in one call. The commands (`read`, `tap`, `scroll` …) are functions; loops, conditions and variables are the language's own. The engine (QuickJS) is inside `iph`, so there is nothing else to install.
+
+```js
+// Read the iOS version from Settings
+launch("com.apple.Preferences", { restart: true });
+scroll("down", { until: "일반" });
+tap("일반");
+tap("정보");
+return { ios_version: readField({ selector: { label: "iOS 버전" }, take: "value" }) };
 ```
+
+```sh
+iph script flow.js --arg city=Seoul    # run a file
+iph script - <<'EOF'                   # from stdin
+return { front: read({ app: true }).apps[0].name };
+EOF
+iph run settings-version               # a saved script, by name
+iph scripts                            # list saved scripts
+```
+
+```json
+{"ok": true, "outcome": "done", "elapsed_ms": 10712, "outputs": {"ios_version": "27.0.1"}, "logs": [], "calls": 5, "inputs_sent": 4, "script": "settings-version", "source": "builtin:settings-version"}
+```
+
+- **Where they live:** `~/.config/iph/scripts/<name>.js` (personal, wins), then the repository's `scripts/` (examples, built into the binary). A file's first comment line is its description in `iph scripts`.
+- **Arguments and results:** `--arg k=v` arrives as `args.k` (text, so a number is `Number(args.n)`). The object the script returns, plus anything set with `output(k, v)`, becomes `outputs`; lines written with `log(…)` come back in `logs`.
+
+| Function | What it does |
+|---|---|
+| `read(opts)` · `find(selector, opts)` · `apps()` | Same arguments and result as the command of that name |
+| `tap(target, {long_ms, double, timeout_ms, settle, confirm})` | For a selector: waits up to 5 s for it to appear and taps once it has been in the same place on two readings in a row (a screen that has just come up may still shift its rows). `settle: false` turns that off |
+| `tap([a, b, …])` | Tap several targets in a row on the screen as it is, without reading in between (keypads) |
+| `swipe(direction \| {from, to}, {duration_ms, drag})` · `scroll(direction, {until, max})` | Swipe, scroll |
+| `type(text, {clear, submit})` · `key(name)` · `button(name)` | Type, key, button |
+| `launch(app, {restart})` | Launch and check it is in front. `restart` quits it first so it starts on its first screen |
+| `waitFor(selector, {timeout_ms})` | Until the element appears (8 s by default). It sits out a system panel (Face ID) that covers the app for a moment |
+| `readField({selector, take, regex})` | One value, as text. `take`: `value` (default), `label`, `identifier`, `text` |
+| `readList({row, columns, key, group, stop_below, until, max_scrolls, limit})` | Collect a list while scrolling, each row once; returns `{rows, scrolls, ended}` |
+| `sleep(ms)` · `log(…)` · `output(k, v)` | Wait, note, add a value to the result |
+
+- A function returns the JSON object the CLI command of the same name prints (`tap("일반").screen_changed`, `read().elements`). Selectors can be strings or objects.
+- **A failure is an exception.** A call that fails throws an `Error` carrying `e.code`, `e.outcome`, `e.hint` and `e.result` (the whole result object). Uncaught, it ends the script, and the result has `failed_call: {cmd, line, outcome}`, `reason: {code, message}` and `screen_summary`. Nothing is guessed. Use `try { … } catch (e) { … }` only around something that may legitimately be missing.
+- **The `outcome` of a script that stopped:** `blocked` when the safety guard stopped it. Otherwise `unknown` if any input had gone out before it stopped (running it again would send that input again), and `not_sent` if none had. `inputs_sent` counts the calls that sent input.
+- **Nothing follows `unknown`.** After a call whose input may or may not have reached the phone (`outcome: "unknown"`) the script is ended there. Catching the error does not help: no further call reaches the phone.
+- Any call takes `hint: "…"` among its options: what to tell the person if the script stops at that call ("look at the phone" on a `waitFor` that sits out Face ID).
+- After `launch`, that app must stay in front. If another app comes up, input calls and `readField` / `readList` stop with `unexpected_app`.
+- **`readList`:** `columns` is `{name: {take, regex, selector}}`, or `{name: {value: "…"}}` for the same value on every row. `group: {selector, regex, as}` turns headings between rows (a date line) into a column of the rows under them, and `stop_below: N` stops once a heading's number falls below N. `key: "column"` says two rows are the same row when that column agrees; use it for lists whose rows change while they are read (a clock, time left). Without it the whole row has to agree.
+- `readList` reads each screen once and works out by itself how far to scroll so that the last two rows of one screen land at the top of the next (that depends on the phone and the app, so it is computed from where rows were read). The two shared rows stitch the screens together, which shows whether a row was skipped. Before it calls the end of a list it moves the list up and down once to check.
+- **Walls:** a script cannot reach files, the network or other processes (no module loading, no timers). `Date`, `JSON`, `RegExp`, `Map` and the rest of the language are there. A script that runs past `[script] timeout_secs` (300 s by default) or holds more than `memory_mb` (64 MB) is stopped.
+
+Examples: [`settings-version`](scripts/settings-version.js), [`calculator-multiply`](scripts/calculator-multiply.js), [`clock-world-list`](scripts/clock-world-list.js), and [`settings-list`](scripts/settings-list.js) with a loop and a condition (all written for a Korean-language phone). Keep personal scripts (banking, delivery) out of the repository, in `~/.config/iph/scripts/`.
+
+### batch
+
+`iph batch` runs a JSON array of steps in order and stops at the first failure. It is for short sequences that need no loop or condition.
 
 | Step | What it does |
 |---|---|
-| `launch: <app>` or `{app, restart}` | Launch and check it is in front. `restart` quits it first so it starts on its first screen |
+| `launch: <app>` or `{app, restart}` | Launch and check it is in front |
 | `wait_for: <selector>` or `{selector, timeout_ms}` | Until the element appears (8 s by default) |
-| `tap: <selector>` or `{selector, long_ms, double, timeout_ms}` | Tap; waits briefly for the target to appear |
-| `tap: [selector, …]` | Tap several targets in a row on the screen as it is, without reading in between (keypads) |
-| `type: <text>` or `{text, clear, submit}` | Type |
-| `swipe: <direction>` or `{from, to, duration_ms, drag}` | Swipe |
+| `tap: <selector>` or `{selector, long_ms, double, timeout_ms}` · `tap: [selector, …]` | Tap, tap several in a row |
+| `type: <text>` or `{text, clear, submit}` · `swipe: <direction>` or `{from, to, duration_ms, drag}` | Type, swipe |
 | `scroll_until: <selector>` or `{selector, direction, max}` | Scroll until it shows |
-| `read_field: {name, selector, take, regex}` | Read one value. `take`: `value` (default), `label`, `identifier`, `text` |
-| `read_list: {name, row, columns, until, max_scrolls, limit}` | Collect a list while scrolling, each row once. `columns` is `{name: {take, regex, selector}}` |
-| `assert: <selector>` | Continue only if the element is there |
-| `button: home` · `key: return` · `sleep: 500` | Button, key, wait (ms) |
-| `confirm: true` (on any step) | Runs only with `--confirm <op_id>` |
+| `read_field: {name, selector, take, regex}` · `read_list: {name, row, columns, …}` | Read one value, read a list (as `readField` and `readList`) |
+| `assert: <selector>` · `button: home` · `key: return` · `sleep: 500` | Continue only if it is there, button, key, wait (ms) |
+| (on any step) `confirm: "<op_id>"` · `when: "a == b"` · `hint: "…"` | Press after confirmation, condition, what to say if it stops |
 
-- Dates are filled in too: `{{today.year}}`, `{{today.month}}`, `{{today.day}}`, and N days ago as `{{ago.6.month}}`, `{{ago.6.day}}`. Any step may add `when: "a == b"` (or `!=`) to run only then, and `hint: "…"` to say what a person should do if it stops there. `read_list` takes `group: {selector, regex, as}` (headings between rows become a column), `stop_below: N` and constant columns `{value: "…"}`.
-- `{{name}}` is replaced by `--arg name=value`. `args` holds defaults; `null` makes an argument required.
-- A failing step stops the run with `{failed_step, reason, screen_summary}`. Nothing is guessed. The `outcome` is that of the failing step. `inputs_sent` counts the earlier steps that already sent input, so check it before deciding whether the whole run can simply be started again.
-- After `launch`, that app must stay in front; another app stops the run with `unexpected_app`.
-- Each step reports its `elapsed_ms`.
-- Looked up in `~/.config/iph/recipes/*.yaml` (personal, wins) and then the repository's `recipes/` (examples, built into the binary). A file path works too.
-
-Examples: [`settings-version`](recipes/settings-version.yaml), [`calculator-multiply`](recipes/calculator-multiply.yaml), [`clock-world-list`](recipes/clock-world-list.yaml) (written for a Korean-language phone). Keep personal recipes (banking, delivery) out of the repository, in `~/.config/iph/recipes/`.
+A failing step returns `{failed_step, reason, screen_summary, inputs_sent}`; each step's `elapsed_ms` is in `steps`.
 
 ## MCP
 
 ```sh
 claude mcp add iph -- iph mcp          # Claude Code
 codex mcp add iph -- iph mcp           # Codex
-iph mcp --tools read,find,run          # offer only some tools
+iph mcp --tools read,find,script       # offer only some tools
 ```
 
 To have an agent reach for `iph` on its own, link the skill (it works with `iph` in the shell alone, without the MCP registration).
@@ -213,7 +250,7 @@ ln -s "$PWD/skills/iph" ~/.claude/skills/iph                    # Claude Code
 ln -s "$PWD/skills/iph" ~/.codex/skills/iph                     # Codex
 ```
 
-Tools: `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_run`, `iph_recipes`, `iph_doctor`, `iph_dnd`. Arguments and results are the same as the CLI's. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
+Tools: `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`. Arguments and results are the same as the CLI's. `iph_script` takes `code` (JavaScript) and `args`; `iph_run` takes `name` and `args`. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
 
 ## Speed
 
@@ -226,7 +263,7 @@ iPhone 15 Pro Max, iOS 27.0.1, Wi-Fi, with the resident process connected (2026-
 | `iph tap` including the check (20 runs, 0 misses) | median 1.75 s, max 4.30 s |
 | `iph scroll`, one step with check | 2.1 to 2.6 s |
 | `iph type` (Notes, with check and clipboard restore) | 4 to 7 s |
-| Recipe `settings-version` (5 steps) | 10.8 to 22.4 s |
+| Script `settings-version` (5 calls, over USB) | 9.9 to 13.3 s (8 runs) |
 | First `iph read` without a resident process (tunnel and subscription included) | about 2 to 3 s |
 | Turning Do Not Disturb on, or putting the earlier Focus back | median 12.5 s with the connection up (11 runs, 10.9 to 14.2 s); 19 to 36 s right after the resident process starts |
 
@@ -263,7 +300,7 @@ iph mcp  ──┼─ unix socket ─ iph daemon ─ lockdown → CoreDeviceProx
 ## Development
 
 ```sh
-cargo test          # runs without a phone: parser (real Calculator dumps), selectors, safety guard, recipes
+cargo test          # runs without a phone: parser (real Calculator dumps), selectors, safety guard, scripts
 IPH_TRACE=1 iph …   # logs request and dump times to ~/Library/Application Support/iph/<udid>.log
 ```
 

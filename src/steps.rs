@@ -1,22 +1,18 @@
-//! Recipes: a fixed sequence of steps run in one go, without a round trip to
-//! the agent between steps. `iph batch` runs the same steps from JSON.
+//! Steps: the pieces `iph batch` runs from a JSON list, and that scripts call
+//! as `waitFor`, `readField` and `readList`.
 //!
 //! A step is a one-key map. Kinds: `launch`, `wait_for`, `tap`, `type`,
 //! `swipe`, `scroll_until`, `read_field`, `read_list`, `assert`, `button`,
-//! `key`, `sleep`. Any step may add `confirm: true`, `when: "a == b"` (run
-//! the step only then) and `hint: "…"` (what to tell the person if it
-//! fails). A step that fails stops the run; nothing is guessed.
+//! `key`, `sleep`. Any step may add `confirm`, `when: "a == b"` (run the
+//! step only then) and `hint: "…"` (what to tell the person if it fails). A
+//! step that fails stops the run; nothing is guessed.
 //!
-//! Besides `{{argument}}`, strings may use today's date and the date some
-//! days ago: `{{today.day}}`, `{{ago.6.month}}`, `{{ago.6.year}}`.
+//! Strings may use today's date and the date some days ago:
+//! `{{today.day}}`, `{{ago.6.month}}`, `{{ago.6.year}}`.
 
-use std::{
-    path::{Path, PathBuf},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use regex::Regex;
-use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -25,121 +21,10 @@ use crate::{
     device::session::{Fresh, Session, reuse},
     fields,
     i18n::t,
-    paths,
     reply::{Fail, Outcome, Res},
     safety::{self, OpRecord},
     selector::{Selector, dedupe_targets},
 };
-
-/// Example recipes shipped in the repository's `recipes/` folder.
-const BUILTIN: &[(&str, &str)] = &[
-    ("settings-version", include_str!("../recipes/settings-version.yaml")),
-    ("calculator-multiply", include_str!("../recipes/calculator-multiply.yaml")),
-    ("clock-world-list", include_str!("../recipes/clock-world-list.yaml")),
-];
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Recipe {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub app: Option<String>,
-    /// Argument name → default value (null = required).
-    #[serde(default)]
-    pub args: Map<String, Value>,
-    pub steps: Vec<Value>,
-    /// Names of read values to return. Empty = all.
-    #[serde(default)]
-    pub output: Vec<String>,
-    #[serde(skip)]
-    pub source: String,
-}
-
-impl Recipe {
-    pub fn parse(text: &str, source: &str) -> Result<Recipe, String> {
-        let mut r: Recipe =
-            serde_yaml_ng::from_str(text).map_err(|e| format!("{source}: {e}"))?;
-        r.source = source.to_string();
-        if r.steps.is_empty() {
-            return Err(format!("{source}: a recipe needs at least one step"));
-        }
-        for (i, step) in r.steps.iter().enumerate() {
-            split_step(step).map_err(|e| format!("{source}: step {}: {e}", i + 1))?;
-        }
-        Ok(r)
-    }
-}
-
-/// Recipe names and where each comes from. Personal recipes win over examples.
-pub fn list() -> Vec<(String, String, String)> {
-    let mut out: Vec<(String, String, String)> = Vec::new();
-    let personal = paths::personal_recipes();
-    if let Ok(dir) = std::fs::read_dir(&personal) {
-        let mut files: Vec<PathBuf> = dir
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("yaml" | "yml")))
-            .collect();
-        files.sort();
-        for path in files {
-            let source = path.display().to_string();
-            match std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|text| Recipe::parse(&text, &source))
-            {
-                Ok(r) => out.push((r.name, r.description, source)),
-                Err(e) => out.push((
-                    path.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string(),
-                    format!("invalid: {e}"),
-                    source,
-                )),
-            }
-        }
-    }
-    for (name, text) in BUILTIN {
-        if out.iter().any(|(n, _, _)| n == name) {
-            continue;
-        }
-        if let Ok(r) = Recipe::parse(text, &format!("builtin:{name}")) {
-            out.push((r.name, r.description, format!("builtin:{name}")));
-        }
-    }
-    out
-}
-
-/// Find a recipe by name (personal folder first, then the examples) or by
-/// path to a YAML file.
-pub fn load(name: &str) -> Result<Recipe, Fail> {
-    let as_path = Path::new(name);
-    if name.ends_with(".yaml") || name.ends_with(".yml") || name.contains('/') {
-        let text = std::fs::read_to_string(as_path)
-            .map_err(|e| Fail::not_sent("recipe_not_found", format!("{name}: {e}")))?;
-        return Recipe::parse(&text, name).map_err(|e| Fail::not_sent("recipe_invalid", e));
-    }
-    for ext in ["yaml", "yml"] {
-        let path = paths::personal_recipes().join(format!("{name}.{ext}"));
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            return Recipe::parse(&text, &path.display().to_string())
-                .map_err(|e| Fail::not_sent("recipe_invalid", e));
-        }
-    }
-    // A personal file may be named differently from the recipe it holds.
-    if let Some((_, _, source)) = list().into_iter().find(|(n, _, s)| n == name && !s.starts_with("builtin:")) {
-        let text = std::fs::read_to_string(&source)
-            .map_err(|e| Fail::not_sent("recipe_not_found", format!("{source}: {e}")))?;
-        return Recipe::parse(&text, &source).map_err(|e| Fail::not_sent("recipe_invalid", e));
-    }
-    if let Some((_, text)) = BUILTIN.iter().find(|(n, _)| *n == name) {
-        return Recipe::parse(text, &format!("builtin:{name}"))
-            .map_err(|e| Fail::not_sent("recipe_invalid", e));
-    }
-    Err(Fail::not_sent("recipe_not_found", format!("no recipe named \"{name}\""))
-        .hint(t(
-            "`iph recipes`로 목록을 확인하세요. 개인 레시피는 ~/.config/iph/recipes/ 에 둡니다.",
-            "List them with `iph recipes`. Personal recipes live in ~/.config/iph/recipes/.",
-        )))
-}
 
 const KINDS: &[&str] = &[
     "launch",
@@ -220,7 +105,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 /// Today in the Mac's time zone as days since 1970-01-01. `IPH_TODAY`
-/// (YYYY-MM-DD) overrides it, to try a recipe as if it were another day.
+/// (YYYY-MM-DD) overrides it, to try a run as if it were another day.
 fn today_days() -> i64 {
     if let Ok(text) = std::env::var("IPH_TODAY") {
         let parts: Vec<i64> = text.split('-').filter_map(|p| p.parse().ok()).collect();
@@ -547,7 +432,7 @@ fn page_marks(page: &[Row]) -> String {
         .join(" ")
 }
 
-/// Wrap a step's failure in the recipe-level report: which step, why, and
+/// Wrap a step's failure in the run's report: which step, why, and
 /// what the screen showed.
 fn step_failure(
     index: usize,
@@ -589,7 +474,7 @@ pub struct RunOptions {
 }
 
 impl Session {
-    async fn wait_for(&mut self, sel: &Selector, timeout: Duration) -> Res<Element> {
+    pub(crate) async fn wait_for(&mut self, sel: &Selector, timeout: Duration) -> Res<Element> {
         let started = Instant::now();
         let full = sel.needs_identifier();
         let mut fresh = Fresh::MaxAge(reuse());
@@ -619,7 +504,7 @@ impl Session {
     /// the row was then lands on its neighbour (2026-11-11: right after a
     /// launch a tap on one row of a home screen opened the page of the row
     /// above it).
-    async fn settle_target(&mut self, sel: &Selector) -> Res<()> {
+    pub(crate) async fn settle_target(&mut self, sel: &Selector) -> Res<()> {
         let full = sel.needs_identifier();
         let place = |screen: &Screen| -> Option<(i64, i64, i64, i64)> {
             match dedupe_targets(sel.find(screen)).as_slice() {
@@ -644,12 +529,10 @@ impl Session {
         Ok(())
     }
 
-    async fn read_field(&mut self, body: &Value) -> Res<(String, Value)> {
+    /// `name` is what a batch files the value under; a script has no use for it.
+    pub(crate) async fn read_field(&mut self, body: &Value) -> Res<(String, Value)> {
         let map = body.as_object().ok_or_else(|| Fail::invalid("read_field needs a map"))?;
-        let name = map
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Fail::invalid("read_field needs `name`"))?;
+        let name = map.get("name").and_then(|v| v.as_str()).unwrap_or("value");
         let sel_value = map.get("selector").ok_or_else(|| Fail::invalid("read_field needs `selector`"))?;
         let sel = Selector::from_value(sel_value).map_err(|e| Fail::invalid(e.to_string()))?;
         let what = map.get("take").and_then(|v| v.as_str()).unwrap_or("value");
@@ -662,7 +545,7 @@ impl Session {
             .await?;
         let el = actions::resolve_one(&sel, &screen)?;
         let mut text = apply_regex(take(el, what), pattern)?;
-        // What a recipe hands back must not come from a reading that was
+        // What a run hands back must not come from a reading that was
         // already out of date: look again until two readings give the same.
         let needs_ids = sel.needs_identifier() || what == "identifier";
         for _ in 0..2 {
@@ -688,10 +571,14 @@ impl Session {
         }
     }
 
+    /// `key`: the columns that say which row a row is. Without it the whole
+    /// row does, which takes a row whose text changes while the list is read
+    /// (a clock, a counter) for a new one.
     fn rows_on_screen(
         screen: &Screen,
         row: &Selector,
         columns: Option<&Map<String, Value>>,
+        key: &[String],
     ) -> Res<Vec<Row>> {
         let mut out = Vec::new();
         for el in dedupe_targets(row.find(screen)) {
@@ -745,7 +632,14 @@ impl Session {
                 let text = apply_regex(source.and_then(|e| take(e, what)), pattern)?;
                 rec.insert(col.clone(), text.map(Value::String).unwrap_or(Value::Null));
             }
-            let key = format!("{identity}\u{1}{}", Value::Object(rec.clone()));
+            let key = if key.is_empty() {
+                format!("{identity}\u{1}{}", Value::Object(rec.clone()))
+            } else {
+                key.iter()
+                    .map(|k| rec.get(k).map(|v| v.to_string()).unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join("\u{1}")
+            };
             out.push(Row { value: Value::Object(rec), key, y });
         }
         Ok(out)
@@ -757,9 +651,10 @@ impl Session {
         screen: &Screen,
         row: &Selector,
         columns: Option<&Map<String, Value>>,
+        key: &[String],
         group: Option<&(Selector, String, Option<String>, String)>,
     ) -> Res<Vec<Row>> {
-        let mut page = Self::rows_on_screen(screen, row, columns)?;
+        let mut page = Self::rows_on_screen(screen, row, columns, key)?;
         if let Some((sel, what, pattern, _)) = group {
             // Headings travel with the rows, so the same position logic that
             // keeps rows apart puts each heading where it belongs.
@@ -808,15 +703,25 @@ impl Session {
         Ok(r.get("screen_changed").and_then(|v| v.as_bool()).unwrap_or(false))
     }
 
-    async fn read_list(&mut self, body: &Value) -> Res<(String, Value, Value)> {
+    pub(crate) async fn read_list(&mut self, body: &Value) -> Res<(String, Value, Value)> {
         let map = body.as_object().ok_or_else(|| Fail::invalid("read_list needs a map"))?;
-        let name = map
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Fail::invalid("read_list needs `name`"))?;
+        let name = map.get("name").and_then(|v| v.as_str()).unwrap_or("rows");
         let row = Selector::from_value(map.get("row").ok_or_else(|| Fail::invalid("read_list needs `row`"))?)
             .map_err(|e| Fail::invalid(e.to_string()))?;
         let columns = map.get("columns").and_then(|v| v.as_object());
+        // `key: "city"` (or a list): the columns that identify a row.
+        let key: Vec<String> = match map.get("key") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::String(k)) => vec![k.clone()],
+            Some(Value::Array(ks)) => ks
+                .iter()
+                .map(|k| k.as_str().map(String::from).ok_or_else(|| Fail::invalid("key takes column names")))
+                .collect::<Res<_>>()?,
+            Some(_) => return Err(Fail::invalid("key takes a column name or a list of them")),
+        };
+        if let Some(missing) = key.iter().find(|k| !columns.is_some_and(|c| c.contains_key(k.as_str()))) {
+            return Err(Fail::invalid(format!("key names `{missing}`, which is not one of the columns")));
+        }
         let until = match map.get("until") {
             Some(v) => Some(Selector::from_value(v).map_err(|e| Fail::invalid(e.to_string()))?),
             None => None,
@@ -871,7 +776,7 @@ impl Session {
             // One reading a page: the scroll before it already asked the
             // phone for the new screen, and this takes that reading over.
             let (_, mut screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
-            let mut page = Self::list_page(&screen, &row, columns, group.as_ref())?;
+            let mut page = Self::list_page(&screen, &row, columns, &key, group.as_ref())?;
             if let Some(before) = &prev {
                 let stitched = page.iter().any(|r| before.iter().any(|p| p.key == r.key));
                 if !stitched && !page.is_empty() && !before.is_empty() && stride.last > 0.0 {
@@ -882,7 +787,7 @@ impl Session {
                     self.stride_drag(back, stride.last / 2.0).await?;
                     stride.lost += 40.0;
                     (_, screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
-                    page = Self::list_page(&screen, &row, columns, group.as_ref())?;
+                    page = Self::list_page(&screen, &row, columns, &key, group.as_ref())?;
                 }
                 stride.learn(before, &page);
             } else {
@@ -946,7 +851,7 @@ impl Session {
                 }
                 self.list_scroll(&direction).await?;
                 let (_, screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
-                let page = Self::list_page(&screen, &row, columns, group.as_ref())?;
+                let page = Self::list_page(&screen, &row, columns, &key, group.as_ref())?;
                 let fresh_rows = new_rows(&at_end, &page);
                 crate::device::ax::trace(|| format!("read_list end check: new={}", fresh_rows.len()));
                 if fresh_rows.is_empty() {
@@ -993,7 +898,7 @@ impl Session {
 
     /// A failure when the latest reading shows another app in front than the
     /// one this run launched (a notification was tapped, a link opened …).
-    fn unexpected_app(&self, expected_pid: Option<i64>) -> Option<Fail> {
+    pub(crate) fn unexpected_app(&self, expected_pid: Option<i64>) -> Option<Fail> {
         let expected = expected_pid?;
         let (_, dump, _) = self.ax.as_ref()?.latest()?;
         if dump.applications.iter().any(|a| a.pid == expected) {
@@ -1311,7 +1216,7 @@ impl Session {
                             _ => "unknown",
                         },
                     );
-                    // The recipe's author knows what this step usually waits on.
+                    // Whoever wrote the steps knows what this one usually waits on.
                     if let Some(hint) = hint {
                         f.hint = Some(hint);
                     }
@@ -1325,50 +1230,6 @@ impl Session {
         }
         Ok(fields! { "steps": records, "outputs": outputs })
     }
-
-    pub async fn cmd_run(&mut self, name: &str, given: &Map<String, Value>, confirm: Option<String>) -> Res {
-        let recipe = load(name)?;
-        let mut args = Map::new();
-        for (key, default) in &recipe.args {
-            match given.get(key).or((!default.is_null()).then_some(default)) {
-                Some(v) => {
-                    args.insert(key.clone(), v.clone());
-                }
-                None => {
-                    return Err(Fail::invalid(format!(
-                        "recipe `{}` needs --arg {key}=…",
-                        recipe.name
-                    )));
-                }
-            }
-        }
-        if let Some(unknown) = given.keys().find(|k| !recipe.args.contains_key(*k)) {
-            return Err(Fail::invalid(format!(
-                "recipe `{}` has no argument `{unknown}`",
-                recipe.name
-            )));
-        }
-        let opts = RunOptions { confirm, batch: false };
-        let mut out = match Box::pin(self.run_steps(&recipe.steps, &args, &opts)).await {
-            Ok(o) => o,
-            Err(f) => return Err(f.with("recipe", recipe.name.clone())),
-        };
-        if !recipe.output.is_empty()
-            && let Some(Value::Object(all)) = out.get_mut("outputs") {
-                all.retain(|k, _| recipe.output.contains(k));
-            }
-        out.insert("recipe".into(), json!(recipe.name));
-        out.insert("source".into(), json!(recipe.source));
-        Ok(out)
-    }
-}
-
-pub fn cmd_recipes() -> Res {
-    let list: Vec<Value> = list()
-        .into_iter()
-        .map(|(name, description, source)| json!({ "name": name, "description": description, "source": source }))
-        .collect();
-    Ok(fields! { "count": list.len(), "recipes": list })
 }
 
 #[cfg(test)]
@@ -1376,22 +1237,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_recipes_parse() {
-        for (name, text) in BUILTIN {
-            let r = Recipe::parse(text, name).unwrap();
-            assert_eq!(&r.name, name);
-            assert!(!r.description.is_empty());
-        }
-    }
-
-    #[test]
     fn rejects_bad_steps() {
-        let bad = "name: x\nsteps:\n  - fly: away\n";
-        assert!(Recipe::parse(bad, "t").unwrap_err().contains("unknown step kind"));
-        let two = "name: x\nsteps:\n  - tap: a\n    type: b\n";
-        assert!(Recipe::parse(two, "t").unwrap_err().contains("exactly one kind"));
-        let none = "name: x\nsteps: []\n";
-        assert!(Recipe::parse(none, "t").is_err());
+        assert!(split_step(&json!({"fly": "away"})).unwrap_err().contains("unknown step kind"));
+        assert!(split_step(&json!({"tap": "a", "type": "b"})).unwrap_err().contains("exactly one kind"));
+        assert!(split_step(&json!({"tap": "a", "confirm": true, "hint": "look"})).is_ok());
     }
 
     #[test]
@@ -1431,10 +1280,8 @@ mod tests {
         assert!(holds("10 != 11").unwrap());
         assert!(!holds(" 11 !=11 ").unwrap());
         assert!(holds("soon").is_err());
-        let step = "name: x\nsteps:\n  - tap: a\n    when: maybe\n";
-        assert!(Recipe::parse(step, "t").unwrap_err().contains("when"));
-        let ok = "name: x\nsteps:\n  - tap: a\n    when: \"{{ago.6.month}} != {{today.month}}\"\n    hint: look at the phone\n";
-        assert!(Recipe::parse(ok, "t").is_ok());
+        assert!(split_step(&json!({"tap": "a", "when": "maybe"})).unwrap_err().contains("when"));
+        assert!(split_step(&json!({"tap": "a", "when": "{{ago.6.month}} != {{today.month}}"})).is_ok());
     }
 
     fn mark(text: &str) -> Value {
@@ -1595,6 +1442,41 @@ mod tests {
         let after = rows(&[("x", 100.0), ("y", 180.0)]);
         assert_eq!(scroll_distance(&before, &after), None);
         assert_eq!(labels(&new_rows(&before, &after)), ["x", "y"]);
+    }
+
+    #[test]
+    fn a_key_column_keeps_a_row_whose_text_changed_from_counting_twice() {
+        // A world clock: the minute turns between two readings of the list.
+        let screen = |minute: u32, top: f64, cities: &[&str]| -> Screen {
+            let elements: Vec<Value> = cities
+                .iter()
+                .enumerate()
+                .map(|(i, city)| {
+                    json!({
+                        "id": format!("row{i}{minute}"), "role": "text", "traits": ["static_text"],
+                        "label": format!("{city}, 오후 2:{minute:02}, 오늘, +0시간"),
+                        "frame": { "x": 0, "y": top + 90.0 * i as f64, "w": 430, "h": 90 },
+                    })
+                })
+                .collect();
+            serde_json::from_value(json!({ "width": 430.0, "height": 932.0, "apps": [], "elements": elements })).unwrap()
+        };
+        let row = Selector::from_value(&json!({ "role": "text" })).unwrap();
+        let columns = json!({
+            "city": { "take": "label", "regex": "^([^,]+)" },
+            "time": { "take": "label", "regex": "(오후 [0-9:]+)" },
+        });
+        let columns = columns.as_object();
+        let before = screen(3, 200.0, &["서울", "도쿄", "런던", "파리"]);
+        let after = screen(4, 20.0, &["런던", "파리", "뉴욕"]);
+        let cities = |key: &[String]| -> Vec<String> {
+            let prev = Session::rows_on_screen(&before, &row, columns, key).unwrap();
+            let page = Session::rows_on_screen(&after, &row, columns, key).unwrap();
+            new_rows(&prev, &page).iter().map(|r| r["city"].as_str().unwrap().to_string()).collect()
+        };
+        // By the whole row, the two that were there already look new.
+        assert_eq!(cities(&[]), ["런던", "파리", "뉴욕"]);
+        assert_eq!(cities(&["city".to_string()]), ["뉴욕"]);
     }
 
     #[test]

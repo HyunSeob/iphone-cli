@@ -51,7 +51,7 @@ pub enum Fresh {
 }
 
 /// A cached reading younger than this is reused when a command follows
-/// another one closely (recipes, batches).
+/// another one closely (scripts, batches).
 pub const REUSE: Duration = Duration::from_millis(1500);
 
 /// `REUSE`, or `IPH_REUSE_MS` when set (for experiments).
