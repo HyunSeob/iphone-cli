@@ -151,7 +151,7 @@ Sending input needs the phone to be in "screen sharing" state (an indicator show
 - **Turned on:** when a command that sends input (`tap`, `swipe`, `scroll`, `type`, `key`, `button`, `launch`, `batch`, `run`) first runs in the resident process. If Do Not Disturb is already on, nothing changes.
 - **Put back:** at `iph stop`, after `dnd_idle_secs` (5 minutes by default) without a command, when the resident process exits on its own, or with `iph dnd off`. Later input turns it on again.
 - **Put back to what:** the Focus that was on before (or none) is written to `~/Library/Application Support/iph/<udid>.dnd.json` and restored as it was. If the phone was already in Do Not Disturb, iph leaves it alone; if a person switched to another Focus meanwhile, that one stays.
-- **How:** no service on the phone offers this, so iph does what a person does: pull Control Center down, hold the Focus control, pick the mode in the list, press Home twice. Control Center is therefore visible for a moment, and one switch takes 11 to 22 s (median 15 s over 16). This errand is exempt from `only_apps` and the guarded words.
+- **How:** no service on the phone offers this, so iph does what a person does: pull Control Center down, hold the Focus control, pick the mode in the list, press Home twice. Control Center is therefore visible for a moment, and one switch usually takes 11 to 15 s, or 19 to 36 s when the resident process has just started. This errand is exempt from `only_apps` and the guarded words.
 - **Needs:** the Focus control on Control Center's first page, and Control Center opening while an app is in front. For a phone in a language other than Korean or English, put the names the phone shows in `dnd_control` and `dnd_focus`.
 - **On failure:** the command still runs and its result carries `dnd: {on: false, code, message}`. After two failures the resident process stops trying. Only when Control Center may have been left open is the command held back, with `control_center_open`.
 - **If the resident process dies:** Do Not Disturb stays on. The record file lets the next run take over and put it back; `iph dnd off` does it at once.
@@ -220,7 +220,7 @@ iPhone 15 Pro Max, iOS 27.0.1, Wi-Fi, with the resident process connected (2026-
 | `iph type` (Notes, with check and clipboard restore) | 4 to 7 s |
 | Recipe `settings-version` (5 steps) | 10.8 to 22.4 s |
 | First `iph read` without a resident process (tunnel and subscription included) | about 2 to 3 s |
-| Turning Do Not Disturb on, or putting the earlier Focus back (16 runs) | median 15 s, 11 to 22 s |
+| Turning Do Not Disturb on, or putting the earlier Focus back | median 12.5 s with the connection up (11 runs, 10.9 to 14.2 s); 19 to 36 s right after the resident process starts |
 
 A reading takes more than a second because of the phone: after a request it waits about 1.1 s in silence before it sends the screen. In apps whose screen often changes on its own, readings are taken twice and compared so that an out-of-date screen is not used; that adds 1 to 2 s per step. Details: [docs/how-it-works.md](docs/how-it-works.md) (Korean).
 
@@ -229,9 +229,9 @@ A reading takes more than a second because of the phone: after a request it wait
 - Verified on one device. Other iOS versions may number the accessibility attributes differently (check with `iph read --raw`).
 - Apps whose screen keeps moving (animations, video) take longer to read.
 - Notification banners and system pop-ups are not in the app's tree. Do Not Disturb keeps most banners away, but not what comes through it.
-- Turning Do Not Disturb on adds 11 to 22 s ahead of the first input.
+- Turning Do Not Disturb on adds 11 to 36 s ahead of the first input. If you are recording the phone's screen, Control Center opening and closing will be in the recording; run `iph dnd on` beforehand, or turn it on by hand and set `[safety] dnd = false`.
 - Once, a new input session took no touch at all (cause unknown, one session in about a dozen). The Do Not Disturb step notices this and tries again on a new session. With that feature off, this check is gone too.
-- When the Mac is very busy (other work using all of its CPU), the phone's answers arrive late: readings time out, and a late reading of an earlier screen can be acted on.
+- **There are stretches when the phone answers slowly.** On the morning of 2026-11-11 this happened four times in two hours (from a few minutes to 40): readings took 2 to 30 s or timed out, and input connections dropped. Once the Mac's CPU was fully used by other work; the cause of the others is unknown (often right after the resident process had been stopped and started several times in a row). In such a stretch a late reading of an earlier screen can be acted on: switching Do Not Disturb failed, Control Center was left open, or the app was left for the home screen. `iph stop`, a minute's wait and a new start brought it back. The record is in [docs/how-it-works.md](docs/how-it-works.md), section 7 (Korean).
 - Portrait only.
 - `iph apps` shows the names the phone reports (usually English). Launch by bundle id to be sure.
 - `iph type` puts back the clipboard's text (or one image). Rich content comes back as plain text.
