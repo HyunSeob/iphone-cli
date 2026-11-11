@@ -236,6 +236,9 @@ struct Row {
 /// Key of the entry that stands for a group heading among the rows while a
 /// list is being collected. It never reaches the result.
 const GROUP_MARK: &str = "\u{1}group";
+/// On a row: the heading that stood above it on the reading it was taken
+/// from. Removed before the result goes out.
+const GROUP_OF: &str = "\u{1}group_of";
 
 /// Give every row the text of the heading it stands under (as column `name`)
 /// and drop the headings. With `below`, rows under a heading whose number is
@@ -248,15 +251,24 @@ fn settle_groups(items: Vec<Value>, name: &str, below: Option<i64>) -> Vec<Value
             current = heading.as_str().map(String::from);
             continue;
         }
-        let number = current.as_deref().and_then(|c| c.trim().parse::<i64>().ok());
+        let mut row = item;
+        // The heading the row was seen under wins over the last heading
+        // collected: rows can come in out of order (the app put new rows in
+        // above while the list was being read), and they would otherwise be
+        // filed under whatever heading happened to come last.
+        let seen_under = match &mut row {
+            Value::Object(map) => map.remove(GROUP_OF).and_then(|v| v.as_str().map(String::from)),
+            _ => None,
+        };
+        let heading = seen_under.or_else(|| current.clone());
+        let number = heading.as_deref().and_then(|c| c.trim().parse::<i64>().ok());
         if let (Some(limit), Some(n)) = (below, number)
             && n < limit
         {
             continue;
         }
-        let mut row = item;
         if let Value::Object(map) = &mut row {
-            map.insert(name.to_string(), current.clone().map(Value::String).unwrap_or(Value::Null));
+            map.insert(name.to_string(), heading.map(Value::String).unwrap_or(Value::Null));
         }
         out.push(row);
     }
@@ -672,6 +684,15 @@ impl Session {
                 });
             }
             page.sort_by(|a, b| a.y.total_cmp(&b.y));
+            // Note on every row which heading stands above it on this reading.
+            let mut above: Option<Value> = None;
+            for item in page.iter_mut() {
+                if let Some(heading) = item.value.get(GROUP_MARK) {
+                    above = Some(heading.clone());
+                } else if let (Some(heading), Value::Object(map)) = (&above, &mut item.value) {
+                    map.insert(GROUP_OF.to_string(), heading.clone());
+                }
+            }
         }
         Ok(page)
     }
@@ -1311,6 +1332,26 @@ mod tests {
         assert!(passed_below(&items, 5));
         let rows = settle_groups(items, "day", Some(5));
         assert_eq!(labels(&rows), ["before any heading", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_row_keeps_the_heading_it_was_seen_under() {
+        // Day 11's rows were collected, then the heading of day 10 and its
+        // row. Then the app put three new rows in at the top of day 11; they
+        // arrive last, but were seen under "11".
+        let late = |label: &str| json!({ "label": label, GROUP_OF: "11" });
+        let items = vec![
+            mark("11"),
+            json!({"label": "a"}),
+            mark("10"),
+            json!({"label": "b"}),
+            late("new 1"),
+            late("new 2"),
+        ];
+        let rows = settle_groups(items, "day", None);
+        let got: Vec<(&str, &str)> = rows.iter().map(|r| (r["day"].as_str().unwrap(), r["label"].as_str().unwrap())).collect();
+        assert_eq!(got, [("11", "a"), ("10", "b"), ("11", "new 1"), ("11", "new 2")]);
+        assert!(rows.iter().all(|r| r.get(GROUP_OF).is_none()));
     }
 
     #[test]
