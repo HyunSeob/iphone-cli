@@ -218,7 +218,22 @@ async fn handle(stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
     Ok(())
 }
 
+/// The tunnel's TCP stack and the device library say why a connection went
+/// away ("timed out after 5 retransmissions", "RST on hp=…") as `tracing`
+/// warnings. Without a subscriber they are lost and all iph sees later is
+/// "not connected". They carry ports and byte counts, never screen contents.
+/// `IPH_LOG` takes a filter such as `jktcp=debug` for more.
+fn keep_library_warnings() {
+    let filter = std::env::var("IPH_LOG").unwrap_or_else(|_| "warn".into());
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .try_init();
+}
+
 pub async fn run(udid: String) -> Result<()> {
+    keep_library_warnings();
     paths::ensure_private_dir(&paths::state_dir())?;
     let sock = paths::socket(&udid);
     if UnixStream::connect(&sock).await.is_ok() {
