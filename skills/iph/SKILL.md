@@ -27,7 +27,7 @@ This is a real phone with the user's accounts on it. A tap cannot be taken back,
 
 | `outcome` | What to do |
 |---|---|
-| `done` | Continue. |
+| `done` | Continue. With `ok: false` (only `scroll --until` that did not find its target, `error.code: "not_found"`): the scrolls went out; the target is not in that direction. |
 | `not_sent` | Nothing reached the phone. Fix the cause (`error.code`, `error.hint`) and try again. |
 | `unknown` | Input may have reached the phone. Do not send it again: a second tap on a button that did work is a double order or a double message. Run `iph read` and look. |
 | `blocked` | The safety guard refused. See "Money, messages, orders". |

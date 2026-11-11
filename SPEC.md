@@ -72,7 +72,7 @@ AI 에이전트가 **실제 아이폰**의 아무 앱이나 화면 요소(접근
 
 - **셀렉터:** `label="정확히"`, `label~="포함"`, `label/정규식/`, `role=button`, `id=...`(identifier), `value~=...`, `within=<셀렉터>`, `index=N`. 문자열 하나만 주면 `label="..."`로 본다. 여러 개가 맞으면 오류 + 후보 목록 (멋대로 첫 번째를 누르지 않는다)
 - **모든 입력 뒤 확인:** 탭 · 입력 · 스크롤은 트리를 다시 읽어 `screen_changed: true|false`를 결과에 넣는다. 터치 신호는 기기가 응답하지 않으므로 `sent`와 `verified`를 구분한다
-- **결과 공통 형태:** `{ok, outcome: "done"|"not_sent"|"unknown"|"blocked", error?: {code, message, hint}, elapsed_ms, ...}`
+- **결과 공통 형태:** `{ok, outcome: "done"|"not_sent"|"unknown"|"blocked", error?: {code, message, hint}, elapsed_ms, ...}`. 종료 코드는 `ok: true`면 0, 아니면 outcome에 따라 unknown 2 · blocked 3 · 그 밖 1 (`scroll --until`이 못 찾은 `ok: false` + `done`도 1). batch · script · run도 같다
 - **MCP 도구:** CLI와 1:1 (`iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_button`, `iph_launch`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`). `iph_script`는 `code` + `args`, `iph_run`은 `name` + `args`. 속도 비교 실험의 A 방식(에이전트가 단계마다 판단)은 이 MCP 기본 도구로, B 방식은 `iph_run`으로 한다
 
 ## 7. 안전장치

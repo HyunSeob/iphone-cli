@@ -120,10 +120,12 @@ iph setup                     # 폰 준비 상태를 차례로 확인하고, 할
 
 | `outcome` | 뜻 | 종료 코드 |
 |---|---|---|
-| `done` | 끝까지 실행됨 | 0 |
+| `done` | 끝까지 실행됨. `ok: false`와 같이 오면 할 일은 다 했지만 찾던 것이 없었다는 뜻입니다 (아래) | 0, `ok: false`면 1 |
 | `not_sent` | 폰에 아무것도 가지 않음. 다시 해도 안전 | 1 |
 | `unknown` | 입력이 나갔을 수 있음. **다시 보내지 말고** 화면을 읽어 확인 | 2 |
 | `blocked` | 안전장치가 막음 | 3 |
+
+종료 코드는 `ok: true`일 때만 0입니다. `batch` · `script` · `run`도 같습니다 (막히면 3, 아무것도 안 갔으면 1). `ok: false`인데 `outcome: "done"`인 것은 `scroll --until`이 못 찾았을 때 하나입니다: 스크롤은 실제로 다 나갔으므로 `not_sent`(아무것도 안 감)가 아니고, 결과는 `error.code: "not_found"` · `found: false` · 종료 코드 1입니다. 다시 해도 위험하지 않지만 화면은 그만큼 움직여 있습니다.
 
 터치 신호는 폰이 받았다고 답하지 않습니다. 그래서 `sent`(보냄)와 `verified`(보낸 뒤 화면을 다시 읽음)를 나누고, 탭 · 입력 · 스크롤 뒤에는 화면을 다시 읽어 `screen_changed`를 넣습니다. 다른 앱이 앞으로 나왔으면 `app_changed: true`가 붙습니다. 그 명령 앞에서 방해금지 모드를 켰으면 `dnd: {on, changed, previous, elapsed_ms}`가 붙습니다.
 

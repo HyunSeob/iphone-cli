@@ -117,10 +117,12 @@ Scripts, MCP and batch also take an object: `{label, label_contains, label_regex
 
 | `outcome` | Meaning | Exit code |
 |---|---|---|
-| `done` | Ran to the end | 0 |
+| `done` | Ran to the end. With `ok: false`: everything was done, but what was looked for is not there (below) | 0, 1 with `ok: false` |
 | `not_sent` | Nothing reached the phone. Safe to try again | 1 |
 | `unknown` | Input may have reached the phone. **Do not resend**; read the screen | 2 |
 | `blocked` | Refused by the safety guard | 3 |
+
+The exit code is 0 only with `ok: true`. `batch`, `script` and `run` follow the same table (3 when blocked, 1 when nothing went out). The one `ok: false` with `outcome: "done"` is `scroll --until` that did not find its target: the scrolls did go out, so it is not `not_sent`; the result has `error.code: "not_found"`, `found: false`, exit code 1. Trying again is safe, but the screen has moved by those scrolls.
 
 The phone does not acknowledge touch reports. So results separate `sent` from `verified` (the screen was read again afterwards), and taps, typing and scrolls report `screen_changed`. When another app came to the front, `app_changed: true` is added. When Do Not Disturb was turned on ahead of the command, `dnd: {on, changed, previous, elapsed_ms}` is added.
 
