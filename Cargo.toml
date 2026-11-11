@@ -52,3 +52,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opt-level = 3
 debug = false
 strip = true
+
+# The tunnel's TCP stack with a longer patience before it closes a connection
+# (two constants in vendor/jktcp/src/adapter.rs; the rest is jktcp 0.1.8, MIT).
+[patch.crates-io]
+jktcp = { path = "vendor/jktcp" }

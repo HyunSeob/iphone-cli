@@ -471,6 +471,68 @@ fn new_rows(prev: &[Row], page: &[Row]) -> Vec<Value> {
     }
 }
 
+/// How far to scroll a list between two readings.
+///
+/// A fixed step (a third of the screen) reads every row two or three times.
+/// The step that reads each row once depends on the phone and the app: how
+/// tall the list's window is, how much of it stays readable under pinned
+/// headers, how much shorter the list moves than the finger. So it is worked
+/// out from what the readings show.
+#[derive(Debug, Default)]
+struct Stride {
+    /// Highest place a list item has been seen at (smallest y). Items stay
+    /// in the accessibility tree up to here, also under a pinned header.
+    top: Option<f64>,
+    /// How much shorter the list moved than the finger, on the last scroll.
+    lost: f64,
+    /// The finger's travel on the last scroll, 0 when it was a fixed step.
+    last: f64,
+}
+
+impl Stride {
+    /// Share of the screen's height the finger may cross in one scroll.
+    const REACH: f64 = 0.72;
+    /// The item brought up stops this far below the top, so that it stays
+    /// readable when the list moves a little further than meant.
+    const MARGIN: f64 = 8.0;
+
+    /// Take in what a reading shows: where items can be, and how far the
+    /// last scroll really moved them.
+    fn learn(&mut self, before: &[Row], page: &[Row]) {
+        if let Some(y) = page.iter().map(|r| r.y).reduce(f64::min) {
+            self.top = Some(self.top.map_or(y, |t| t.min(y)));
+        }
+        if self.last > 0.0
+            && let Some(moved) = scroll_distance(before, page)
+        {
+            self.lost = (self.last - moved.abs()).clamp(0.0, 200.0);
+        }
+    }
+
+    /// The finger's travel for the next scroll, or `None` when the reading
+    /// gives nothing to go by (fewer than three items) and a fixed step has
+    /// to do.
+    fn next(&mut self, page: &[Row], screen_height: f64) -> Option<f64> {
+        let top = self.top?;
+        let mut ys: Vec<f64> = page.iter().map(|r| r.y).collect();
+        ys.sort_by(f64::total_cmp);
+        if ys.len() < 3 || screen_height <= 0.0 {
+            return None;
+        }
+        // The item before the last one goes to the top: two items in common.
+        let want = ys[ys.len() - 2] - (top + Self::MARGIN);
+        // Until a scroll has been measured, count on losing little: that
+        // errs towards moving too short, which only costs overlap.
+        let lost = if self.last > 0.0 { self.lost } else { 40.0 };
+        let travel = (want + lost).min(screen_height * Self::REACH);
+        if travel < 120.0 {
+            return None;
+        }
+        self.last = travel;
+        Some(travel)
+    }
+}
+
 /// Where each row of a reading sat, for the trace: "y:mark" pairs. The mark is
 /// a short hash of the row's text, so the log shows which rows repeat or
 /// jump without holding what they say.
@@ -716,31 +778,23 @@ impl Session {
         Ok(page)
     }
 
-    /// The rows on screen, read until two readings in a row say the same.
-    /// A single reading taken while a list is still settling can hold a row
-    /// twice or at a place it is about to leave (2026-11-11: one row of a
-    /// week's list came back twice, and only the day's total gave it away).
-    async fn settled_page(
-        &mut self,
-        full: bool,
-        row: &Selector,
-        columns: Option<&Map<String, Value>>,
-        group: Option<&(Selector, String, Option<String>, String)>,
-    ) -> Res<(Screen, Vec<Row>)> {
-        let (_, mut screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
-        let mut page = Self::list_page(&screen, row, columns, group)?;
-        for _ in 0..3 {
-            let (_, again) = self.screen(Fresh::Force, full, BuildOptions::default()).await?;
-            let next = Self::list_page(&again, row, columns, group)?;
-            let same = next.len() == page.len()
-                && next.iter().zip(&page).all(|(a, b)| a.key == b.key && (a.y - b.y).abs() <= 1.0);
-            screen = again;
-            page = next;
-            if same {
-                break;
-            }
-        }
-        Ok((screen, page))
+    /// Drag the list by `travel` points of finger movement, slowing to a
+    /// stop. "down" shows what is further down.
+    async fn stride_drag(&mut self, direction: &str, travel: f64) -> Res<bool> {
+        let (_, screen) = self.screen(Fresh::MaxAge(reuse()), false, BuildOptions::default()).await?;
+        let (w, h) = (screen.width, screen.height);
+        let (low, high) = (h * 0.88, h * 0.88 - travel);
+        let (from, to) = if direction == "down" { (low, high) } else { (high, low) };
+        // A longer way takes the finger longer, as a hand's would.
+        let duration = Duration::from_millis((350.0 + travel * 0.6) as u64);
+        let (changed, _) = Box::pin(self.drag_points(
+            (w / 2.0, from),
+            (w / 2.0, to),
+            duration,
+            crate::device::input::Motion::Place,
+        ))
+        .await?;
+        Ok(changed)
     }
 
     /// One scroll step of a list; whether the screen moved.
@@ -811,9 +865,29 @@ impl Session {
         // Whether the end of the list has been checked by scrolling back and forth.
         let mut end_checked = false;
         let back = if direction == "down" { "up" } else { "down" };
+        let mut stride = Stride::default();
         let ended;
         loop {
-            let (screen, page) = self.settled_page(full, &row, columns, group.as_ref()).await?;
+            // One reading a page: the scroll before it already asked the
+            // phone for the new screen, and this takes that reading over.
+            let (_, mut screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
+            let mut page = Self::list_page(&screen, &row, columns, group.as_ref())?;
+            if let Some(before) = &prev {
+                let stitched = page.iter().any(|r| before.iter().any(|p| p.key == r.key));
+                if !stitched && !page.is_empty() && !before.is_empty() && stride.last > 0.0 {
+                    // The scroll carried the list past everything that was on
+                    // screen, so rows may lie unseen in between. Come back
+                    // half way and read again.
+                    crate::device::ax::trace(|| "read_list: no row in common after the scroll; coming back half way".into());
+                    self.stride_drag(back, stride.last / 2.0).await?;
+                    stride.lost += 40.0;
+                    (_, screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
+                    page = Self::list_page(&screen, &row, columns, group.as_ref())?;
+                }
+                stride.learn(before, &page);
+            } else {
+                stride.learn(&[], &page);
+            }
             match &prev {
                 None => all.extend(page.iter().map(|r| r.value.clone())),
                 Some(before) => {
@@ -871,7 +945,8 @@ impl Session {
                     break;
                 }
                 self.list_scroll(&direction).await?;
-                let (_, page) = self.settled_page(full, &row, columns, group.as_ref()).await?;
+                let (_, screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
+                let page = Self::list_page(&screen, &row, columns, group.as_ref())?;
                 let fresh_rows = new_rows(&at_end, &page);
                 crate::device::ax::trace(|| format!("read_list end check: new={}", fresh_rows.len()));
                 if fresh_rows.is_empty() {
@@ -890,7 +965,18 @@ impl Session {
                 ended = "max_scrolls";
                 break;
             }
-            self.list_scroll(&direction).await?;
+            // Scroll by as much as the screen allows: the last two items of
+            // this reading go to the top of the next, so that the two
+            // readings can be stitched and nothing in between is skipped.
+            match stride.next(prev.as_deref().unwrap_or(&[]), screen.height) {
+                Some(travel) => {
+                    self.stride_drag(&direction, travel).await?;
+                }
+                None => {
+                    self.list_scroll(&direction).await?;
+                    stride.last = 0.0;
+                }
+            }
             scrolls += 1;
         }
         let mut rows = match &group {
@@ -1442,6 +1528,31 @@ mod tests {
         // The first two are the old second and third rows; the coffee at 260
         // and the milk are new.
         assert_eq!(labels(&new_rows(&before, &after)), ["커피 4,500원", "우유 2,000원"]);
+    }
+
+    #[test]
+    fn the_stride_brings_the_last_two_items_to_the_top() {
+        let mut stride = Stride::default();
+        // First reading: the list starts half way down the screen.
+        let first = rows(&[("a", 500.0), ("b", 565.0), ("c", 630.0), ("d", 695.0), ("e", 760.0), ("f", 825.0)]);
+        stride.learn(&[], &first);
+        // "e" (the one before the last) should go to the top (500 + margin);
+        // nothing measured yet, so 40 is added for what the list lags.
+        let travel = stride.next(&first, 932.0).unwrap();
+        assert_eq!(travel, 760.0 - 508.0 + 40.0);
+        // The list moved 232 for a travel of 292: it lags by 60.
+        let second = rows(&[("e", 528.0), ("f", 593.0), ("g", 658.0), ("h", 723.0), ("i", 788.0), ("j", 853.0)]);
+        stride.learn(&first, &second);
+        assert_eq!(stride.lost, 60.0);
+        assert_eq!(stride.top, Some(500.0));
+        // Next: "i" to the top, with the lag that was measured.
+        assert_eq!(stride.next(&second, 932.0).unwrap(), 788.0 - 508.0 + 60.0);
+        // Never further than the finger can go on this screen.
+        let far = rows(&[("x", 100.0), ("y", 800.0), ("z", 900.0)]);
+        stride.top = Some(100.0);
+        assert_eq!(stride.next(&far, 932.0).unwrap(), 932.0 * Stride::REACH);
+        // Too little on screen to go by: a fixed step instead.
+        assert_eq!(stride.next(&rows(&[("a", 500.0), ("b", 565.0)]), 932.0), None);
     }
 
     #[test]

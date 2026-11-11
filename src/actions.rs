@@ -623,7 +623,7 @@ impl Session {
 
     /// Drag between two points given in logical points and report whether the
     /// screen changed.
-    async fn drag_points(
+    pub(crate) async fn drag_points(
         &mut self,
         from: (f64, f64),
         to: (f64, f64),
