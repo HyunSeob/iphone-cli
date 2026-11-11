@@ -4,8 +4,9 @@ use std::{io::Read, time::Instant};
 
 use clap::{Parser, Subcommand};
 use iphone_cli::{
-    client, daemon, devices, fields, human, mcp,
-    recipe,
+    client, daemon, devices, dnd, fields, human,
+    i18n::t,
+    mcp, recipe,
     reply::{Fail, envelope},
     safety, setup,
 };
@@ -150,6 +151,9 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         tools: Vec<String>,
     },
+    /// Do Not Disturb on the phone: on, off (back to the Focus that was on), status.
+    /// With `[safety] dnd = true` (the default) iph does this by itself around its input.
+    Dnd { action: String },
     /// Stop the background daemon for this phone.
     Stop,
     /// Internal: the resident process.
@@ -287,8 +291,21 @@ async fn run(cli: Cli) -> i32 {
         }
         Cmd::Setup => return setup::run(&udid).await,
         Cmd::Stop => {
-            let stopped = client::stop_daemon(&udid).await;
-            let v = envelope(Ok(fields! { "stopped": stopped }), started);
+            let last = client::stop_daemon(&udid).await;
+            let mut out = fields! { "stopped": last.is_some() };
+            if let Some(d) = last.as_ref().map(|l| &l["dnd"]).filter(|d| !d.is_null()) {
+                out.insert("dnd".into(), d.clone());
+            } else if last.is_none() && dnd::Record::load(&udid).is_some() {
+                // A daemon that died left the phone quiet.
+                out.insert(
+                    "note".into(),
+                    json!(t(
+                        "iph가 켠 방해금지 모드가 폰에 남아 있습니다. `iph dnd off`로 되돌리세요.",
+                        "Do Not Disturb that iph turned on is still on. Put it back with `iph dnd off`.",
+                    )),
+                );
+            }
+            let v = envelope(Ok(out), started);
             print(&v, human_out, "stop");
             return 0;
         }
@@ -324,6 +341,7 @@ async fn run(cli: Cli) -> i32 {
         }
         Cmd::Key { key } => ("key", json!({ "key": key })),
         Cmd::Button { button } => ("button", json!({ "button": button })),
+        Cmd::Dnd { action } => ("dnd", json!({ "action": action })),
         Cmd::Launch { app, restart } => ("launch", json!({ "app": app, "restart": restart })),
         Cmd::Apps => ("apps", Value::Null),
         Cmd::Screenshot { output } => {

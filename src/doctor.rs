@@ -466,6 +466,26 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
         "For long sessions set Settings → Display & Brightness → Auto-Lock → Never. Reading and input stop when the phone locks.",
     ));
 
+    // 10. Do Not Disturb (recommended). Only what iph is set to do and what it
+    // left behind; the phone's Focus is not touched here.
+    let dnd = if let Some(left) = &s.dnd.record {
+        Check::new("do_not_disturb", false)
+            .status("info")
+            .detail(format!("on since {}, set by iph", left.at))
+            .action(
+                "iph가 켠 방해금지 모드가 켜져 있습니다. 명령이 없으면 잠시 뒤 원래대로 돌아가고, `iph dnd off`로 바로 되돌릴 수 있습니다.",
+                "Do Not Disturb that iph turned on is on. It goes back by itself after a while without commands; `iph dnd off` puts it back now.",
+            )
+    } else if s.config.safety.dnd {
+        Check::new("do_not_disturb", false).detail("turned on before the first input, put back afterwards")
+    } else {
+        Check::new("do_not_disturb", false).status("info").action(
+            "[safety] dnd = false 입니다. 알림 배너가 화면 위쪽 탭을 가로챌 수 있으니, 쓰는 동안 집중 모드를 직접 켜 두세요.",
+            "[safety] dnd = false. A notification banner can take a tap near the top of the screen, so turn a Focus on yourself while iph works.",
+        )
+    };
+    checks.push(dnd);
+
     let ok = checks
         .iter()
         .all(|c| !c.required || c.status == "ok");

@@ -45,6 +45,10 @@ const SETTLE: Duration = Duration::from_millis(300);
 /// connection, so two taps are not read as a double tap or a drag.
 const TOUCH_GAP: Duration = Duration::from_millis(150);
 
+/// Longest extra wait at the start of a session for the media stream's
+/// first packets.
+const FIRST_PACKET: Duration = Duration::from_secs(3);
+
 /// Time between registering the temporary keyboard and its first key.
 const KEYBOARD_ATTACH: Duration = Duration::from_millis(700);
 
@@ -66,28 +70,41 @@ fn now_ms() -> u64 {
 
 struct Drain {
     last_packet_ms: Arc<AtomicU64>,
+    /// When each socket (audio, video) got its first packet; 0 = not yet.
+    first_packet_ms: Vec<Arc<AtomicU64>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Drain {
     fn start(sockets: Vec<UdpSocketHandle>) -> Self {
         let last_packet_ms = Arc::new(AtomicU64::new(0));
+        let first_packet_ms: Vec<Arc<AtomicU64>> =
+            sockets.iter().map(|_| Arc::new(AtomicU64::new(0))).collect();
         let tasks = sockets
             .into_iter()
-            .map(|s| {
+            .zip(first_packet_ms.iter().cloned())
+            .map(|(s, first)| {
                 let last = last_packet_ms.clone();
                 tokio::spawn(async move {
                     // The media itself is not needed; only that it keeps coming.
                     while s.recv().await.is_ok() {
-                        last.store(now_ms(), Ordering::Relaxed);
+                        let now = now_ms();
+                        last.store(now, Ordering::Relaxed);
+                        let _ = first.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
                     }
                 })
             })
             .collect();
         Self {
             last_packet_ms,
+            first_packet_ms,
             tasks,
         }
+    }
+
+    /// Whether every stream has delivered something.
+    fn flowing(&self) -> bool {
+        self.first_packet_ms.iter().all(|f| f.load(Ordering::Relaxed) > 0)
     }
 }
 
@@ -129,6 +146,8 @@ pub fn normalize(v: f64, extent: f64) -> u16 {
 
 impl InputSession {
     pub async fn open(adapter: &mut AdapterHandle, rsd: &mut RsdHandshake) -> Result<Self> {
+        let began = Instant::now();
+        let began_ms = now_ms();
         let mut display = DisplayServiceClient::connect_rsd(adapter, rsd)
             .await
             .map_err(|e| anyhow!("display service: {e:?}"))?;
@@ -204,6 +223,27 @@ impl InputSession {
             let _ = hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, 65535, 65535, None).await;
         }
         tokio::time::sleep(warmup()).await;
+        // Touches only count while the phone is sending the stream. It has
+        // usually begun by now; when it has not, wait for it a little.
+        let waiting = Instant::now();
+        while !drain.flowing() && waiting.elapsed() < FIRST_PACKET {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        crate::device::ax::trace(|| {
+            let firsts: Vec<String> = drain
+                .first_packet_ms
+                .iter()
+                .map(|f| match f.load(Ordering::Relaxed) {
+                    0 => "none".to_string(),
+                    at => format!("{} ms", at.saturating_sub(began_ms)),
+                })
+                .collect();
+            format!(
+                "input: session open after {} ms, first audio/video packet at {}",
+                began.elapsed().as_millis(),
+                firsts.join(" / ")
+            )
+        });
         if prime {
             let _ = hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, 65535, 65535, None).await;
             tokio::time::sleep(Duration::from_millis(60)).await;
@@ -460,6 +500,12 @@ impl InputSession {
     pub async fn close(mut self) {
         let _ = self.keyboard_detach().await;
         self.settle_previous().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.display.stop_media_stream()).await;
+    }
+
+    /// Stop the stream of a session given up after an error, without the
+    /// orderly wait. A stream nobody stops keeps the phone encoding video.
+    pub async fn abandon(mut self) {
         let _ = tokio::time::timeout(Duration::from_secs(2), self.display.stop_media_stream()).await;
     }
 }

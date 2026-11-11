@@ -55,10 +55,11 @@ iph setup                     # walks through what the phone needs
 | `touch_input` | yes | Scrolls the Settings list down one step and back to see that touch lands (`--no-touch-test` skips it) |
 | `wifi` | recommended | For working without the cable |
 | `auto_lock` | recommended | Auto-Lock → Never for long sessions |
+| `do_not_disturb` | recommended | Whether iph is set to turn Do Not Disturb on before its input and put the earlier Focus back afterwards (it is by default) |
 
 Which checks proved truly required, and what could not be verified, is in [docs/onboarding.md](docs/onboarding.md) (Korean).
 
-**Recommended: turn on a Focus (Do Not Disturb) while iph works.** Notification banners cover the top of the screen and are not part of the accessibility tree. A tap near the top then lands on the banner and opens another app (this happened once during development). `iph` reports `app_changed` and stops a recipe when another app comes to the front, but it cannot stop the tap itself.
+**Because of notification banners, iph keeps the phone in Do Not Disturb while it works.** Banners cover the top of the screen and are not part of the accessibility tree. A tap near the top then lands on the banner and opens another app (this happened once during development). So before its first input iph turns Do Not Disturb on, and afterwards it puts back the Focus that was on. Details and how to turn this off: [Do Not Disturb](#do-not-disturb) below.
 
 ## Commands
 
@@ -82,7 +83,8 @@ Every command prints JSON; add `--human` for people. The device is chosen by `--
 | `iph run <recipe> [--arg k=v] [--confirm op_id]` / `iph recipes` | Run a recipe, list recipes |
 | `iph op <op_id>` | Look up a confirmed operation |
 | `iph mcp [--tools a,b]` | MCP server on stdio |
-| `iph stop` | Stop the resident process for this phone |
+| `iph dnd <on\|off\|status>` | Turn Do Not Disturb on, put the earlier Focus back, or show the current state. Normally iph does this by itself |
+| `iph stop` | Put the earlier Focus back, then stop the resident process for this phone |
 
 ### Selectors
 
@@ -112,7 +114,7 @@ Recipes, MCP and batch also take an object: `{label, label_contains, label_regex
 | `unknown` | Input may have reached the phone. **Do not resend**; read the screen | 2 |
 | `blocked` | Refused by the safety guard | 3 |
 
-The phone does not acknowledge touch reports. So results separate `sent` from `verified` (the screen was read again afterwards), and taps, typing and scrolls report `screen_changed`. When another app came to the front, `app_changed: true` is added.
+The phone does not acknowledge touch reports. So results separate `sent` from `verified` (the screen was read again afterwards), and taps, typing and scrolls report `screen_changed`. When another app came to the front, `app_changed: true` is added. When Do Not Disturb was turned on ahead of the command, `dnd: {on, changed, previous, elapsed_ms}` is added.
 
 ## Safety guard
 
@@ -120,6 +122,7 @@ The phone does not acknowledge touch reports. So results separate `sent` from `v
 - **`--confirm <op_id>`:** after a person approved, a new id lets the tap through. The same `op_id` is never pressed twice: it is written to `~/Library/Application Support/iph/ops.jsonl` (0600) before the tap goes out, so it stays spent even if the process dies halfway. When the outcome is uncertain, look it up with `iph op <op_id>` instead of retrying with a new id.
 - **`confirm: true` on a recipe step:** the step stops unless the run has `--confirm <op_id>`.
 - **`only_apps`:** when set in `~/.config/iph/config.toml`, only those apps are launched, and input is refused while anything else is in front.
+- **Do Not Disturb:** turned on before input and put back afterwards (below).
 
 ```toml
 # ~/.config/iph/config.toml
@@ -129,6 +132,10 @@ udid = "00008130-…"
 add = ["donate"]
 remove = ["보내기"]
 only_apps = ["com.apple.Preferences", "com.apple.calculator"]
+dnd = true               # Do Not Disturb on before input, earlier Focus back afterwards (default true)
+dnd_idle_secs = 300      # put it back after this long without a command; 0 = only at iph stop or exit
+# dnd_focus = "Work"     # a Focus to switch to instead of Do Not Disturb, by the name the phone shows
+# dnd_control = "Focus"  # label of the Focus control in Control Center, for a phone not in Korean or English
 
 [daemon]
 input_idle_secs = 120    # close the input session after this long unused; 0 closes it after every command
@@ -138,6 +145,18 @@ idle_exit_secs = 1800    # the resident process exits after this long without re
 Sending input needs the phone to be in "screen sharing" state (an indicator shows at the top of the phone). For an app that hides its content or warns while the screen is shared, set `input_idle_secs = 0`: the phone is then in that state only while input is being sent, at the price of 3 to 4 s more per input. Reading does not depend on screen sharing.
 
 **Limit:** the guard reads labels and nothing else. A button without a label, or labelled differently (an icon-only pay button, "Next", "OK"), is not caught. In any flow where money or messages are at stake, mark the last step `confirm: true` yourself.
+
+### Do Not Disturb
+
+- **Turned on:** when a command that sends input (`tap`, `swipe`, `scroll`, `type`, `key`, `button`, `launch`, `batch`, `run`) first runs in the resident process. If Do Not Disturb is already on, nothing changes.
+- **Put back:** at `iph stop`, after `dnd_idle_secs` (5 minutes by default) without a command, when the resident process exits on its own, or with `iph dnd off`. Later input turns it on again.
+- **Put back to what:** the Focus that was on before (or none) is written to `~/Library/Application Support/iph/<udid>.dnd.json` and restored as it was. If the phone was already in Do Not Disturb, iph leaves it alone; if a person switched to another Focus meanwhile, that one stays.
+- **How:** no service on the phone offers this, so iph does what a person does: pull Control Center down, hold the Focus control, pick the mode in the list, press Home twice. Control Center is therefore visible for a moment, and one switch takes 11 to 22 s (median 15 s over 16). This errand is exempt from `only_apps` and the guarded words.
+- **Needs:** the Focus control on Control Center's first page, and Control Center opening while an app is in front. For a phone in a language other than Korean or English, put the names the phone shows in `dnd_control` and `dnd_focus`.
+- **On failure:** the command still runs and its result carries `dnd: {on: false, code, message}`. After two failures the resident process stops trying. Only when Control Center may have been left open is the command held back, with `control_center_open`.
+- **If the resident process dies:** Do Not Disturb stays on. The record file lets the next run take over and put it back; `iph dnd off` does it at once.
+- **Not covered:** whatever comes through Do Not Disturb (alarms and timers, emergency alerts, people and apps allowed in the Do Not Disturb settings) and system pop-ups. That is why `only_apps` and `app_changed` stay. Whether banners really stay away while Do Not Disturb is on was not tested separately (it relies on how iOS behaves).
+- **Turning it off:** `[safety] dnd = false`. Then turn a Focus on yourself while iph works.
 
 ## Recipes
 
@@ -186,7 +205,7 @@ codex mcp add iph -- iph mcp           # Codex
 iph mcp --tools read,find,run          # offer only some tools
 ```
 
-Tools: `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_run`, `iph_recipes`, `iph_doctor`. Arguments and results are the same as the CLI's. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
+Tools: `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_run`, `iph_recipes`, `iph_doctor`, `iph_dnd`. Arguments and results are the same as the CLI's. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
 
 ## Speed
 
@@ -201,6 +220,7 @@ iPhone 15 Pro Max, iOS 27.0.1, Wi-Fi, with the resident process connected (2026-
 | `iph type` (Notes, with check and clipboard restore) | 4 to 7 s |
 | Recipe `settings-version` (5 steps) | 10.8 to 22.4 s |
 | First `iph read` without a resident process (tunnel and subscription included) | about 2 to 3 s |
+| Turning Do Not Disturb on, or putting the earlier Focus back (16 runs) | median 15 s, 11 to 22 s |
 
 A reading takes more than a second because of the phone: after a request it waits about 1.1 s in silence before it sends the screen. In apps whose screen often changes on its own, readings are taken twice and compared so that an out-of-date screen is not used; that adds 1 to 2 s per step. Details: [docs/how-it-works.md](docs/how-it-works.md) (Korean).
 
@@ -208,7 +228,10 @@ A reading takes more than a second because of the phone: after a request it wait
 
 - Verified on one device. Other iOS versions may number the accessibility attributes differently (check with `iph read --raw`).
 - Apps whose screen keeps moving (animations, video) take longer to read.
-- Notification banners and system pop-ups are not in the app's tree.
+- Notification banners and system pop-ups are not in the app's tree. Do Not Disturb keeps most banners away, but not what comes through it.
+- Turning Do Not Disturb on adds 11 to 22 s ahead of the first input.
+- Once, a new input session took no touch at all (cause unknown, one session in about a dozen). The Do Not Disturb step notices this and tries again on a new session. With that feature off, this check is gone too.
+- When the Mac is very busy (other work using all of its CPU), the phone's answers arrive late: readings time out, and a late reading of an earlier screen can be acted on.
 - Portrait only.
 - `iph apps` shows the names the phone reports (usually English). Launch by bundle id to be sure.
 - `iph type` puts back the clipboard's text (or one image). Rich content comes back as plain text.

@@ -14,6 +14,7 @@ description: Read and operate apps on the user's real iPhone with the `iph` CLI 
 3. **Check the result**, every time:
    - `screen_changed: true` means the screen reacted. `false` after a tap means the tap did nothing visible; read the screen before deciding what next.
    - `app_changed: true` means another app came to the front (a notification banner was hit, a link opened). Stop and tell the user.
+   - `dnd` on your first input: iph switched the phone to Do Not Disturb first (11 to 22 s, Control Center shows for a moment), so banners cannot take a tap. `dnd.on: false` means it could not; go on with care near the top of the screen and tell the user why (`dnd.message`, `dnd.hint`).
 4. A fresh read costs about 1.2 s and a verified tap about 1.9 s; that is the phone's pace. For a sequence you already know, use **one** `iph batch` or `iph run` call instead of many single ones.
 
 ## Outcomes
@@ -25,7 +26,9 @@ description: Read and operate apps on the user's real iPhone with the `iph` CLI 
 | `unknown` | Input may have reached the phone. **Never send it again.** Run `iph read` and look. |
 | `blocked` | The safety guard refused. See below. |
 
-Common `error.code`s: `not_found` (the label is not on screen; `screen_summary.labels` shows what is; scroll or go to the right screen), `ambiguous_selector` (several match; `candidates` lists them; narrow with `role=`, `within=`, `index=`), `covered` (something overlaps the target; scroll), `no_focused_field` (tap the text field first), `tunnel_failed` / `ax_timeout` (phone asleep, locked or off the network; ask the user, or `iph doctor`), `app_not_allowed` (the user limited iph to certain apps).
+When the work is done, put the user's Focus back: `iph dnd off` (MCP: `iph_dnd` with `"action": "off"`), or `iph stop` from a shell. Left alone, iph does it after five minutes without a command.
+
+Common `error.code`s: `not_found` (the label is not on screen; `screen_summary.labels` shows what is; scroll or go to the right screen), `ambiguous_selector` (several match; `candidates` lists them; narrow with `role=`, `within=`, `index=`), `covered` (something overlaps the target; scroll), `no_focused_field` (tap the text field first), `tunnel_failed` / `ax_timeout` (phone asleep, locked or off the network; ask the user, or `iph doctor`), `app_not_allowed` (the user limited iph to certain apps), `control_center_open` (Do Not Disturb could not be set and Control Center may be lying over the app; the command was not sent; run `iph dnd status`, which closes it, then read the screen).
 
 ## Selectors
 
@@ -93,6 +96,7 @@ Write a recipe by doing the flow once with single commands, noting the labels fr
 ## When something is wrong
 
 - `iph doctor` checks pairing, Developer Mode, the developer disk image, lock state, reading and touch, and gives a `user_action` for each failure. Pass those on to the user in their words.
-- Banners and system pop-ups are not in the element list. If a tap near the top of the screen opened another app, that is what happened. Suggest a Focus (Do Not Disturb).
+- Banners and system pop-ups are not in the element list. iph keeps the phone in Do Not Disturb while it works, which stops most banners; alarms, timers, emergency alerts and whatever the user allowed through still appear. If a tap near the top of the screen opened another app, that is what happened.
+- `iph dnd status` shows the Focus that is on and whether iph set it. If iph was killed and left Do Not Disturb on, `iph dnd off` puts the earlier Focus back.
 - A locked phone cannot be operated. Ask the user to unlock it.
 - If the element list looks wrong for an app, `iph screenshot -o /tmp/x.png` shows what is really on screen.

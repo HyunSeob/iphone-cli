@@ -100,23 +100,29 @@ async fn connect(udid: &str) -> Result<UnixStream, String> {
     ))
 }
 
-async fn stop(udid: &str) -> bool {
+/// Ask the daemon to step down and wait until it has. `None` when none was
+/// running, otherwise its last words. Unless `keep_dnd`, it first puts back
+/// the Focus it replaced with Do Not Disturb, which takes some seconds.
+async fn stop(udid: &str, keep_dnd: bool) -> Option<Value> {
     let sock = paths::socket(udid);
-    let Ok(mut s) = UnixStream::connect(&sock).await else {
-        return false;
-    };
-    let req = Request { build: build_stamp(), cmd: "shutdown".into(), args: Value::Null };
+    let mut s = UnixStream::connect(&sock).await.ok()?;
+    let req = Request { build: build_stamp(), cmd: "shutdown".into(), args: json!({ "keep_dnd": keep_dnd }) };
     let _ = s.write_all(format!("{}\n", serde_json::to_string(&req).unwrap()).as_bytes()).await;
     let mut line = String::new();
-    let _ = BufReader::new(&mut s).read_line(&mut line).await;
+    // It answers after the command in flight and the Focus change.
+    let patience = crate::daemon::budget("shutdown") + Duration::from_secs(70);
+    if tokio::time::timeout(patience, BufReader::new(&mut s).read_line(&mut line)).await.is_err() {
+        kill_daemon(udid);
+        return Some(json!({ "ok": true, "killed": true }));
+    }
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(5) {
         if UnixStream::connect(&sock).await.is_err() {
-            return true;
+            break;
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
-    true
+    Some(serde_json::from_str(&line).unwrap_or_else(|_| json!({ "ok": true })))
 }
 
 /// Kill a daemon that no longer answers, by the pid it wrote at startup.
@@ -135,9 +141,9 @@ fn kill_daemon(udid: &str) {
     let _ = std::fs::remove_file(paths::daemon_pid(udid));
 }
 
-/// Stop the daemon for `udid`. Returns false when none was running.
-pub async fn stop_daemon(udid: &str) -> bool {
-    stop(udid).await
+/// Stop the daemon for `udid`. `None` when none was running.
+pub async fn stop_daemon(udid: &str) -> Option<Value> {
+    stop(udid, false).await
 }
 
 /// Send one command and return the result envelope.
@@ -157,9 +163,10 @@ pub async fn request(udid: &str, cmd: &str, args: Value) -> Value {
             );
         }
         let mut reply = String::new();
-        // The daemon bounds every command itself; this is for a daemon that
-        // stopped answering altogether.
-        let patience = crate::daemon::budget(cmd) + Duration::from_secs(20);
+        // The daemon bounds every command itself (and, ahead of a command,
+        // the switch to Do Not Disturb); this is for a daemon that stopped
+        // answering altogether.
+        let patience = crate::daemon::budget(cmd) + Duration::from_secs(100);
         let read = tokio::time::timeout(patience, BufReader::new(&mut stream).read_line(&mut reply)).await;
         let Ok(read) = read else {
             kill_daemon(udid);
@@ -195,7 +202,7 @@ pub async fn request(udid: &str, cmd: &str, args: Value) -> Value {
         };
         if value["error"]["code"] == "daemon_outdated" {
             // It refused before doing anything; replace it and ask again.
-            stop(udid).await;
+            stop(udid, true).await;
             continue;
         }
         return value;

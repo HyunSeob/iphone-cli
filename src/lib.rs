@@ -10,6 +10,7 @@ pub mod config;
 pub mod daemon;
 pub mod device;
 pub mod devices;
+pub mod dnd;
 pub mod doctor;
 pub mod human;
 pub mod i18n;

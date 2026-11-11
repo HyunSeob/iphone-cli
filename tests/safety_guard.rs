@@ -137,7 +137,7 @@ fn removed_words_stop_guarding_and_added_words_start() {
         safety: SafetyConfig {
             add: vec!["주문서".into()],
             remove: vec!["결제하기".into(), "결제".into()],
-            only_apps: vec![],
+            ..Default::default()
         },
         ..Default::default()
     };

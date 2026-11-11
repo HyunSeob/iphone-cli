@@ -118,6 +118,13 @@ fn tools() -> Vec<Value> {
         ),
         tool("iph_apps", "List installed apps with their bundle ids.", json!({}), &[]),
         tool(
+            "iph_dnd",
+            "Do Not Disturb on the phone, so a notification banner cannot take a tap. iph turns it on by itself before the first \
+             input and puts the earlier Focus back after five idle minutes; call this with \"off\" when the work is done to put it back at once.",
+            json!({ "action": { "type": "string", "enum": ["on", "off", "status"] } }),
+            &["action"],
+        ),
+        tool(
             "iph_screenshot",
             "Save a PNG screenshot to a file on the Mac. Use iph_read for content; this is for looks.",
             json!({ "path": { "type": "string", "description": "Absolute path of the PNG to write." } }),
@@ -159,7 +166,7 @@ async fn call(udid: &str, name: &str, args: Value) -> Value {
         "iph_recipes" => envelope(recipe::cmd_recipes(), started),
         "iph_read" | "iph_find" | "iph_tap" | "iph_swipe" | "iph_scroll" | "iph_type" | "iph_key"
         | "iph_button" | "iph_launch" | "iph_apps" | "iph_screenshot" | "iph_batch" | "iph_run"
-        | "iph_doctor" => {
+        | "iph_doctor" | "iph_dnd" => {
             let cmd = name.trim_start_matches("iph_");
             let args = if cmd == "apps" { Value::Null } else { args };
             client::request(udid, cmd, args).await

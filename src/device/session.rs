@@ -75,6 +75,10 @@ pub struct Session {
     pub(crate) input_used: Instant,
     /// When the last input session ended, to keep the next one apart from it.
     input_closed_at: Option<Instant>,
+    /// Input sessions given up after an error, each with the tunnel it ran on
+    /// when that was given up too. Their streams are stopped at the next
+    /// quiet moment (`sweep`).
+    abandoned: Vec<(InputSession, Option<Tunnel>)>,
     apps: Option<Vec<AppListEntry>>,
     /// Logical screen size from the last complete reading.
     screen_size: Option<(f64, f64)>,
@@ -85,6 +89,8 @@ pub struct Session {
     bundles: std::collections::HashMap<i64, Option<String>>,
     /// Counts tunnel (re)connections, for `iph doctor` and logs.
     pub connects: u64,
+    /// Do Not Disturb: whether it is on for this session and what to put back.
+    pub dnd: crate::dnd::State,
 }
 
 /// A file URL or path as a plain path without a trailing slash.
@@ -146,6 +152,7 @@ async fn bounded<T, E: std::fmt::Debug>(
 impl Session {
     pub fn new(udid: String, config: Config) -> Self {
         let guard = Guard::new(&config.safety);
+        let dnd = crate::dnd::State::load(&udid);
         Self {
             udid,
             config,
@@ -155,11 +162,13 @@ impl Session {
             input: None,
             input_used: Instant::now(),
             input_closed_at: None,
+            abandoned: Vec::new(),
             apps: None,
             screen_size: None,
             stale_before: None,
             bundles: std::collections::HashMap::new(),
             connects: 0,
+            dnd,
         }
     }
 
@@ -182,16 +191,31 @@ impl Session {
 
     /// Abandon the input session without the orderly close (after an error).
     pub fn drop_input(&mut self) {
-        if self.input.take().is_some() {
+        if let Some(input) = self.input.take() {
             self.input_closed_at = Some(Instant::now());
+            self.abandoned.push((input, None));
         }
     }
 
     /// Drop every connection. The next request builds them again.
     pub fn reset(&mut self) {
-        self.drop_input();
+        let tunnel = self.tunnel.take();
+        if let Some(input) = self.input.take() {
+            self.input_closed_at = Some(Instant::now());
+            // The tunnel stays until the stream has been told to stop.
+            self.abandoned.push((input, tunnel));
+        }
         self.ax = None;
-        self.tunnel = None;
+    }
+
+    /// Tell the phone to stop the streams of abandoned input sessions. Left
+    /// alone they keep the phone encoding, and after a row of timeouts
+    /// (2026-11-11, with the Mac overloaded) the phone answered ever slower.
+    pub async fn sweep(&mut self) {
+        for (input, tunnel) in std::mem::take(&mut self.abandoned) {
+            input.abandon().await;
+            drop(tunnel);
+        }
     }
 
     pub fn connection(&self) -> Option<&str> {
@@ -200,6 +224,8 @@ impl Session {
 
     pub async fn ensure_tunnel(&mut self) -> Res<&mut Tunnel> {
         if self.tunnel.is_none() {
+            // One tunnel at a time: let go of an abandoned one first.
+            self.sweep().await;
             let tunnel = conn::open_tunnel(&self.udid).await.map_err(|e| {
                 Fail::not_sent("tunnel_failed", format!("{e:#}")).hint(t(
                     "폰이 같은 Wi-Fi에 있거나 USB로 연결되어 있고 잠금이 풀려 있는지 확인하세요. `iph doctor`로 점검할 수 있습니다.",
@@ -393,6 +419,7 @@ impl Session {
                 self.input_closed_at = Some(Instant::now());
             }
         if self.input.is_none() {
+            self.sweep().await;
             // Keep a new session a little apart from the one before it.
             // (Lost first gestures turned out to be the first report on a new
             // connection, which `InputSession::open` now spends on a no-op;
@@ -449,6 +476,14 @@ impl Session {
             }
     }
 
+    /// End the input session now.
+    pub async fn close_input(&mut self) {
+        if let Some(s) = self.input.take() {
+            s.close().await;
+            self.input_closed_at = Some(Instant::now());
+        }
+    }
+
     /// With `input_idle_secs = 0` the input session ends with each command,
     /// so the phone shows "screen sharing" only while input is being sent.
     /// For apps that hide their content or complain while the screen is
@@ -465,6 +500,7 @@ impl Session {
         if let Some(s) = self.input.take() {
             s.close().await;
         }
+        self.sweep().await;
         self.reset();
     }
 

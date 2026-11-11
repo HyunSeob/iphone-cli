@@ -34,6 +34,11 @@ pub fn daemon_log(udid: &str) -> PathBuf {
     state_dir().join(format!("{udid}.log"))
 }
 
+/// What iph replaced with Do Not Disturb on this phone and has yet to put back.
+pub fn dnd_record(udid: &str) -> PathBuf {
+    state_dir().join(format!("{udid}.dnd.json"))
+}
+
 pub fn ops_log() -> PathBuf {
     state_dir().join("ops.jsonl")
 }

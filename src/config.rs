@@ -13,7 +13,7 @@ pub struct Config {
     pub daemon: DaemonConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SafetyConfig {
     /// Extra words that need `--confirm`.
@@ -23,6 +23,33 @@ pub struct SafetyConfig {
     /// When not empty: bundle ids of the only apps iph may launch or send
     /// input to. Anything else in front blocks the input.
     pub only_apps: Vec<String>,
+    /// Switch the phone to Do Not Disturb before the first input, and put
+    /// back the Focus that was on once the work is over. A notification
+    /// banner would otherwise take a tap meant for the top of the screen.
+    pub dnd: bool,
+    /// Put the earlier Focus back after this many seconds without a command.
+    /// 0 waits for `iph stop` or the daemon's exit.
+    pub dnd_idle_secs: u64,
+    /// The Focus to switch to instead of Do Not Disturb, by the name the
+    /// phone shows for it.
+    pub dnd_focus: Option<String>,
+    /// Label of the Focus control in Control Center, for a phone whose
+    /// language is neither Korean nor English.
+    pub dnd_control: Option<String>,
+}
+
+impl Default for SafetyConfig {
+    fn default() -> Self {
+        Self {
+            add: Vec::new(),
+            remove: Vec::new(),
+            only_apps: Vec::new(),
+            dnd: true,
+            dnd_idle_secs: 300,
+            dnd_focus: None,
+            dnd_control: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -70,5 +97,14 @@ mod tests {
         assert_eq!(c.safety.add, vec!["기부"]);
         assert_eq!(c.safety.only_apps, vec!["com.apple.Preferences"]);
         assert_eq!(c.daemon.input_idle_secs, 120);
+        assert!(c.safety.dnd);
+        assert_eq!(c.safety.dnd_idle_secs, 300);
+    }
+
+    #[test]
+    fn dnd_can_be_turned_off_or_pointed_at_another_focus() {
+        let c: Config = toml::from_str("[safety]\ndnd = false\ndnd_focus = \"업무\"\n").unwrap();
+        assert!(!c.safety.dnd);
+        assert_eq!(c.safety.dnd_focus.as_deref(), Some("업무"));
     }
 }
