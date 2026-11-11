@@ -143,6 +143,7 @@ dnd_idle_secs = 300      # put it back after this long without a command; 0 = on
 input_idle_secs = 120    # close the input session after this long unused; 0 closes it after every command
 idle_exit_secs = 1800    # the resident process exits after this long without requests
 screen_video = false     # also take the screen video while sending input. Touches do not need it, and over Wi-Fi it clogs the tunnel
+restart_accessibility = true  # when the phone's accessibility daemon stops answering, end it so the phone starts a new one (takes about 20 s)
 
 [script]
 timeout_secs = 300       # how long one script may run (840 at most)

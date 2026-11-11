@@ -90,6 +90,7 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
             "accessibility": s.ax.as_ref().is_some_and(|a| !a.is_closed()),
             "input_session": s.input.is_some(),
             "connects": s.connects,
+            "ax_restarts": s.ax_restarts,
             "pid": std::process::id(),
             "build": build_stamp(),
         }),

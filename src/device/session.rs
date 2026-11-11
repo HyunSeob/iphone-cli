@@ -69,6 +69,8 @@ pub fn reuse() -> Duration {
 /// up to 5.8 s while a list was still settling.
 const ASK_AGAIN: Duration = Duration::from_millis(6500);
 const READ_TIMEOUT: Duration = Duration::from_secs(14);
+/// The phone's accessibility daemon is not ended more often than this.
+const AX_RESTART_GAP: Duration = Duration::from_secs(120);
 /// Shortest time between the end of one input session and the start of the
 /// next.
 const REOPEN_GAP: Duration = Duration::from_millis(2000);
@@ -103,6 +105,10 @@ pub struct Session {
     bundles: std::collections::HashMap<i64, Option<String>>,
     /// Counts tunnel (re)connections, for `iph doctor` and logs.
     pub connects: u64,
+    /// How often, and when last, the phone's accessibility daemon was ended
+    /// because it had stopped answering.
+    pub ax_restarts: u64,
+    ax_restarted_at: Option<Instant>,
     /// Do Not Disturb: whether it is on for this session and what to put back.
     pub dnd: crate::dnd::State,
 }
@@ -183,6 +189,8 @@ impl Session {
             stale_before: None,
             bundles: std::collections::HashMap::new(),
             connects: 0,
+            ax_restarts: 0,
+            ax_restarted_at: None,
             dnd,
         }
     }
@@ -288,10 +296,35 @@ impl Session {
         Ok(())
     }
 
+    /// End the phone's accessibility daemon (`axauditd`) so the phone starts
+    /// a new one. Returns the pid that was ended.
+    ///
+    /// The daemon sometimes goes silent: it runs and takes new connections
+    /// but answers no request, and neither a new tunnel nor another route
+    /// changes that (2026-11-11, twice, both after minutes of work over
+    /// Wi-Fi; the cause is not known). The new one answers at once.
+    async fn restart_ax_daemon(&mut self) -> Result<u32, String> {
+        let mut svc = self.app_service().await.map_err(|f| f.message)?;
+        let processes = bounded("list processes", 10, svc.list_processes()).await?;
+        let pid = processes
+            .iter()
+            .find(|p| {
+                p.executable_url
+                    .as_ref()
+                    .is_some_and(|u| plain_path(&u.relative).ends_with("/axauditd"))
+            })
+            .map(|p| p.pid)
+            .ok_or("axauditd is not among the phone's processes")?;
+        const SIGKILL: u32 = 9;
+        bounded("signal", 10, svc.send_signal(pid, SIGKILL)).await?;
+        Ok(pid)
+    }
+
     /// One reading of the screen as the raw dump plus its sequence number.
     /// `full` waits for the second pass (identifiers).
     pub async fn dump(&mut self, fresh: Fresh, full: bool) -> Res<(u64, Arc<Dump>)> {
-        let started = Instant::now();
+        let mut started = Instant::now();
+        let mut restarted = false;
         let mut reconnects = 0;
         let mut second_pass_retries = 0;
         let mut fresh = fresh;
@@ -354,6 +387,33 @@ impl Session {
                     .as_ref()
                     .map(|a| (a.empty_count(), a.unparsed_count()))
                     .unwrap_or((0, 0));
+                // Not a word from the phone on a connection that is up: its
+                // accessibility daemon may be stuck. End it once and ask the
+                // new one.
+                let silent = empty == 0 && unparsed == 0 && self.ax.as_ref().is_some_and(|a| !a.is_closed());
+                let lately = self.ax_restarted_at.is_some_and(|at| at.elapsed() < AX_RESTART_GAP);
+                if silent && !restarted && !lately && self.config.daemon.restart_accessibility {
+                    restarted = true;
+                    let waited = started.elapsed().as_secs();
+                    match self.restart_ax_daemon().await {
+                        Ok(pid) => {
+                            eprintln!(
+                                "[{}] the phone's accessibility daemon gave no answer for {waited} s; ended it (pid {pid}) so the phone starts a new one",
+                                crate::safety::now_utc()
+                            );
+                            self.ax_restarted_at = Some(Instant::now());
+                            self.ax_restarts += 1;
+                            self.ax = None;
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            started = Instant::now();
+                            continue;
+                        }
+                        Err(e) => eprintln!(
+                            "[{}] the phone's accessibility daemon gave no answer for {waited} s and could not be restarted: {e}",
+                            crate::safety::now_utc()
+                        ),
+                    }
+                }
                 return Err(Fail::not_sent(
                     "ax_timeout",
                     format!(

@@ -146,6 +146,7 @@ dnd_idle_secs = 300      # 명령이 이만큼 없으면 되돌림. 0이면 iph 
 input_idle_secs = 120    # 입력 세션을 이만큼 안 쓰면 닫음. 0이면 명령마다 닫음
 idle_exit_secs = 1800    # 요청이 이만큼 없으면 상주 프로세스 종료
 screen_video = false     # 입력 중 화면 영상도 받을지. 터치에는 필요 없고, 무선에서는 터널을 막아 느려집니다
+restart_accessibility = true  # 폰의 접근성 서비스가 답을 멈추면 끝내서 폰이 새로 띄우게 함 (약 20초 걸림)
 
 [script]
 timeout_secs = 300       # 스크립트 하나가 돌 수 있는 시간 (최대 840)

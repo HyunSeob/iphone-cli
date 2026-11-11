@@ -127,7 +127,9 @@ After `launch`, that app must stay in front; if another one comes up, the script
 
 ## When something is off
 
-- **Readings take many seconds, or `ax_timeout`, `input_failed`, `input_unavailable` come back:** the phone is in a slow stretch. Stop sending input, because a late reading can show an earlier screen and a tap would then go to the wrong place. Run `iph stop` once, wait a minute, read again, and tell the user if it does not clear. Slow stretches have tended to follow several stops and starts in a row, so do not loop on that.
+- **A reading takes about 20 s once and then things are normal again:** the phone's accessibility service had stopped answering and iph restarted it by itself. Nothing to do. This happens mostly over Wi-Fi.
+- **`ax_timeout` keeps coming back:** the restart did not help, so the phone is most likely locked or its screen is off. Ask the user to look at the phone. Do not loop on `iph stop`.
+- **`input_failed` or `input_unavailable` come back, or readings take many seconds every time:** stop sending input, because a late reading can show an earlier screen and a tap would then go to the wrong place. Read once more after a moment, and tell the user if it does not clear. Over Wi-Fi everything is slower and less steady than over the cable; if the cable is at hand, suggest plugging it in.
 - **The element list looks wrong for what the user describes:** `iph screenshot -o <file>` shows what is really on screen. Banners and system pop-ups are never in the list.
 - **The phone is locked:** nothing works until the user unlocks it.
 - **iph was killed and the phone stayed in Do Not Disturb:** `iph dnd status` shows whether iph set it; `iph dnd off` puts the earlier Focus back.

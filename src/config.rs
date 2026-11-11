@@ -81,6 +81,9 @@ pub struct DaemonConfig {
     /// count without it, so it is off: the video is megabits a second through
     /// the same tunnel as everything else.
     pub screen_video: bool,
+    /// When the phone's accessibility daemon stops answering, end it so the
+    /// phone starts a new one, and read again.
+    pub restart_accessibility: bool,
 }
 
 impl Default for DaemonConfig {
@@ -89,6 +92,7 @@ impl Default for DaemonConfig {
             input_idle_secs: 120,
             idle_exit_secs: 1800,
             screen_video: false,
+            restart_accessibility: true,
         }
     }
 }
