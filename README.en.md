@@ -269,4 +269,4 @@ IPH_TRACE=1 iph …   # logs request and dump times to ~/Library/Application Sup
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The media-session bring-up is adapted from an idevice example tool ([LICENSE.idevice](LICENSE.idevice)).
+MIT, see [LICENSE](LICENSE). The media-session bring-up is adapted from an idevice example tool ([LICENSE.idevice](LICENSE.idevice)). `vendor/jktcp` is the tunnel's TCP stack, jktcp 0.1.8 (MIT), with two constants changed so that it waits longer before giving a connection up ([vendor/jktcp/LICENSE](vendor/jktcp/LICENSE)).
