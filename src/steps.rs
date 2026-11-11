@@ -325,6 +325,11 @@ fn scroll_distance(prev: &[Row], page: &[Row]) -> Option<f64> {
 /// counts for the surplus). That can miss an identical neighbour, but never
 /// reports a row twice.
 fn new_rows(prev: &[Row], page: &[Row]) -> Vec<Value> {
+    fresh_rows(prev, page).into_iter().map(|r| r.value.clone()).collect()
+}
+
+/// The rows `new_rows` hands back, as they are on `page`.
+fn fresh_rows<'a>(prev: &[Row], page: &'a [Row]) -> Vec<&'a Row> {
     match scroll_distance(prev, page) {
         Some(dy) => {
             let at = |r: &Row, y: f64, slack: f64| (r.y - y).abs() <= slack;
@@ -355,7 +360,7 @@ fn new_rows(prev: &[Row], page: &[Row]) -> Vec<Value> {
                     fresh.remove(i);
                 }
             }
-            fresh.into_iter().map(|r| r.value.clone()).collect()
+            fresh
         }
         None => {
             let mut out = Vec::new();
@@ -363,12 +368,54 @@ fn new_rows(prev: &[Row], page: &[Row]) -> Vec<Value> {
                 let before = prev.iter().filter(|p| p.key == r.key).count();
                 let so_far = page[..=i].iter().filter(|p| p.key == r.key).count();
                 if so_far > before {
-                    out.push(r.value.clone());
+                    out.push(r);
                 }
             }
             out
         }
     }
+}
+
+/// Whether the rows moved against the reading direction between two
+/// readings: the list went back, so nothing on the later reading lies beyond
+/// what was already read.
+fn moved_back(prev: &[Row], page: &[Row], direction: &str) -> bool {
+    match scroll_distance(prev, page) {
+        // Reading down, rows move up the screen: y gets smaller.
+        Some(dy) if direction == "down" => dy < -3.0,
+        Some(dy) => dy > 3.0,
+        None => false,
+    }
+}
+
+/// Rows of `page` that lie beyond the end of `at_end`, the last reading
+/// before the end check (scroll back, scroll forward, read).
+///
+/// Only those can be new: a list that has really ended shows nothing past
+/// `at_end`, and one whose scrolls had not arrived shows more of itself past
+/// it. Rows on the near side of `at_end`'s last row were read on the way down
+/// already. They do appear when the forward scroll falls short of the back
+/// scroll or the reading is older than the forward scroll (2026-11-11, B7:
+/// 4 of 19 readings of Settings > General ended with two middle rows a second
+/// time, because the end check took everything not on `at_end` for new).
+///
+/// `None` when the two readings cannot be lined up (the rows did not move as
+/// one block) and the page has rows `at_end` has not: then it cannot be told
+/// which side they lie on.
+fn past_end(at_end: &[Row], page: &[Row], direction: &str) -> Option<Vec<Value>> {
+    let fresh = fresh_rows(at_end, page);
+    if fresh.is_empty() {
+        return Some(Vec::new());
+    }
+    let dy = scroll_distance(at_end, page)?;
+    // Where `at_end`'s far edge sits on this reading.
+    let edge = if direction == "down" {
+        at_end.iter().map(|r| r.y).fold(f64::NEG_INFINITY, f64::max) - dy
+    } else {
+        at_end.iter().map(|r| r.y).fold(f64::INFINITY, f64::min) - dy
+    };
+    let beyond = |r: &Row| if direction == "down" { r.y > edge + 3.0 } else { r.y < edge - 3.0 };
+    Some(fresh.into_iter().filter(|r| beyond(r)).map(|r| r.value.clone()).collect())
 }
 
 /// How far to scroll a list between two readings.
@@ -819,6 +866,26 @@ impl Session {
             }
             match &prev {
                 None => all.extend(page.iter().map(|r| r.value.clone())),
+                Some(before) if moved_back(before, &page, &direction) => {
+                    // A reading from before the scroll arrived, or the list
+                    // bounced back: the rows on it were read already. Keep
+                    // the furthest reading to compare the next one with, or
+                    // rows read before would come back as new.
+                    crate::device::ax::trace(|| format!("read_list page: moved back [{}]", page_marks(&page)));
+                    barren += 1;
+                    if until.as_ref().is_some_and(|u| !u.find(&screen).is_empty()) {
+                        ended = "until";
+                        break;
+                    }
+                    if scrolls >= max_scrolls {
+                        ended = "max_scrolls";
+                        break;
+                    }
+                    self.list_scroll(&direction).await?;
+                    stride.last = 0.0;
+                    scrolls += 1;
+                    continue;
+                }
                 Some(before) => {
                     let fresh_rows = new_rows(before, &page);
                     crate::device::ax::trace(|| {
@@ -874,10 +941,43 @@ impl Session {
                     break;
                 }
                 self.list_scroll(&direction).await?;
-                let (_, screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
-                let page = Self::list_page(&screen, &row, columns, &key, group.as_ref())?;
-                let fresh_rows = new_rows(&at_end, &page);
-                crate::device::ax::trace(|| format!("read_list end check: new={}", fresh_rows.len()));
+                let mut fresh = Fresh::MaxAge(reuse());
+                let mut looks = 0;
+                let (page, fresh_rows) = loop {
+                    let (_, screen) = self.screen(fresh, full, BuildOptions::default()).await?;
+                    let page = Self::list_page(&screen, &row, columns, &key, group.as_ref())?;
+                    let past = past_end(&at_end, &page, &direction);
+                    crate::device::ax::trace(|| {
+                        format!(
+                            "read_list end check: moved={:?} new={:?} beyond={:?} [{}]",
+                            scroll_distance(&at_end, &page),
+                            new_rows(&at_end, &page).len(),
+                            past.as_ref().map(|p| p.len()),
+                            page_marks(&page),
+                        )
+                    });
+                    match past {
+                        Some(rows) => break (page, rows),
+                        // Rows the end did not have, but not lined up with
+                        // it: the reading may be mid-motion. Look again.
+                        None if looks < 2 => {
+                            looks += 1;
+                            fresh = Fresh::Force;
+                        }
+                        None => {
+                            return Err(Fail::unknown(
+                                "list_uncertain",
+                                "at the end of the list, the screen could not be lined up with what was read; rows may be missing or repeated",
+                            )
+                            .hint(t(
+                                "목록을 끝까지 읽었는지 확신할 수 없어 결과를 내지 않았습니다. 다시 실행하세요.",
+                                "Not sure the whole list was read, so no result was given. Run it again.",
+                            ))
+                            .with("rows_so_far", all.len())
+                            .with("scrolls", scrolls));
+                        }
+                    }
+                };
                 if fresh_rows.is_empty() {
                     ended = "end_of_list";
                     break;
@@ -1306,6 +1406,79 @@ mod tests {
         assert!(holds("soon").is_err());
         assert!(split_step(&json!({"tap": "a", "when": "maybe"})).unwrap_err().contains("when"));
         assert!(split_step(&json!({"tap": "a", "when": "{{ago.6.month}} != {{today.month}}"})).is_ok());
+    }
+
+    /// A reading of Settings > General: rows `from` onwards, the first at
+    /// `top`, one every 52 points down to the bottom of the screen.
+    fn general(from: &str, top: f64) -> Vec<Row> {
+        const ROWS: [&str; 24] = [
+            "설정", "정보", "소프트웨어 업데이트", "iPhone 저장 공간", "AppleCare 및 보증", "AirDrop",
+            "AirPlay 및 연속성", "화면 속 화면", "화면 캡처", "CarPlay", "게임 컨트롤러", "날짜 및 시간",
+            "백그라운드 앱 새로 고침", "사전", "서체", "언어 및 지역", "자동 완성 및 암호", "키보드",
+            "트랙패드", "TV 제공업체", "VPN 및 기기 관리", "법률 및 규제 정보", "전송 또는 iPhone 재설정",
+            "시스템 종료",
+        ];
+        let start = ROWS.iter().position(|r| *r == from).unwrap();
+        ROWS[start..]
+            .iter()
+            .enumerate()
+            .map(|(i, label)| (label, top + 52.0 * i as f64))
+            .take_while(|(_, y)| *y < 880.0)
+            .map(|(label, y)| Row { value: json!({ "label": label }), key: label.to_string(), y })
+            .collect()
+    }
+
+    #[test]
+    fn the_end_check_does_not_take_rows_read_on_the_way_down() {
+        // B7 (2026-11-11), 4 of 19: at the end of the list, the scroll back
+        // and the scroll forward did not cancel out, and the reading after
+        // them stood 104 points short of the end. Two rows above the end's
+        // first row came back as new.
+        let at_end = general("서체", 120.0);
+        let short = general("백그라운드 앱 새로 고침", 120.0);
+        assert_eq!(scroll_distance(&at_end, &short), Some(-104.0));
+        assert_eq!(labels(&new_rows(&at_end, &short)), ["백그라운드 앱 새로 고침", "사전"]);
+        assert!(moved_back(&at_end, &short, "down"));
+        assert_eq!(past_end(&at_end, &short, "down"), Some(vec![]));
+        // Back at the same place: nothing new either.
+        assert_eq!(past_end(&at_end, &at_end, "down"), Some(vec![]));
+    }
+
+    #[test]
+    fn the_end_check_takes_rows_past_the_end() {
+        // The scrolls before the check had not arrived: the list moves on
+        // and shows rows past the last reading, which are new.
+        let stuck = general("AirDrop", 120.0);
+        let further = general("날짜 및 시간", 120.0);
+        assert_eq!(stuck.last().unwrap().key, "TV 제공업체");
+        let past = past_end(&stuck, &further, "down").unwrap();
+        assert_eq!(
+            labels(&past),
+            ["VPN 및 기기 관리", "법률 및 규제 정보", "전송 또는 iPhone 재설정", "시스템 종료"]
+        );
+        assert!(!moved_back(&stuck, &further, "down"));
+    }
+
+    #[test]
+    fn the_end_check_gives_up_on_a_reading_it_cannot_line_up() {
+        // Rows in common but each at a different offset (a reading taken
+        // mid-motion), and two rows the end did not have.
+        let at_end = general("서체", 120.0);
+        let mut smeared = general("백그라운드 앱 새로 고침", 120.0);
+        for (i, r) in smeared.iter_mut().enumerate() {
+            r.y += 17.0 * i as f64;
+        }
+        assert_eq!(scroll_distance(&at_end, &smeared), None);
+        assert_eq!(past_end(&at_end, &smeared, "down"), None);
+    }
+
+    #[test]
+    fn reading_up_the_list_mirrors_reading_down() {
+        // Reading upward, the list's end is its top.
+        let at_top = general("설정", 120.0);
+        let short = general("화면 속 화면", 120.0);
+        assert!(moved_back(&at_top, &short, "up"));
+        assert_eq!(past_end(&at_top, &short, "up"), Some(vec![]));
     }
 
     fn mark(text: &str) -> Value {
