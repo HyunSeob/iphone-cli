@@ -1,23 +1,20 @@
-//! Talk to the daemon over its Unix socket, starting it when needed.
+//! Talk to the daemon over its socket (named pipe on Windows), starting it
+//! when needed.
 
 use std::{
-    os::unix::{fs::OpenOptionsExt, process::CommandExt},
     process::Stdio,
     time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixStream,
-};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::{
     config::Config,
     daemon::{Request, build_stamp},
     device::conn,
     i18n::t,
-    paths,
+    ipc, paths,
     reply::{Fail, envelope},
 };
 
@@ -41,8 +38,8 @@ pub async fn resolve_udid(flag: Option<String>) -> Result<String, Fail> {
     match devices.len() {
         1 => Ok(devices[0].udid.clone()),
         0 => Err(Fail::not_sent("no_device", "no iPhone is connected").hint(t(
-            "폰을 USB로 연결하거나 맥과 같은 Wi-Fi에 두고 화면을 켜 주세요. 처음이라면 `iph setup`을 실행하세요.",
-            "Plug the phone in, or put it on the Mac's Wi-Fi and wake it. First time? Run `iph setup`.",
+            "폰을 USB로 연결하거나 컴퓨터와 같은 Wi-Fi에 두고 화면을 켜 주세요. 처음이라면 `iph setup`을 실행하세요.",
+            "Plug the phone in, or put it on the computer's Wi-Fi and wake it. First time? Run `iph setup`.",
         ))),
         n => Err(Fail::not_sent(
             "multiple_devices",
@@ -58,10 +55,9 @@ pub async fn resolve_udid(flag: Option<String>) -> Result<String, Fail> {
 
 fn spawn_daemon(udid: &str) -> std::io::Result<()> {
     paths::ensure_private_dir(&paths::state_dir())?;
-    let log = std::fs::OpenOptions::new()
+    let log = paths::private_file()
         .create(true)
         .append(true)
-        .mode(0o600)
         .open(paths::daemon_log(udid))?;
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
     cmd.arg("daemon")
@@ -70,7 +66,14 @@ fn spawn_daemon(udid: &str) -> std::io::Result<()> {
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
-    // Its own session, so closing the terminal does not take the daemon along.
+    detach(&mut cmd);
+    cmd.spawn().map(|_| ())
+}
+
+/// Its own session, so closing the terminal does not take the daemon along.
+#[cfg(unix)]
+fn detach(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
     // SAFETY: setsid is async-signal-safe and touches nothing shared.
     unsafe {
         cmd.pre_exec(|| {
@@ -78,18 +81,42 @@ fn spawn_daemon(udid: &str) -> std::io::Result<()> {
             Ok(())
         });
     }
-    cmd.spawn().map(|_| ())
 }
 
-async fn connect(udid: &str) -> Result<UnixStream, String> {
-    let sock = paths::socket(udid);
-    if let Ok(s) = UnixStream::connect(&sock).await {
+/// No console window, and out of the terminal's process group. The daemon
+/// must not inherit this process's own stdout/stderr: when an agent reads
+/// `iph` through a pipe, an inherited copy would keep the pipe open until the
+/// daemon exits, and the caller would wait that long.
+#[cfg(windows)]
+fn detach(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::{
+        Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation},
+        System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
+    };
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: only clears the inherit flag on this process's own handles.
+        unsafe {
+            let handle = GetStdHandle(which);
+            if !handle.is_null() {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+}
+
+async fn connect(udid: &str) -> Result<ipc::Stream, String> {
+    if let Ok(s) = ipc::connect(udid).await {
         return Ok(s);
     }
     spawn_daemon(udid).map_err(|e| format!("cannot start the daemon: {e}"))?;
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(8) {
-        if let Ok(s) = UnixStream::connect(&sock).await {
+        if let Ok(s) = ipc::connect(udid).await {
             return Ok(s);
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -104,8 +131,7 @@ async fn connect(udid: &str) -> Result<UnixStream, String> {
 /// running, otherwise its last words. Unless `keep_dnd`, it first puts back
 /// the Focus it replaced with Do Not Disturb, which takes some seconds.
 async fn stop(udid: &str, keep_dnd: bool) -> Option<Value> {
-    let sock = paths::socket(udid);
-    let mut s = UnixStream::connect(&sock).await.ok()?;
+    let mut s = ipc::connect(udid).await.ok()?;
     let req = Request { build: build_stamp(), cmd: "shutdown".into(), args: json!({ "keep_dnd": keep_dnd }) };
     let _ = s.write_all(format!("{}\n", serde_json::to_string(&req).unwrap()).as_bytes()).await;
     let mut line = String::new();
@@ -117,7 +143,7 @@ async fn stop(udid: &str, keep_dnd: bool) -> Option<Value> {
     }
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(5) {
-        if UnixStream::connect(&sock).await.is_err() {
+        if ipc::connect(udid).await.is_err() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -132,12 +158,9 @@ fn kill_daemon(udid: &str) {
         .and_then(|s| s.trim().parse::<i32>().ok())
         .filter(|pid| *pid > 1)
     {
-        // SAFETY: plain kill(2) on a pid this tool's own daemon recorded.
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-        }
+        kill_pid(pid);
     }
-    let _ = std::fs::remove_file(paths::socket(udid));
+    ipc::cleanup(udid);
     let _ = std::fs::remove_file(paths::daemon_pid(udid));
 }
 
@@ -211,4 +234,21 @@ pub async fn request(udid: &str, cmd: &str, args: Value) -> Value {
         Err(Fail::not_sent("daemon_unreachable", "the daemon keeps reporting an older build")),
         started,
     )
+}
+
+#[cfg(unix)]
+fn kill_pid(pid: i32) {
+    // SAFETY: plain kill(2) on a pid this tool's own daemon recorded.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn kill_pid(pid: i32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }

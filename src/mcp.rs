@@ -148,7 +148,7 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "iph_screenshot",
-            "Save a PNG screenshot to a file on the Mac. Use iph_read for content; this is for looks.",
+            "Save a PNG screenshot to a file on this computer. Use iph_read for content; this is for looks.",
             json!({ "path": { "type": "string", "description": "Absolute path of the PNG to write." } }),
             &["path"],
         ),

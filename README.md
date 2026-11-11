@@ -27,14 +27,20 @@ $ iph run settings-version
 
 | | |
 |---|---|
-| 호스트 | macOS |
+| 호스트 | macOS, Windows 10 · 11 (x64) |
 | 기기 | 실제 아이폰, iOS 18 이상 (검증은 **iPhone 15 Pro Max · iOS 27.0.1 한 대**에서만 했습니다) |
-| 연결 | USB 또는 같은 Wi-Fi (검증은 Wi-Fi로만) |
-| 범위 밖 | 시뮬레이터, 안드로이드, Windows · Linux 호스트, 가로 화면 |
+| 연결 | USB 또는 같은 Wi-Fi (맥은 Wi-Fi로, 윈도는 USB로만 검증) |
+| 범위 밖 | 시뮬레이터, 안드로이드, Linux 호스트, 가로 화면 |
+
+윈도는 iPhone19,4 · iOS 27.2 한 대를 USB로 꽂아 `doctor` · 읽기 · 터치 · 스크립트를 확인했습니다.
 
 ## 설치
 
-Rust(1.88 이상)와, 처음 한 번 Xcode가 필요합니다 (폰 짝짓기와 개발자 디스크 이미지).
+Rust(1.88 이상)가 필요합니다. Xcode는 필요 없습니다.
+
+- **맥:** 폰을 USB로 꽂고 폰에서 '신뢰'를 누르면 짝짓기가 됩니다.
+- **윈도:** 애플의 기기 연결 서비스가 있어야 합니다. Microsoft Store의 **Apple 기기**(Apple Devices) 앱을 깔거나, `winget install Apple.AppleMobileDeviceSupport`로 서비스만 깔면 됩니다. 그 뒤 폰을 USB로 꽂고 '신뢰'를 누르세요. 빌드에는 Visual Studio Build Tools(C++)가 필요합니다.
+- **개발자 디스크 이미지:** 폰에 없으면 `iph doctor`가 연결합니다. 맥에 Xcode가 있으면 Xcode의 이미지를 쓰고, 없으면 공개 저장소 [doronz88/DeveloperDiskImage](https://github.com/doronz88/DeveloperDiskImage)에서 처음 한 번 받아 옵니다 (약 18 MB, 커밋과 SHA-256 고정). iph 저장소에는 애플 파일이 들어 있지 않습니다.
 
 ```sh
 git clone https://github.com/HyunSeob/iphone-cli
@@ -52,7 +58,7 @@ iph setup                     # 폰 준비 상태를 차례로 확인하고, 할
 | `pairing` | 필수 | 맥이 이 폰의 짝짓기 기록을 갖고 있어야 합니다. 없으면 USB로 연결하고 폰에서 '신뢰' |
 | `connection` | 필수 | USB 또는 같은 Wi-Fi에서 폰이 보여야 합니다 |
 | `developer_mode` | 필수 | 설정 → 개인정보 보호 및 보안 → 개발자 모드. 꺼져 있으면 `iph doctor`가 그 메뉴를 꺼내 줍니다 |
-| `developer_disk_image` | 필수 | 접근성 · 화면 · 입력 서비스가 여기서 나옵니다. Xcode의 '기기 및 시뮬레이터'에서 폰을 한 번 고르면 연결됩니다 |
+| `developer_disk_image` | 필수 | 접근성 · 화면 · 입력 서비스가 여기서 나옵니다. 없으면 `iph doctor`가 받아서 연결합니다 (위 '설치') |
 | `screen_unlocked` | 필수 | 폰 잠금이 풀려 있어야 합니다 |
 | `accessibility_tree` | 필수 | 화면 요소가 실제로 읽히는지 |
 | `touch_input` | 필수 | 설정 앱 목록을 한 칸 내렸다 올려서 터치가 실제로 먹는지 확인합니다 (`--no-touch-test`로 건너뜀) |

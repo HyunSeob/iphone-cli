@@ -29,6 +29,7 @@ idevice = { version = "=0.1.68", features = [
   "dvt",
   "amfi",
   "mobile_image_mounter",
+  "cryptexd",
   "tss",
   "heartbeat",
 ] }
@@ -47,6 +48,10 @@ libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rquickjs = "0.14"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [profile.release]
 opt-level = 3

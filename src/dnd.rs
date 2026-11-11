@@ -12,10 +12,7 @@
 //! press Home twice. Control Center belongs to SpringBoard and shows in the
 //! accessibility tree; Settings has no switch for it (iOS 27.0.1).
 
-use std::{
-    os::unix::fs::OpenOptionsExt,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -220,11 +217,10 @@ impl Record {
     fn save(&self, udid: &str) -> std::io::Result<()> {
         use std::io::Write;
         paths::ensure_private_dir(&paths::state_dir())?;
-        let mut file = std::fs::OpenOptions::new()
+        let mut file = paths::private_file()
             .create(true)
             .write(true)
             .truncate(true)
-            .mode(0o600)
             .open(paths::dnd_record(udid))?;
         file.write_all(serde_json::to_string(self).unwrap_or_default().as_bytes())
     }

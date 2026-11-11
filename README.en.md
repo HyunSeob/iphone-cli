@@ -24,14 +24,20 @@ $ iph tap "General"
 
 | | |
 |---|---|
-| Host | macOS |
+| Host | macOS, Windows 10/11 (x64) |
 | Device | A real iPhone, iOS 18 or later (verified on **one iPhone 15 Pro Max with iOS 27.0.1** only, Korean interface) |
-| Connection | USB or the same Wi-Fi (verified over Wi-Fi only) |
-| Out of scope | Simulators, Android, Windows/Linux hosts, landscape |
+| Connection | USB or the same Wi-Fi (verified over Wi-Fi on the Mac, over USB on Windows) |
+| Out of scope | Simulators, Android, Linux hosts, landscape |
+
+On Windows, `doctor`, reading, touch and scripts were checked with one iPhone19,4 on iOS 27.2 over USB.
 
 ## Install
 
-Rust 1.88 or later, and Xcode once (to pair the phone and for its developer disk image).
+Rust 1.88 or later. Xcode is not needed.
+
+- **Mac:** plug the phone in and tap Trust on it; that pairs it.
+- **Windows:** Apple's device service must be installed: the **Apple Devices** app from the Microsoft Store, or just the service with `winget install Apple.AppleMobileDeviceSupport`. Then plug the phone in and tap Trust. Building needs Visual Studio Build Tools (C++).
+- **Developer disk image:** when the phone lacks it, `iph doctor` installs it. It uses Xcode's copy when the Mac has one, and otherwise fetches one once from the public [doronz88/DeveloperDiskImage](https://github.com/doronz88/DeveloperDiskImage) repository (about 18 MB, pinned commit and SHA-256). The iph repository contains no Apple files.
 
 ```sh
 git clone https://github.com/HyunSeob/iphone-cli
@@ -49,7 +55,7 @@ iph setup                     # walks through what the phone needs
 | `pairing` | yes | The Mac holds a pairing record for the phone. If not: connect by USB and tap Trust |
 | `connection` | yes | The phone is visible over USB or the same Wi-Fi |
 | `developer_mode` | yes | Settings → Privacy & Security → Developer Mode. If it is off, `iph doctor` makes that switch appear |
-| `developer_disk_image` | yes | Source of the accessibility, display and input services. Selecting the phone once in Xcode's Devices and Simulators mounts it |
+| `developer_disk_image` | yes | Source of the accessibility, display and input services. When missing, `iph doctor` fetches and installs it (see Install) |
 | `screen_unlocked` | yes | The phone is unlocked |
 | `accessibility_tree` | yes | Screen elements can really be read |
 | `touch_input` | yes | Scrolls the Settings list down one step and back to see that touch lands (`--no-touch-test` skips it) |

@@ -117,10 +117,13 @@ fn today_days() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as libc::time_t)
         .unwrap_or(0);
-    // SAFETY: localtime_r fills the struct it is given and keeps nothing.
+    // SAFETY: localtime_r / localtime_s fill the struct they are given and keep nothing.
     let tm = unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
+        #[cfg(unix)]
         libc::localtime_r(&now, &mut tm);
+        #[cfg(windows)]
+        libc::localtime_s(&mut tm, &now);
         tm
     };
     days_from_civil(i64::from(tm.tm_year) + 1900, i64::from(tm.tm_mon) + 1, i64::from(tm.tm_mday))

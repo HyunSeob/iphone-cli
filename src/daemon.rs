@@ -1,20 +1,18 @@
 //! The resident process (`iph daemon`, started on demand by the first `iph`
 //! call). It keeps the tunnel, the accessibility subscription and the input
-//! session open for one phone and serves requests from a Unix socket, one at a
-//! time.
+//! session open for one phone and serves requests from a Unix socket (a named
+//! pipe on Windows), one at a time.
 
 use std::{
-    os::unix::fs::PermissionsExt,
     sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
     sync::Mutex,
 };
 
@@ -22,7 +20,7 @@ use crate::{
     actions::parse_args,
     config::Config,
     device::session::Session,
-    doctor, fields, paths,
+    doctor, fields, ipc, paths,
     reply::{Fail, Res, envelope},
     script,
     steps::RunOptions,
@@ -125,8 +123,8 @@ struct Shared {
     udid: String,
 }
 
-async fn handle(stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
-    let (read, mut write) = stream.into_split();
+async fn handle(stream: ipc::Stream, shared: Arc<Shared>) -> Result<()> {
+    let (read, mut write) = tokio::io::split(stream);
     let mut line = String::new();
     BufReader::new(read).read_line(&mut line).await?;
     if line.trim().is_empty() {
@@ -159,7 +157,7 @@ async fn handle(stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
             write.write_all(format!("{reply}\n").as_bytes()).await?;
             write.shutdown().await.ok();
             session.shutdown().await;
-            let _ = std::fs::remove_file(paths::socket(&shared.udid));
+            ipc::cleanup(&shared.udid);
             let _ = std::fs::remove_file(paths::daemon_pid(&shared.udid));
             std::process::exit(0);
         }
@@ -231,13 +229,10 @@ fn keep_library_warnings() {
 pub async fn run(udid: String) -> Result<()> {
     keep_library_warnings();
     paths::ensure_private_dir(&paths::state_dir())?;
-    let sock = paths::socket(&udid);
-    if UnixStream::connect(&sock).await.is_ok() {
+    if ipc::connect(&udid).await.is_ok() {
         bail!("a daemon for {udid} is already running");
     }
-    let _ = std::fs::remove_file(&sock);
-    let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
-    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+    let mut listener = ipc::Listener::bind(&udid)?;
     // So a client can put down a daemon that stopped answering.
     std::fs::write(paths::daemon_pid(&udid), std::process::id().to_string())?;
 
@@ -258,7 +253,6 @@ pub async fn run(udid: String) -> Result<()> {
         .run_until(async move {
             // Housekeeping: close an idle input session, exit when unused.
             let keeper = shared.clone();
-            let keeper_sock = sock.clone();
             tokio::task::spawn_local(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -278,7 +272,7 @@ pub async fn run(udid: String) -> Result<()> {
                                 log(&format!("do not disturb at exit: {d}"));
                             }
                             session.shutdown().await;
-                            let _ = std::fs::remove_file(&keeper_sock);
+                            ipc::cleanup(&keeper.udid);
                             let _ = std::fs::remove_file(paths::daemon_pid(&keeper.udid));
                             std::process::exit(0);
                         }
@@ -287,7 +281,7 @@ pub async fn run(udid: String) -> Result<()> {
             });
 
             loop {
-                let (stream, _) = listener.accept().await?;
+                let stream = listener.accept().await?;
                 let shared = shared.clone();
                 tokio::task::spawn_local(async move {
                     if let Err(e) = handle(stream, shared).await {

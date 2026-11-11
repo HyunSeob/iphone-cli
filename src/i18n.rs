@@ -28,6 +28,15 @@ fn detect() -> Lang {
             return if first.to_lowercase().starts_with("ko") { Lang::Ko } else { Lang::En };
         }
     }
+    // Windows: the user's locale in the registry, e.g. "ko-KR".
+    #[cfg(windows)]
+    if let Ok(out) = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Control Panel\International", "/v", "LocaleName"])
+        .output()
+        && let Some(name) = String::from_utf8_lossy(&out.stdout).split_whitespace().last()
+    {
+        return if name.to_lowercase().starts_with("ko") { Lang::Ko } else { Lang::En };
+    }
     for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
         if let Ok(v) = std::env::var(key)
             && !v.is_empty() {

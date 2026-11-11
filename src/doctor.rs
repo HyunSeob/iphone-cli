@@ -150,15 +150,8 @@ fn hex_field(v: Option<&plist::Value>) -> Option<u64> {
 /// on the test phone, whose image was already mounted.
 async fn mount_ddi(provider: &dyn IdeviceProvider) -> anyhow::Result<()> {
     use anyhow::{Context, anyhow};
-    let home = std::env::var("HOME").unwrap_or_default();
-    let restore = [
-        "/Library/Developer/DeveloperDiskImages/iOS_DDI/Restore".to_string(),
-        format!("{home}/Library/Developer/DeveloperDiskImages/iOS_DDI/Restore"),
-    ]
-    .into_iter()
-    .map(std::path::PathBuf::from)
-    .find(|p| p.join("BuildManifest.plist").exists())
-    .ok_or_else(|| anyhow!("no developer disk image on this Mac (Xcode is needed once)"))?;
+    let restore = crate::ddi::xcode_restore()
+        .ok_or_else(|| anyhow!("no Xcode developer disk image on this computer"))?;
 
     let manifest_bytes = std::fs::read(restore.join("BuildManifest.plist"))?;
     let manifest: plist::Value = plist::from_bytes(&manifest_bytes).context("BuildManifest.plist")?;
@@ -188,7 +181,7 @@ async fn mount_ddi(provider: &dyn IdeviceProvider) -> anyhow::Result<()> {
         .iter()
         .filter_map(|i| i.as_dictionary())
         .find(|i| hex_field(i.get("ApBoardID")) == board && hex_field(i.get("ApChipID")) == chip)
-        .ok_or_else(|| anyhow!("no developer disk image on this Mac matches this phone model"))?;
+        .ok_or_else(|| anyhow!("no Xcode developer disk image on this computer matches this phone model"))?;
     let path_of = |component: &str| -> anyhow::Result<std::path::PathBuf> {
         identity
             .get("Manifest")
@@ -243,8 +236,8 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
             .status("fail")
             .detail(format!("{e:#}"))
             .action(
-                "폰을 USB로 연결하거나, 맥과 같은 Wi-Fi에 두고 화면을 켜 주세요.",
-                "Plug the phone in, or put it on the Mac's Wi-Fi and wake its screen.",
+                "폰을 USB로 연결하거나, 컴퓨터와 같은 Wi-Fi에 두고 화면을 켜 주세요.",
+                "Plug the phone in, or put it on the computer's Wi-Fi and wake its screen.",
             ),
     });
 
@@ -284,30 +277,49 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
     let mut services_ok = false;
     if route.is_ok() && dev_mode != Some(false) {
         let mut missing = missing_services(s).await;
-        let mut mounted_now = false;
+        let mut mounted_from = None;
         let mut mount_note = None;
         if matches!(&missing, Ok(m) if !m.is_empty()) {
-            // Try to mount the image Xcode keeps on this Mac, then look again.
-            if let Ok(r) = &route {
-                match tokio::time::timeout(Duration::from_secs(180), mount_ddi(&*r.provider)).await {
-                    Ok(Ok(())) => {
-                        mounted_now = true;
-                        s.reset();
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                        missing = missing_services(s).await;
+            // Install the image through cryptexd (Xcode's copy, else one
+            // fetched once), then look again. Phones before iOS 17.4 take it
+            // through the image mounter instead, from Xcode's copy only.
+            let cryptex = match s.ensure_tunnel().await {
+                Ok(tunnel) => match tokio::time::timeout(Duration::from_secs(300), crate::ddi::install(tunnel)).await {
+                    Ok(r) => r,
+                    Err(_) => Err(anyhow::anyhow!("timed out")),
+                },
+                Err(f) => Err(anyhow::anyhow!(f.message)),
+            };
+            match cryptex {
+                Ok(source) => mounted_from = Some(source),
+                Err(e) => {
+                    let mut note = format!("cryptex install failed: {e:#}");
+                    if let Ok(r) = &route {
+                        match tokio::time::timeout(Duration::from_secs(180), mount_ddi(&*r.provider)).await {
+                            Ok(Ok(())) => mounted_from = Some("Xcode".to_string()),
+                            Ok(Err(e)) => note.push_str(&format!("; image mounter: {e:#}")),
+                            Err(_) => note.push_str("; image mounter timed out"),
+                        }
                     }
-                    Ok(Err(e)) => mount_note = Some(format!("automatic mount failed: {e:#}")),
-                    Err(_) => mount_note = Some("automatic mount timed out".to_string()),
+                    if mounted_from.is_none() {
+                        mount_note = Some(note);
+                    }
                 }
             }
+            if mounted_from.is_some() {
+                s.reset();
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                missing = missing_services(s).await;
+            }
         }
+        let mounted_now = mounted_from.is_some();
         match missing {
             Ok(m) if m.is_empty() => {
                 services_ok = true;
                 let mut c = Check::new("developer_disk_image", true);
                 c.auto_fixed = mounted_now;
-                if mounted_now {
-                    c = c.detail("mounted the developer disk image from Xcode's folder");
+                if let Some(from) = &mounted_from {
+                    c = c.detail(format!("installed the developer disk image ({from})"));
                 }
                 checks.push(c);
             }
@@ -318,8 +330,8 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
                     detail.push_str(&note);
                 }
                 checks.push(Check::new("developer_disk_image", true).status("fail").detail(detail).action(
-                    "Xcode를 열고 창 → 기기 및 시뮬레이터에서 이 폰을 한 번 선택하면 개발자 디스크 이미지가 연결됩니다. 그 뒤 다시 `iph doctor`를 실행하세요.",
-                    "Open Xcode → Window → Devices and Simulators and select this phone once; that mounts the developer disk image. Then run `iph doctor` again.",
+                    "개발자 디스크 이미지를 연결하지 못했습니다. 인터넷 연결(애플 서명 서버, GitHub)을 확인하고 다시 `iph doctor`를 실행하세요. 맥이라면 Xcode의 창 → 기기 및 시뮬레이터에서 이 폰을 한 번 골라도 됩니다.",
+                    "Could not install the developer disk image. Check the internet connection (Apple's signing server, GitHub) and run `iph doctor` again. On a Mac, selecting this phone once in Xcode → Window → Devices and Simulators also works.",
                 ));
             }
             Err(message) => checks.push(
@@ -353,8 +365,8 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
                 Check::new("wifi", false).detail("reachable over Wi-Fi as well as USB")
             } else {
                 Check::new("wifi", false).status("warn").action(
-                    "케이블 없이 쓰려면 폰과 맥을 같은 Wi-Fi에 두세요. (Finder에서 폰을 고르고 'Wi-Fi에 있을 때 이 iPhone 보기'를 켜야 할 수 있습니다.)",
-                    "To work without the cable, put the phone and the Mac on the same Wi-Fi. (You may need \"Show this iPhone when on Wi-Fi\" in Finder.)",
+                    "케이블 없이 쓰려면 폰과 컴퓨터를 같은 Wi-Fi에 두세요. (맥은 Finder, 윈도는 Apple 기기 앱에서 폰을 고르고 'Wi-Fi에 있을 때 이 iPhone 보기'를 켜야 할 수 있습니다.)",
+                    "To work without the cable, put the phone and the computer on the same Wi-Fi. (You may need \"Show this iPhone when on Wi-Fi\" in Finder on a Mac, or in the Apple Devices app on Windows.)",
                 )
             }
         }

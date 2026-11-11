@@ -9,9 +9,8 @@
 //! words, is not caught.
 
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     io::{BufRead, BufReader, Seek, SeekFrom, Write},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::Path,
 };
 
@@ -156,15 +155,13 @@ impl Locked {
         if let Some(dir) = path.parent() {
             paths::ensure_private_dir(dir)?;
         }
-        let file = OpenOptions::new()
+        let file = paths::private_file()
             .read(true)
             .append(true)
             .create(true)
-            .mode(0o600)
             .open(path)
             .with_context(|| format!("open {}", path.display()))?;
-        // SAFETY: flock on a file descriptor we own.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        if file.lock().is_err() {
             bail!("cannot lock {}", path.display());
         }
         Ok(Self(file))
@@ -303,9 +300,12 @@ mod tests {
         assert!(begin_in(&path, &other).unwrap().is_ok());
         assert_eq!(lookup_in(&path, "pay-001").unwrap().len(), 2);
         // The record is private to the user.
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

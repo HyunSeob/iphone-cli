@@ -206,7 +206,7 @@ impl InputSession {
         let audio_call = uuid::Uuid::new_v4().to_string().to_uppercase();
         let audio_offer = build_screen_audio_offer(&audio_call, &call_info)
             .map_err(|e| anyhow!("audio offer: {e:?}"))?;
-        display
+        let audio = display
             .start_media_stream(build_start_audio_parameters(
                 &receiver_ip,
                 audio_udp.local_port(),
@@ -216,10 +216,17 @@ impl InputSession {
                 CLIENT_SUPPORTED_FEATURES,
                 session_id,
             ))
-            .await
-            .map_err(|e| anyhow!("start audio stream: {e:?}"))?;
-
-        let mut streams = vec![audio_udp];
+            .await;
+        let mut streams = Vec::new();
+        let mut video = video;
+        match audio {
+            Ok(_) => streams.push(audio_udp),
+            // CoreDevice 9022 "The device microphone or camera is currently
+            // in use" (a call, a recording): the phone refuses the audio
+            // stream, so the video stream alone sets up the session.
+            Err(e) if format!("{e:?}").contains("Integer(9022)") => video = true,
+            Err(e) => return Err(anyhow!("start audio stream: {e:?}")),
+        }
         if video {
             let video_call = uuid::Uuid::new_v4().to_string().to_uppercase();
             let ssrc = uuid::Uuid::new_v4().as_u128() as u32;
