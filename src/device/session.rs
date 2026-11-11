@@ -315,8 +315,16 @@ impl Session {
             })
             .map(|p| p.pid)
             .ok_or("axauditd is not among the phone's processes")?;
+        // SIGABRT first: the phone then writes a crash report with every
+        // thread's backtrace, which is the only record of where the daemon
+        // was stuck (Settings > Privacy & Security > Analytics & Improvements
+        // > Analytics Data, "axauditd-…"). SIGKILL after it in case the
+        // daemon does not go.
+        const SIGABRT: u32 = 6;
         const SIGKILL: u32 = 9;
-        bounded("signal", 10, svc.send_signal(pid, SIGKILL)).await?;
+        bounded("signal", 10, svc.send_signal(pid, SIGABRT)).await?;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let _ = bounded("signal", 5, svc.send_signal(pid, SIGKILL)).await;
         Ok(pid)
     }
 
