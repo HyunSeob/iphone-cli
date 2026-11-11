@@ -134,6 +134,8 @@ pub struct InputSession {
     drain: Drain,
     pub started: Instant,
     last_release: Option<Instant>,
+    /// Touch and button reports written so far.
+    reports: u64,
 }
 
 /// Normalized HID coordinate (0..=65535) for a point in logical screen points.
@@ -258,6 +260,7 @@ impl InputSession {
             drain,
             started: Instant::now(),
             last_release: None,
+            reports: 0,
         })
     }
 
@@ -286,12 +289,20 @@ impl InputSession {
         self.wait_since_release(TOUCH_GAP).await;
     }
 
+    /// How many touch and button reports this session has written. A gesture
+    /// that fails without this number moving sent nothing to the phone.
+    pub fn reports_sent(&self) -> u64 {
+        self.reports
+    }
+
     async fn contact(&mut self, x: u16, y: u16) -> Result<()> {
         crate::device::ax::trace(|| format!("contact {x},{y}"));
         self.hid
             .send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x, y, None)
             .await
-            .map_err(|e| anyhow!("touch contact: {e:?}"))
+            .map_err(|e| anyhow!("touch contact: {e:?}"))?;
+        self.reports += 1;
+        Ok(())
     }
 
     async fn release(&mut self, x: u16, y: u16) -> Result<()> {
@@ -302,6 +313,9 @@ impl InputSession {
             .map_err(|e| anyhow!("touch release: {e:?}"));
         crate::device::ax::trace(|| "touch released".into());
         self.last_release = Some(Instant::now());
+        if r.is_ok() {
+            self.reports += 1;
+        }
         r
     }
 
@@ -398,6 +412,7 @@ impl InputSession {
             .send_button(usage_page, usage, ButtonState::Down)
             .await
             .map_err(|e| anyhow!("button down: {e:?}"))?;
+        self.reports += 1;
         tokio::time::sleep(hold).await;
         indigo
             .send_button(usage_page, usage, ButtonState::Up)

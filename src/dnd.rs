@@ -28,7 +28,7 @@ use crate::{
     device::{
         ax::trace,
         input::{Motion, normalize},
-        session::{Fresh, Session},
+        session::{Fresh, Gesture, Session},
     },
     fields,
     i18n::t,
@@ -295,34 +295,32 @@ impl Session {
     async fn dnd_touch(&mut self, size: (f64, f64), touch: Touch) -> Res<()> {
         let (w, h) = size;
         let at = |x: f64, y: f64| (normalize(x, w), normalize(y, h));
-        let input = self.ensure_input().await?;
-        let sent = match touch {
+        let gesture = match touch {
             // Slowing to a stop keeps the pull on Control Center's first
             // page; a flick of the same length landed on its second.
             Touch::Pull => {
                 let x = (w - 30.0).max(w * 0.9);
-                input
-                    .drag(at(x, 2.0), at(x, h * 0.32), Duration::from_millis(350), Motion::Place)
-                    .await
+                Gesture::Drag {
+                    from: at(x, 2.0),
+                    to: at(x, h * 0.32),
+                    duration: Duration::from_millis(350),
+                    motion: Motion::Place,
+                }
             }
             Touch::Hold(x, y) => {
                 let (x, y) = at(x, y);
-                input.tap(x, y, HOLD).await
+                Gesture::Tap { x, y, hold: HOLD }
             }
             Touch::Tap(x, y) => {
                 let (x, y) = at(x, y);
-                input.tap(x, y, Duration::from_millis(50)).await
+                Gesture::Tap { x, y, hold: Duration::from_millis(50) }
             }
             Touch::Home => {
                 let (page, usage, hold) = crate::keys::button("home").map_err(Fail::invalid)?;
-                input.button(page, usage, Duration::from_millis(hold)).await
+                Gesture::Button { page, usage, hold: Duration::from_millis(hold) }
             }
         };
-        if let Err(e) = sent {
-            self.drop_input();
-            return Err(Fail::unknown("input_failed", format!("{e:#}")));
-        }
-        Ok(())
+        self.send_gesture(gesture).await
     }
 
     async fn dnd_look(&mut self, delay: Duration, labels: &Labels) -> Res<(Screen, View)> {

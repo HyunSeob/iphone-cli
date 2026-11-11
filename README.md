@@ -187,12 +187,18 @@ output: [ios_version]
 | `swipe: <방향>` 또는 `{from, to, duration_ms, drag}` | 밀기 |
 | `scroll_until: <셀렉터>` 또는 `{selector, direction, max}` | 보일 때까지 스크롤 |
 | `read_field: {name, selector, take, regex}` | 값 하나 읽기. `take`: `value`(기본), `label`, `identifier`, `text` |
-| `read_list: {name, row, columns, until, max_scrolls, limit}` | 목록을 스크롤하며 겹치지 않게 모으기. `columns`는 `{이름: {take, regex, selector}}` |
+| `read_list: {name, row, columns, group, stop_below, until, max_scrolls, limit}` | 목록을 스크롤하며 겹치지 않게 모으기. `columns`는 `{이름: {take, regex, selector}}` 또는 모든 행에 같은 값을 넣는 `{이름: {value: "…"}}`. `group: {selector, regex, as}`는 행 사이의 머리글(날짜 줄 등)을 그 아래 행들의 칸으로 붙이고, `stop_below: N`은 머리글의 숫자가 N보다 작아지면 멈춥니다 |
 | `assert: <셀렉터>` | 이 요소가 있어야 진행 |
 | `button: home` · `key: return` · `sleep: 500` | 버튼 · 키 · 대기(ms) |
 | (어느 단계든) `confirm: true` | `--confirm <op_id>`가 있어야 실행 |
+| (어느 단계든) `when: "a == b"` · `"a != b"` | 조건이 맞을 때만 실행 (인자와 날짜를 채운 뒤 글자로 비교) |
+| (어느 단계든) `hint: "…"` | 이 단계에서 멈췄을 때 사람에게 보여 줄 안내 (예: "폰을 봐 주세요") |
 
 - `{{이름}}`은 `--arg 이름=값`으로 바뀝니다. `args`에 기본값을 적고, `null`이면 필수입니다.
+- 날짜도 채워 줍니다: `{{today.year}}` · `{{today.month}}` · `{{today.day}}`, N일 전은 `{{ago.6.month}}` · `{{ago.6.day}}`. "최근 7일"이 지난달에 걸치는지는 `when: "{{ago.6.month}} != {{today.month}}"`로 가릅니다.
+- `tap`은 누르기 전에 대상이 두 번 연속 같은 자리에 있을 때까지 기다립니다 (막 뜬 화면은 줄이 밀릴 수 있습니다). 끄려면 `settle: false`.
+- `wait_for`는 시스템 창(Face ID 등)이 앱을 잠깐 덮어도 기다립니다. 다른 단계는 실행한 앱이 앞에 있어야 합니다.
+- `read_list`는 목록 끝이라고 판단하기 전에 위아래로 한 번 움직여 확인하고, 화면마다 두 번 읽어 같을 때만 씁니다.
 - 단계가 실패하면 즉시 멈추고 `{failed_step, reason, screen_summary}`를 돌려줍니다. 추측해서 진행하지 않습니다. 이때 `outcome`은 실패한 그 단계의 것입니다. 그 앞 단계들이 이미 보낸 입력이 있으면 `inputs_sent`에 개수가 나오므로, 처음부터 다시 돌려도 되는 흐름인지는 그 숫자를 보고 판단하세요.
 - `launch` 뒤에는 그 앱이 계속 앞에 있어야 합니다. 다른 앱이 나오면 `unexpected_app`으로 멈춥니다.
 - 단계별 `elapsed_ms`가 결과에 들어 있습니다.

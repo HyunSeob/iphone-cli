@@ -142,8 +142,8 @@ fn kill_daemon(udid: &str) {
 }
 
 /// Stop the daemon for `udid`. `None` when none was running.
-pub async fn stop_daemon(udid: &str) -> Option<Value> {
-    stop(udid, false).await
+pub async fn stop_daemon(udid: &str, keep_dnd: bool) -> Option<Value> {
+    stop(udid, keep_dnd).await
 }
 
 /// Send one command and return the result envelope.

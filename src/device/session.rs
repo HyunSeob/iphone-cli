@@ -32,6 +32,15 @@ use crate::{
 
 const APP_SERVICE: &str = "com.apple.coredevice.appservice";
 
+/// One touch or button gesture, in normalized HID coordinates.
+#[derive(Debug, Clone, Copy)]
+pub enum Gesture {
+    Tap { x: u16, y: u16, hold: Duration },
+    DoubleTap { x: u16, y: u16 },
+    Drag { from: (u16, u16), to: (u16, u16), duration: Duration, motion: crate::device::input::Motion },
+    Button { page: u64, usage: u64, hold: Duration },
+}
+
 /// How fresh a reading must be.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Fresh {
@@ -75,6 +84,11 @@ pub struct Session {
     pub(crate) input_used: Instant,
     /// When the last input session ended, to keep the next one apart from it.
     input_closed_at: Option<Instant>,
+    /// A system panel came up over the app after the last tap (a Face ID
+    /// prompt, for one). Scrolls sent on the same input session right after
+    /// that moved nothing, with no error (seen once, 2026-11-11), so the next
+    /// gesture starts a new session.
+    pub(crate) input_suspect: bool,
     /// Input sessions given up after an error, each with the tunnel it ran on
     /// when that was given up too. Their streams are stopped at the next
     /// quiet moment (`sweep`).
@@ -162,6 +176,7 @@ impl Session {
             input: None,
             input_used: Instant::now(),
             input_closed_at: None,
+            input_suspect: false,
             abandoned: Vec::new(),
             apps: None,
             screen_size: None,
@@ -413,11 +428,12 @@ impl Session {
             .input
             .as_ref()
             .is_some_and(|i| i.media_idle_ms().is_none_or(|ms| ms > 2500));
-        if stale
+        if (stale || self.input_suspect)
             && let Some(old) = self.input.take() {
                 old.close().await;
                 self.input_closed_at = Some(Instant::now());
             }
+        self.input_suspect = false;
         if self.input.is_none() {
             self.sweep().await;
             // Keep a new session a little apart from the one before it.
@@ -463,6 +479,40 @@ impl Session {
         }
         self.input_used = Instant::now();
         Ok(self.input.as_mut().unwrap())
+    }
+
+    /// Send one gesture. The phone sometimes closes the input connections on
+    /// its own (it answers the next report with a reset, seen 2026-11-11);
+    /// iph only finds out when it writes. When that write fails before a
+    /// single report went out, nothing reached the phone, so a new session is
+    /// opened and the gesture is sent once more. A gesture that failed
+    /// halfway is never repeated.
+    pub async fn send_gesture(&mut self, gesture: Gesture) -> Res<()> {
+        for attempt in 0..2 {
+            let input = self.ensure_input().await?;
+            let before = input.reports_sent();
+            let sent = match gesture {
+                Gesture::Tap { x, y, hold } => input.tap(x, y, hold).await,
+                Gesture::DoubleTap { x, y } => input.double_tap(x, y).await,
+                Gesture::Drag { from, to, duration, motion } => input.drag(from, to, duration, motion).await,
+                Gesture::Button { page, usage, hold } => input.button(page, usage, hold).await,
+            };
+            let Err(e) = sent else {
+                return Ok(());
+            };
+            let untouched = input.reports_sent() == before;
+            self.drop_input();
+            if attempt == 0 && untouched {
+                crate::device::ax::trace(|| format!("gesture not sent ({e:#}); trying once on a new session"));
+                eprintln!("[{}] input connection was closed ({e:#}); sending again on a new session", crate::safety::now_utc());
+                continue;
+            }
+            return Err(Fail::unknown("input_failed", format!("{e:#}")).hint(t(
+                "입력이 나갔을 수 있습니다. 다시 보내지 말고 `iph read`로 화면을 확인하세요.",
+                "The input may have gone out. Do not resend; check the screen with `iph read`.",
+            )));
+        }
+        unreachable!("the loop returns on its second pass")
     }
 
     /// Close the input session when it has not been used for a while; the

@@ -94,9 +94,12 @@ pub async fn route(udid: &str) -> Result<Route> {
         .into_iter()
         .filter(|d| d.udid == udid)
         .collect();
+    // The cable first, unless `IPH_PREFER=wifi` asks for the other way round
+    // (to compare the two with the cable left in).
+    let wifi_first = std::env::var("IPH_PREFER").is_ok_and(|v| v.eq_ignore_ascii_case("wifi"));
     mine.sort_by_key(|d| match d.connection_type {
-        Connection::Usb => 0,
-        Connection::Network(_) => 1,
+        Connection::Usb => u8::from(wifi_first),
+        Connection::Network(_) => u8::from(!wifi_first),
         Connection::Unknown(_) => 2,
     });
     if let Some(dev) = mine.into_iter().next() {

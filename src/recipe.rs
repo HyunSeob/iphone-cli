@@ -3,8 +3,12 @@
 //!
 //! A step is a one-key map. Kinds: `launch`, `wait_for`, `tap`, `type`,
 //! `swipe`, `scroll_until`, `read_field`, `read_list`, `assert`, `button`,
-//! `key`, `sleep`. Any step may add `confirm: true`. A step that fails stops
-//! the run; nothing is guessed.
+//! `key`, `sleep`. Any step may add `confirm: true`, `when: "a == b"` (run
+//! the step only then) and `hint: "…"` (what to tell the person if it
+//! fails). A step that fails stops the run; nothing is guessed.
+//!
+//! Besides `{{argument}}`, strings may use today's date and the date some
+//! days ago: `{{today.day}}`, `{{ago.6.month}}`, `{{ago.6.year}}`.
 
 use std::{
     path::{Path, PathBuf},
@@ -152,15 +156,29 @@ const KINDS: &[&str] = &[
     "sleep",
 ];
 
+/// Keys a step may carry next to its kind.
+const MODIFIERS: &[&str] = &["confirm", "when", "hint"];
+
 /// Split a step into (kind, body, confirm).
 fn split_step(step: &Value) -> Result<(&str, &Value, &Value), String> {
     let map = step.as_object().ok_or("a step is a map like `tap: {...}`")?;
     static NULL: Value = Value::Null;
     let confirm = map.get("confirm").unwrap_or(&NULL);
-    let mut kinds = map.iter().filter(|(k, _)| k.as_str() != "confirm");
+    for key in ["when", "hint"] {
+        if map.get(key).is_some_and(|v| !v.is_string()) {
+            return Err(format!("`{key}` must be text"));
+        }
+    }
+    if let Some(expr) = map.get("when").and_then(|v| v.as_str()) {
+        // Only the form is checked here; the values come at run time.
+        if !expr.contains("==") && !expr.contains("!=") {
+            return Err("`when` must be `a == b` or `a != b`".into());
+        }
+    }
+    let mut kinds = map.iter().filter(|(k, _)| !MODIFIERS.contains(&k.as_str()));
     let (kind, body) = kinds.next().ok_or("a step needs a kind")?;
     if kinds.next().is_some() {
-        return Err("a step has exactly one kind (plus an optional `confirm`)".into());
+        return Err("a step has exactly one kind (plus optional `confirm`, `when`, `hint`)".into());
     }
     if !KINDS.contains(&kind.as_str()) {
         return Err(format!("unknown step kind `{kind}` ({})", KINDS.join(", ")));
@@ -168,8 +186,81 @@ fn split_step(step: &Value) -> Result<(&str, &Value, &Value), String> {
     Ok((kind.as_str(), body, confirm))
 }
 
-/// Replace `{{name}}` in every string of `v`.
-fn substitute(v: &Value, args: &Map<String, Value>) -> Value {
+/// Whether a step's `when` holds: `a == b` or `a != b`, compared as text
+/// after the arguments and dates have been filled in.
+fn holds(expr: &str) -> Result<bool, String> {
+    let (left, right, equal) = match (expr.split_once("!="), expr.split_once("==")) {
+        (Some((l, r)), _) => (l, r, false),
+        (None, Some((l, r))) => (l, r, true),
+        (None, None) => return Err(format!("`when: {expr}` must be `a == b` or `a != b`")),
+    };
+    Ok((left.trim() == right.trim()) == equal)
+}
+
+/// Days since 1970-01-01 of a calendar date, and back (proleptic Gregorian).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// Today in the Mac's time zone as days since 1970-01-01. `IPH_TODAY`
+/// (YYYY-MM-DD) overrides it, to try a recipe as if it were another day.
+fn today_days() -> i64 {
+    if let Ok(text) = std::env::var("IPH_TODAY") {
+        let parts: Vec<i64> = text.split('-').filter_map(|p| p.parse().ok()).collect();
+        if let [y, m, d] = parts[..] {
+            return days_from_civil(y, m, d);
+        }
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    // SAFETY: localtime_r fills the struct it is given and keeps nothing.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&now, &mut tm);
+        tm
+    };
+    days_from_civil(i64::from(tm.tm_year) + 1900, i64::from(tm.tm_mon) + 1, i64::from(tm.tm_mday))
+}
+
+/// Fill in `{{today.day}}`, `{{ago.6.month}}` and the like.
+fn fill_dates(text: &str, today: i64) -> String {
+    static DATE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = DATE.get_or_init(|| {
+        Regex::new(r"\{\{\s*(?:today|ago\.(\d{1,4}))\.(year|month|day)\s*\}\}").expect("date pattern")
+    });
+    re.replace_all(text, |c: &regex::Captures| {
+        let back: i64 = c.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+        let (y, m, d) = civil_from_days(today - back);
+        match &c[2] {
+            "year" => y.to_string(),
+            "month" => m.to_string(),
+            _ => d.to_string(),
+        }
+    })
+    .into_owned()
+}
+
+/// Replace `{{name}}` and the date expressions in every string of `v`.
+fn substitute(v: &Value, args: &Map<String, Value>, today: i64) -> Value {
     match v {
         Value::String(s) => {
             let mut out = s.clone();
@@ -183,12 +274,15 @@ fn substitute(v: &Value, args: &Map<String, Value>) -> Value {
                     out = out.replace(&needle, &rep);
                 }
             }
+            if out.contains("{{") {
+                out = fill_dates(&out, today);
+            }
             Value::String(out)
         }
-        Value::Array(a) => Value::Array(a.iter().map(|x| substitute(x, args)).collect()),
+        Value::Array(a) => Value::Array(a.iter().map(|x| substitute(x, args, today)).collect()),
         Value::Object(m) => Value::Object(
             m.iter()
-                .map(|(k, x)| (k.clone(), substitute(x, args)))
+                .map(|(k, x)| (k.clone(), substitute(x, args, today)))
                 .collect(),
         ),
         other => other.clone(),
@@ -251,6 +345,45 @@ struct Row {
     y: f64,
 }
 
+/// Key of the entry that stands for a group heading among the rows while a
+/// list is being collected. It never reaches the result.
+const GROUP_MARK: &str = "\u{1}group";
+
+/// Give every row the text of the heading it stands under (as column `name`)
+/// and drop the headings. With `below`, rows under a heading whose number is
+/// smaller are dropped too.
+fn settle_groups(items: Vec<Value>, name: &str, below: Option<i64>) -> Vec<Value> {
+    let mut current: Option<String> = None;
+    let mut out = Vec::new();
+    for item in items {
+        if let Some(heading) = item.get(GROUP_MARK) {
+            current = heading.as_str().map(String::from);
+            continue;
+        }
+        let number = current.as_deref().and_then(|c| c.trim().parse::<i64>().ok());
+        if let (Some(limit), Some(n)) = (below, number)
+            && n < limit
+        {
+            continue;
+        }
+        let mut row = item;
+        if let Value::Object(map) = &mut row {
+            map.insert(name.to_string(), current.clone().map(Value::String).unwrap_or(Value::Null));
+        }
+        out.push(row);
+    }
+    out
+}
+
+/// Whether a heading with a number below `limit` has been collected.
+fn passed_below(items: &[Value], limit: i64) -> bool {
+    items
+        .iter()
+        .filter_map(|i| i.get(GROUP_MARK).and_then(|g| g.as_str()))
+        .filter_map(|g| g.trim().parse::<i64>().ok())
+        .any(|n| n < limit)
+}
+
 /// How far the rows moved between two readings, if they moved as one block:
 /// the distance that at least two thirds of the rows appearing once in both
 /// readings agree on. None when nothing recognisable moved, or when the rows
@@ -280,21 +413,50 @@ fn scroll_distance(prev: &[Row], page: &[Row]) -> Option<f64> {
 /// That keeps two identical rows apart and survives pinned headers and
 /// toolbars that match the row selector.
 ///
+/// A row can also be moved by something other than the scroll: more rows
+/// loading in above it, a heading growing. It is then not where the scroll
+/// would have put it and looks new, though it was there before (2026-11-11:
+/// the first row after the part of a list that had loaded came back twice).
+/// So a previous row that should still be on screen and is not at its place
+/// takes one of the "new" rows with its text off the list.
+///
 /// When they did not move as one block, only rows whose text the previous
 /// reading did not have count as new (more of the same text than before
 /// counts for the surplus). That can miss an identical neighbour, but never
 /// reports a row twice.
 fn new_rows(prev: &[Row], page: &[Row]) -> Vec<Value> {
     match scroll_distance(prev, page) {
-        Some(dy) => page
-            .iter()
-            .filter(|r| {
-                let pinned = prev.iter().any(|p| p.key == r.key && (p.y - r.y).abs() <= 2.0);
-                let seen = prev.iter().any(|p| p.key == r.key && ((p.y - r.y) - dy).abs() <= 3.0);
-                !pinned && !seen
-            })
-            .map(|r| r.value.clone())
-            .collect(),
+        Some(dy) => {
+            let at = |r: &Row, y: f64, slack: f64| (r.y - y).abs() <= slack;
+            let mut fresh: Vec<&Row> = page
+                .iter()
+                .filter(|r| {
+                    let pinned = prev.iter().any(|p| p.key == r.key && at(r, p.y, 2.0));
+                    let seen = prev.iter().any(|p| p.key == r.key && at(r, p.y - dy, 3.0));
+                    !pinned && !seen
+                })
+                .collect();
+            let lo = page.iter().map(|r| r.y).fold(f64::INFINITY, f64::min);
+            let hi = page.iter().map(|r| r.y).fold(f64::NEG_INFINITY, f64::max);
+            for p in prev {
+                let now = p.y - dy;
+                let still_on_screen = now >= lo - 3.0 && now <= hi + 3.0;
+                let found = page.iter().any(|r| r.key == p.key && (at(r, now, 3.0) || at(r, p.y, 2.0)));
+                if !still_on_screen || found {
+                    continue;
+                }
+                let nearest = fresh
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.key == p.key)
+                    .min_by(|a, b| (a.1.y - now).abs().total_cmp(&(b.1.y - now).abs()))
+                    .map(|(i, _)| i);
+                if let Some(i) = nearest {
+                    fresh.remove(i);
+                }
+            }
+            fresh.into_iter().map(|r| r.value.clone()).collect()
+        }
         None => {
             let mut out = Vec::new();
             for (i, r) in page.iter().enumerate() {
@@ -307,6 +469,20 @@ fn new_rows(prev: &[Row], page: &[Row]) -> Vec<Value> {
             out
         }
     }
+}
+
+/// Where each row of a reading sat, for the trace: "y:mark" pairs. The mark is
+/// a short hash of the row's text, so the log shows which rows repeat or
+/// jump without holding what they say.
+fn page_marks(page: &[Row]) -> String {
+    page.iter()
+        .map(|r| {
+            // FNV-1a, 32 bits.
+            let hash = r.key.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
+            format!("{:.0}:{:06x}", r.y, hash & 0x00ff_ffff)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Wrap a step's failure in the recipe-level report: which step, why, and
@@ -373,6 +549,37 @@ impl Session {
             format!("{} did not appear within {} ms", sel.describe(), timeout.as_millis()),
         )
         .with("screen_summary", last.map(|s| s.summary(12)).unwrap_or(Value::Null)))
+    }
+
+    /// Wait until the element a step is about to tap holds still: two
+    /// readings in a row with it at the same place. A screen that has just
+    /// come up may still be loading and move its rows; a tap aimed at where
+    /// the row was then lands on its neighbour (2026-11-11: right after a
+    /// launch a tap on one row of a home screen opened the page of the row
+    /// above it).
+    async fn settle_target(&mut self, sel: &Selector) -> Res<()> {
+        let full = sel.needs_identifier();
+        let place = |screen: &Screen| -> Option<(i64, i64, i64, i64)> {
+            match dedupe_targets(sel.find(screen)).as_slice() {
+                [one] => one.frame.map(|f| {
+                    (f.x.round() as i64, f.y.round() as i64, f.w.round() as i64, f.h.round() as i64)
+                }),
+                _ => None,
+            }
+        };
+        let (_, screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
+        let mut last = place(&screen);
+        for _ in 0..4 {
+            let (_, again) = self.screen(Fresh::Force, full, BuildOptions::default()).await?;
+            let now = place(&again);
+            if now.is_some() && now == last {
+                return Ok(());
+            }
+            last = now;
+        }
+        // Still moving after four looks: the tap goes ahead on the last one,
+        // as it would have without this check.
+        Ok(())
     }
 
     async fn read_field(&mut self, body: &Value) -> Res<(String, Value)> {
@@ -447,6 +654,11 @@ impl Session {
             let mut rec = Map::new();
             for (col, spec) in cols {
                 let spec_map = spec.as_object();
+                // `{value: "…"}` is the same text on every row (a month, a tag).
+                if let Some(fixed) = spec_map.and_then(|m| m.get("value")) {
+                    rec.insert(col.clone(), fixed.clone());
+                    continue;
+                }
                 let what = spec_map
                     .and_then(|m| m.get("take"))
                     .and_then(|v| v.as_str())
@@ -477,6 +689,71 @@ impl Session {
         Ok(out)
     }
 
+    /// The rows on one reading, with the group headings among them when the
+    /// list has groups, top to bottom.
+    fn list_page(
+        screen: &Screen,
+        row: &Selector,
+        columns: Option<&Map<String, Value>>,
+        group: Option<&(Selector, String, Option<String>, String)>,
+    ) -> Res<Vec<Row>> {
+        let mut page = Self::rows_on_screen(screen, row, columns)?;
+        if let Some((sel, what, pattern, _)) = group {
+            // Headings travel with the rows, so the same position logic that
+            // keeps rows apart puts each heading where it belongs.
+            for el in dedupe_targets(sel.find(screen)) {
+                let Some(text) = apply_regex(take(el, what), pattern.as_deref())? else {
+                    continue;
+                };
+                page.push(Row {
+                    key: format!("{GROUP_MARK}\u{1}{}", el.label.as_deref().unwrap_or("")),
+                    value: json!({ GROUP_MARK: text }),
+                    y: el.frame.map(|f| f.y).unwrap_or(0.0),
+                });
+            }
+            page.sort_by(|a, b| a.y.total_cmp(&b.y));
+        }
+        Ok(page)
+    }
+
+    /// The rows on screen, read until two readings in a row say the same.
+    /// A single reading taken while a list is still settling can hold a row
+    /// twice or at a place it is about to leave (2026-11-11: one row of a
+    /// week's list came back twice, and only the day's total gave it away).
+    async fn settled_page(
+        &mut self,
+        full: bool,
+        row: &Selector,
+        columns: Option<&Map<String, Value>>,
+        group: Option<&(Selector, String, Option<String>, String)>,
+    ) -> Res<(Screen, Vec<Row>)> {
+        let (_, mut screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
+        let mut page = Self::list_page(&screen, row, columns, group)?;
+        for _ in 0..3 {
+            let (_, again) = self.screen(Fresh::Force, full, BuildOptions::default()).await?;
+            let next = Self::list_page(&again, row, columns, group)?;
+            let same = next.len() == page.len()
+                && next.iter().zip(&page).all(|(a, b)| a.key == b.key && (a.y - b.y).abs() <= 1.0);
+            screen = again;
+            page = next;
+            if same {
+                break;
+            }
+        }
+        Ok((screen, page))
+    }
+
+    /// One scroll step of a list; whether the screen moved.
+    async fn list_scroll(&mut self, direction: &str) -> Res<bool> {
+        let r = Box::pin(self.cmd_scroll(ScrollArgs {
+            direction: direction.to_string(),
+            until: None,
+            max: None,
+        }))
+        .await?;
+        Ok(r.get("screen_changed").and_then(|v| v.as_bool()).unwrap_or(false))
+    }
+
     async fn read_list(&mut self, body: &Value) -> Res<(String, Value, Value)> {
         let map = body.as_object().ok_or_else(|| Fail::invalid("read_list needs a map"))?;
         let name = map
@@ -493,27 +770,61 @@ impl Session {
         let max_scrolls = opt_u64(map, "max_scrolls").unwrap_or(15).min(200) as u32;
         let limit = opt_u64(map, "limit").unwrap_or(500) as usize;
         let direction = map.get("direction").and_then(|v| v.as_str()).unwrap_or("down").to_string();
-        let full = row.needs_identifier() || until.as_ref().is_some_and(|u| u.needs_identifier());
+        // `group: {selector, take, regex, as}`: headings between the rows (a
+        // date above each day's rows). Every row gets the heading it stands
+        // under as column `as`.
+        let group = match map.get("group") {
+            Some(Value::Object(g)) => {
+                let sel = Selector::from_value(g.get("selector").ok_or_else(|| Fail::invalid("group needs `selector`"))?)
+                    .map_err(|e| Fail::invalid(e.to_string()))?;
+                let what = g.get("take").and_then(|v| v.as_str()).unwrap_or("label").to_string();
+                let pattern = g.get("regex").and_then(|v| v.as_str()).map(String::from);
+                let name = g.get("as").and_then(|v| v.as_str()).unwrap_or("group").to_string();
+                Some((sel, what, pattern, name))
+            }
+            Some(_) => return Err(Fail::invalid("group must be a map: {selector, take, regex, as}")),
+            None => None,
+        };
+        // `stop_below: N`: stop once a heading whose number is below N has
+        // come up, and leave its rows out (a list that runs back in time,
+        // read down to a day of the month).
+        let stop_below = match map.get("stop_below") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+                    .ok_or_else(|| Fail::invalid("stop_below must be a whole number"))?,
+            ),
+        };
+        if stop_below.is_some() && group.is_none() {
+            return Err(Fail::invalid("stop_below needs `group`"));
+        }
+        let full = row.needs_identifier()
+            || until.as_ref().is_some_and(|u| u.needs_identifier())
+            || group.as_ref().is_some_and(|g| g.0.needs_identifier());
 
         let mut all: Vec<Value> = Vec::new();
         let mut prev: Option<Vec<Row>> = None;
         let mut scrolls = 0u32;
         // Readings in a row that brought no new row.
         let mut barren = 0u32;
+        // Whether the end of the list has been checked by scrolling back and forth.
+        let mut end_checked = false;
+        let back = if direction == "down" { "up" } else { "down" };
         let ended;
         loop {
-            let (_, screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
-            let page = Self::rows_on_screen(&screen, &row, columns)?;
+            let (screen, page) = self.settled_page(full, &row, columns, group.as_ref()).await?;
             match &prev {
                 None => all.extend(page.iter().map(|r| r.value.clone())),
                 Some(before) => {
                     let fresh_rows = new_rows(before, &page);
                     crate::device::ax::trace(|| {
                         format!(
-                            "read_list page: rows={} moved={:?} new={}",
+                            "read_list page: rows={} moved={:?} new={} [{}]",
                             page.len(),
                             scroll_distance(before, &page),
                             fresh_rows.len(),
+                            page_marks(&page),
                         )
                     });
                     barren = if fresh_rows.is_empty() { barren + 1 } else { 0 };
@@ -521,8 +832,11 @@ impl Session {
                 }
             }
             prev = Some(page);
-            if all.len() >= limit {
-                all.truncate(limit);
+            if stop_below.is_some_and(|n| passed_below(&all, n)) {
+                ended = "stop_below";
+                break;
+            }
+            if all.iter().filter(|i| i.get(GROUP_MARK).is_none()).count() >= limit {
                 ended = "limit";
                 break;
             }
@@ -530,27 +844,63 @@ impl Session {
                 ended = "until";
                 break;
             }
-            // Two readings without a new row: the list is at its end. One can
-            // be a dropped drag or a bounce.
             if barren >= 2 {
-                ended = "end_of_list";
-                break;
+                // Two readings without a new row. That is the end of the list,
+                // or scrolls that never arrived: an input session the phone
+                // has stopped listening to looks exactly the same, and a list
+                // cut short there reads as complete (2026-11-11: two scrolls
+                // right after a Face ID prompt moved nothing, and a week of
+                // rows came back as two days). So the end is checked once by
+                // scrolling back and forward: at a real end the list moves
+                // back and returns to the same rows.
+                if end_checked {
+                    ended = "end_of_list";
+                    break;
+                }
+                end_checked = true;
+                let at_end = prev.clone().unwrap_or_default();
+                let mut moved = self.list_scroll(back).await?;
+                if !moved {
+                    // Nothing moves either way: once more on a new input session.
+                    self.close_input().await;
+                    moved = self.list_scroll(back).await?;
+                }
+                if !moved {
+                    // A list that fits the screen.
+                    ended = "end_of_list";
+                    break;
+                }
+                self.list_scroll(&direction).await?;
+                let (_, page) = self.settled_page(full, &row, columns, group.as_ref()).await?;
+                let fresh_rows = new_rows(&at_end, &page);
+                crate::device::ax::trace(|| format!("read_list end check: new={}", fresh_rows.len()));
+                if fresh_rows.is_empty() {
+                    ended = "end_of_list";
+                    break;
+                }
+                all.extend(fresh_rows);
+                barren = 0;
+                prev = Some(page);
+                if stop_below.is_some_and(|n| passed_below(&all, n)) {
+                    ended = "stop_below";
+                    break;
+                }
             }
             if scrolls >= max_scrolls {
                 ended = "max_scrolls";
                 break;
             }
-            Box::pin(self.cmd_scroll(ScrollArgs {
-                direction: direction.clone(),
-                until: None,
-                max: None,
-            }))
-            .await?;
+            self.list_scroll(&direction).await?;
             scrolls += 1;
         }
+        let mut rows = match &group {
+            Some((_, _, _, column)) => settle_groups(all, column, stop_below),
+            None => all,
+        };
+        rows.truncate(limit);
         Ok((
             name.to_string(),
-            Value::Array(all),
+            Value::Array(rows),
             json!({ "scrolls": scrolls, "ended": ended }),
         ))
     }
@@ -649,6 +999,9 @@ impl Session {
                 // Give the target a moment to appear, as a person would.
                 let timeout = Duration::from_millis(opt_u64(&options, "timeout_ms").unwrap_or(5000));
                 Box::pin(self.wait_for(&sel, timeout)).await?;
+                if options.get("settle").and_then(|v| v.as_bool()).unwrap_or(true) {
+                    Box::pin(self.settle_target(&sel)).await?;
+                }
                 let target = match body.as_object() {
                     Some(m) if m.contains_key("selector") => m["selector"].clone(),
                     _ => body.clone(),
@@ -753,18 +1106,34 @@ impl Session {
         let mut expected_pid: Option<i64> = None;
         // Steps that sent something to the phone and completed.
         let mut inputs_sent = 0u32;
+        let today = today_days();
         for (i, raw) in steps.iter().enumerate() {
             let index = i + 1;
             let started = Instant::now();
-            let step = substitute(raw, args);
-            if let Some(f) = self.unexpected_app(expected_pid) {
-                let kind = split_step(&step).map(|(k, _, _)| k).unwrap_or("?");
-                return Err(step_failure(index, raw, f, kind, &records, &outputs, 0));
-            }
+            let step = substitute(raw, args, today);
             let (kind, body, confirm) = match split_step(&step) {
                 Ok(x) => x,
                 Err(e) => return Err(step_failure(index, raw, Fail::invalid(e), "?", &records, &outputs, 0)),
             };
+            if let Some(expr) = step.get("when").and_then(|v| v.as_str()) {
+                match holds(expr) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        records.push(json!({ "index": index, "kind": kind, "ok": true, "skipped": true, "when": expr }));
+                        continue;
+                    }
+                    Err(e) => return Err(step_failure(index, raw, Fail::invalid(e), kind, &records, &outputs, 0)),
+                }
+            }
+            // A `wait_for` may sit out something the system puts over the app
+            // for a moment (a Face ID prompt); every other step needs the app
+            // in front.
+            if kind != "wait_for"
+                && let Some(f) = self.unexpected_app(expected_pid)
+            {
+                return Err(step_failure(index, raw, f, kind, &records, &outputs, 0));
+            }
+            let hint = step.get("hint").and_then(|v| v.as_str()).map(String::from);
             // `confirm: true` needs the run's op_id; in a batch a step may
             // name its own.
             let (needs_confirm, op_base): (bool, Option<String>) = match confirm {
@@ -848,7 +1217,7 @@ impl Session {
                         outputs.insert(name, value);
                     }
                 }
-                Err(f) => {
+                Err(mut f) => {
                     Session::finish_op(
                         claimed,
                         match f.outcome {
@@ -856,6 +1225,10 @@ impl Session {
                             _ => "unknown",
                         },
                     );
+                    // The recipe's author knows what this step usually waits on.
+                    if let Some(hint) = hint {
+                        f.hint = Some(hint);
+                    }
                     return Err(step_failure(index, raw, f, kind, &records, &outputs, ms)
                         .with("inputs_sent", inputs_sent));
                 }
@@ -941,7 +1314,91 @@ mod tests {
         let mut args = Map::new();
         args.insert("a".into(), json!("12"));
         args.insert("b".into(), json!(34));
-        assert_eq!(substitute(&step, &args)["type"]["text"], "12×34");
+        assert_eq!(substitute(&step, &args, 0)["type"]["text"], "12×34");
+    }
+
+    #[test]
+    fn dates_fill_in_and_cross_months_and_years() {
+        // 2026-11-03: six days earlier is 28 October.
+        let day = days_from_civil(2026, 11, 3);
+        assert_eq!(civil_from_days(day), (2026, 11, 3));
+        assert_eq!(fill_dates("{{today.month}}/{{today.day}}", day), "11/3");
+        assert_eq!(fill_dates("{{ago.6.month}}/{{ago.6.day}}", day), "10/28");
+        assert_eq!(fill_dates("{{ ago.0.year }}", day), "2026");
+        // 2027-01-02: six days earlier is in the year before.
+        let day = days_from_civil(2027, 1, 2);
+        assert_eq!(fill_dates("{{ago.6.year}}-{{ago.6.month}}-{{ago.6.day}}", day), "2026-12-27");
+        // A leap day.
+        assert_eq!(civil_from_days(days_from_civil(2028, 3, 1) - 1), (2028, 2, 29));
+        // Anything else in braces is left for the arguments.
+        assert_eq!(fill_dates("{{name}} {{today.week}}", day), "{{name}} {{today.week}}");
+        let step = json!({"read_list": {"stop_below": "{{ago.6.day}}"}, "when": "{{ago.6.month}} != {{today.month}}"});
+        let filled = substitute(&step, &Map::new(), days_from_civil(2026, 11, 3));
+        assert_eq!(filled["read_list"]["stop_below"], "28");
+        assert_eq!(filled["when"], "10 != 11");
+    }
+
+    #[test]
+    fn when_compares_text() {
+        assert!(holds("11 == 11").unwrap());
+        assert!(!holds("10 == 11").unwrap());
+        assert!(holds("10 != 11").unwrap());
+        assert!(!holds(" 11 !=11 ").unwrap());
+        assert!(holds("soon").is_err());
+        let step = "name: x\nsteps:\n  - tap: a\n    when: maybe\n";
+        assert!(Recipe::parse(step, "t").unwrap_err().contains("when"));
+        let ok = "name: x\nsteps:\n  - tap: a\n    when: \"{{ago.6.month}} != {{today.month}}\"\n    hint: look at the phone\n";
+        assert!(Recipe::parse(ok, "t").is_ok());
+    }
+
+    fn mark(text: &str) -> Value {
+        json!({ GROUP_MARK: text })
+    }
+
+    #[test]
+    fn rows_take_the_heading_they_stand_under() {
+        let items = vec![
+            json!({"label": "before any heading"}),
+            mark("11"),
+            json!({"label": "a"}),
+            json!({"label": "b"}),
+            mark("9"),
+            json!({"label": "c"}),
+            mark("4"),
+            json!({"label": "d"}),
+        ];
+        let rows = settle_groups(items.clone(), "day", None);
+        let days: Vec<Value> = rows.iter().map(|r| r["day"].clone()).collect();
+        assert_eq!(days, [Value::Null, json!("11"), json!("11"), json!("9"), json!("4")]);
+        // Reading down to day 5: the rows of day 4 are left out.
+        assert!(!passed_below(&items[..6], 5));
+        assert!(passed_below(&items, 5));
+        let rows = settle_groups(items, "day", Some(5));
+        assert_eq!(labels(&rows), ["before any heading", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn headings_move_with_the_rows_from_one_reading_to_the_next() {
+        let heading = |text: &str, y: f64| Row { value: mark(text), key: format!("{GROUP_MARK}\u{1}{text}"), y };
+        let row = |label: &str, y: f64| Row { value: json!({ "label": label }), key: label.to_string(), y };
+        // Two days with the same transfer on each; the list moved up by 130.
+        let before = vec![heading("11", 100.0), row("이체 100,000원", 140.0), row("커피", 205.0), heading("10", 270.0)];
+        let after = vec![row("커피", 75.0), heading("10", 140.0), row("이체 100,000원", 180.0), heading("9", 245.0)];
+        let mut all: Vec<Value> = before.iter().map(|r| r.value.clone()).collect();
+        all.extend(new_rows(&before, &after));
+        let rows = settle_groups(all, "day", None);
+        let got: Vec<(String, String)> = rows
+            .iter()
+            .map(|r| (r["day"].as_str().unwrap().to_string(), r["label"].as_str().unwrap().to_string()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("11".to_string(), "이체 100,000원".to_string()),
+                ("11".to_string(), "커피".to_string()),
+                ("10".to_string(), "이체 100,000원".to_string()),
+            ]
+        );
     }
 
     fn rows(items: &[(&str, f64)]) -> Vec<Row> {
@@ -985,6 +1442,27 @@ mod tests {
         // The first two are the old second and third rows; the coffee at 260
         // and the milk are new.
         assert_eq!(labels(&new_rows(&before, &after)), ["커피 4,500원", "우유 2,000원"]);
+    }
+
+    #[test]
+    fn a_row_pushed_down_by_rows_loading_above_it_is_not_new() {
+        // The list moved up by 270. Meanwhile more of it loaded, which pushed
+        // the last row 40 further down than the scroll alone would have.
+        let before = rows(&[("a", 400.0), ("b", 465.0), ("c", 530.0), ("d", 595.0), ("last loaded", 660.0)]);
+        let after = rows(&[
+            ("a", 130.0),
+            ("b", 195.0),
+            ("c", 260.0),
+            ("d", 325.0),
+            ("last loaded", 430.0),
+            ("next", 495.0),
+        ]);
+        assert_eq!(scroll_distance(&before, &after), Some(270.0));
+        assert_eq!(labels(&new_rows(&before, &after)), ["next"]);
+        // Two rows that read the same, one of them pushed: the other is new.
+        let before = rows(&[("a", 400.0), ("b", 465.0), ("c", 530.0), ("커피", 595.0)]);
+        let after = rows(&[("a", 130.0), ("b", 195.0), ("c", 260.0), ("커피", 365.0), ("커피", 430.0)]);
+        assert_eq!(new_rows(&before, &after).len(), 1);
     }
 
     #[test]

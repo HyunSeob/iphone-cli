@@ -189,6 +189,7 @@ output: [ios_version]
 | `button: home` · `key: return` · `sleep: 500` | Button, key, wait (ms) |
 | `confirm: true` (on any step) | Runs only with `--confirm <op_id>` |
 
+- Dates are filled in too: `{{today.year}}`, `{{today.month}}`, `{{today.day}}`, and N days ago as `{{ago.6.month}}`, `{{ago.6.day}}`. Any step may add `when: "a == b"` (or `!=`) to run only then, and `hint: "…"` to say what a person should do if it stops there. `read_list` takes `group: {selector, regex, as}` (headings between rows become a column), `stop_below: N` and constant columns `{value: "…"}`.
 - `{{name}}` is replaced by `--arg name=value`. `args` holds defaults; `null` makes an argument required.
 - A failing step stops the run with `{failed_step, reason, screen_summary}`. Nothing is guessed. The `outcome` is that of the failing step. `inputs_sent` counts the earlier steps that already sent input, so check it before deciding whether the whole run can simply be started again.
 - After `launch`, that app must stay in front; another app stops the run with `unexpected_app`.

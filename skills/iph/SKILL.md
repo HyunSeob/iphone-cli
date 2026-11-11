@@ -101,6 +101,8 @@ steps:
 output: [results]
 ```
 
+More for recipes: `{{today.day}}`, `{{ago.6.month}}` and the like fill in dates; any step may add `when: "a == b"` (or `!=`) to run only then and `hint: "…"` to tell the person what to do if it stops there (a screen that waits for Face ID: follow the tap with a `wait_for` that has a long `timeout_ms` and such a hint). `read_list` takes `group: {selector, regex, as}` to give each row the heading it stands under (a date line), `stop_below: N` to stop once a heading's number falls below N, and `{value: "…"}` columns for a constant.
+
 Mark a step that pays, sends or orders with `confirm: true`; it then runs only with `iph run … --confirm <op_id>`, which the user must approve.
 
 ## Selectors

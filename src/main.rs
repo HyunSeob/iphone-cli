@@ -155,7 +155,12 @@ enum Cmd {
     /// With `[safety] dnd = true` (the default) iph does this by itself around its input.
     Dnd { action: String },
     /// Stop the background daemon for this phone.
-    Stop,
+    Stop {
+        /// Leave Do Not Disturb as it is instead of putting the earlier Focus
+        /// back (that takes input on the phone). `iph dnd off` does it later.
+        #[arg(long)]
+        keep_dnd: bool,
+    },
     /// Internal: the resident process.
     #[command(hide = true)]
     Daemon,
@@ -290,8 +295,8 @@ async fn run(cli: Cli) -> i32 {
             };
         }
         Cmd::Setup => return setup::run(&udid).await,
-        Cmd::Stop => {
-            let last = client::stop_daemon(&udid).await;
+        Cmd::Stop { keep_dnd } => {
+            let last = client::stop_daemon(&udid, keep_dnd).await;
             let mut out = fields! { "stopped": last.is_some() };
             if let Some(d) = last.as_ref().map(|l| &l["dnd"]).filter(|d| !d.is_null()) {
                 out.insert("dnd".into(), d.clone());

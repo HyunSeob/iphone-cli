@@ -12,7 +12,7 @@ use crate::{
     device::{
         ax::trace,
         input::{Motion, normalize},
-        session::{Fresh, Session, reuse},
+        session::{Fresh, Gesture, Session, reuse},
     },
     fields,
     i18n::t,
@@ -521,27 +521,16 @@ impl Session {
         let (nx, ny) = (normalize(x, screen.width), normalize(y, screen.height));
         let before = screen.signature();
         let input_began = Instant::now();
-        let input = match self.ensure_input().await {
-            Ok(i) => i,
-            Err(e) => {
-                Self::finish_op(op, "not_sent");
-                return Err(e);
-            }
-        };
-        let sent = if args.double {
-            input.double_tap(nx, ny).await
+        let gesture = if args.double {
+            Gesture::DoubleTap { x: nx, y: ny }
         } else {
-            let hold = Duration::from_millis(args.long_ms.unwrap_or(50));
-            input.tap(nx, ny, hold).await
+            Gesture::Tap { x: nx, y: ny, hold: Duration::from_millis(args.long_ms.unwrap_or(50)) }
         };
-        if let Err(e) = sent {
-            // The report may or may not have reached the phone.
-            self.drop_input();
-            Self::finish_op(op, "unknown");
-            let mut fail = Fail::unknown("input_failed", format!("{e:#}")).hint(t(
-                "입력이 나갔을 수 있습니다. 다시 보내지 말고 `iph read`로 화면을 확인하세요.",
-                "The input may have gone out. Do not resend; check the screen with `iph read`.",
-            ));
+        if let Err(mut fail) = self.send_gesture(gesture).await {
+            // `not_sent`: no input session could be opened. Otherwise the
+            // report may or may not have reached the phone.
+            let state = if fail.outcome == crate::reply::Outcome::NotSent { "not_sent" } else { "unknown" };
+            Self::finish_op(op, state);
             if let Some(id) = op_id {
                 fail = fail.with("op_id", id);
             }
@@ -551,6 +540,10 @@ impl Session {
         let changed = after.as_ref().map(|(_, s)| s.signature() != before);
         Self::finish_op(op, "done");
         let app_change = after.as_ref().and_then(|(_, s)| app_changed(&screen, s));
+        if app_change.as_ref().is_some_and(|c| c["name"].is_null()) {
+            // Something of the system's is over the app now.
+            self.input_suspect = true;
+        }
 
         let mut out = fields! {
             "sent": true,
@@ -600,11 +593,10 @@ impl Session {
             .map(|(_, _, el)| el.as_ref().map(brief).unwrap_or(Value::Null))
             .collect();
         let input_began = Instant::now();
-        let input = self.ensure_input().await?;
         for (i, (nx, ny)) in normalized.iter().enumerate() {
-            if let Err(e) = input.tap(*nx, *ny, Duration::from_millis(50)).await {
-                self.drop_input();
-                return Err(Fail::unknown("input_failed", format!("{e:#}"))
+            let tap = Gesture::Tap { x: *nx, y: *ny, hold: Duration::from_millis(50) };
+            if let Err(fail) = self.send_gesture(tap).await {
+                return Err(fail
                     .hint(t(
                         "입력이 일부 나갔을 수 있습니다. 다시 보내지 말고 `iph read`로 화면을 확인하세요.",
                         "Part of the input may have gone out. Do not resend; check the screen with `iph read`.",
@@ -657,14 +649,7 @@ impl Session {
         let a = (normalize(from.0, screen.width), normalize(from.1, screen.height));
         let b = (normalize(to.0, screen.width), normalize(to.1, screen.height));
         let input_began = Instant::now();
-        let input = self.ensure_input().await?;
-        if let Err(e) = input.drag(a, b, duration, motion).await {
-            self.drop_input();
-            return Err(Fail::unknown("input_failed", format!("{e:#}")).hint(t(
-                "입력이 나갔을 수 있습니다. 다시 보내지 말고 `iph read`로 화면을 확인하세요.",
-                "The input may have gone out. Do not resend; check the screen with `iph read`.",
-            )));
-        }
+        self.send_gesture(Gesture::Drag { from: a, to: b, duration, motion }).await?;
         let mut after = self.observe(input_began, AFTER_DRAG).await.map(|(_, s)| s);
         if motion == Motion::Flick {
             // The content coasts after a flick: read until two readings agree.
@@ -849,11 +834,7 @@ impl Session {
         self.check_front_allowed(&screen).await?;
         let before = Some(screen.signature());
         let input_began = Instant::now();
-        let input = self.ensure_input().await?;
-        if let Err(e) = input.button(page, usage, Duration::from_millis(hold)).await {
-            self.drop_input();
-            return Err(Fail::unknown("input_failed", format!("{e:#}")));
-        }
+        self.send_gesture(Gesture::Button { page, usage, hold: Duration::from_millis(hold) }).await?;
         let changed = match before {
             Some(sig) => self.observe(input_began, AFTER_LAUNCH).await.map(|(_, sc)| sc.signature() != sig),
             None => None,
