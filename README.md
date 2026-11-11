@@ -208,6 +208,13 @@ codex mcp add iph -- iph mcp                                    # Codex
 iph mcp --tools read,find,run                                   # 일부 도구만 내놓기
 ```
 
+에이전트가 `iph`를 알아서 쓰게 하려면 스킬을 걸어 둡니다 (MCP 등록 없이 셸에서 `iph`를 부르는 것만으로도 됩니다).
+
+```sh
+ln -s "$PWD/skills/iph" ~/.claude/skills/iph                    # Claude Code
+ln -s "$PWD/skills/iph" ~/.codex/skills/iph                     # Codex
+```
+
 도구: `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_run`, `iph_recipes`, `iph_doctor`, `iph_dnd`. 인자와 결과는 CLI와 같습니다. 에이전트용 안내는 [skills/iph/SKILL.md](skills/iph/SKILL.md)에 있습니다.
 
 ## 속도

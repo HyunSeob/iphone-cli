@@ -205,6 +205,13 @@ codex mcp add iph -- iph mcp           # Codex
 iph mcp --tools read,find,run          # offer only some tools
 ```
 
+To have an agent reach for `iph` on its own, link the skill (it works with `iph` in the shell alone, without the MCP registration).
+
+```sh
+ln -s "$PWD/skills/iph" ~/.claude/skills/iph                    # Claude Code
+ln -s "$PWD/skills/iph" ~/.codex/skills/iph                     # Codex
+```
+
 Tools: `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_run`, `iph_recipes`, `iph_doctor`, `iph_dnd`. Arguments and results are the same as the CLI's. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
 
 ## Speed
