@@ -35,7 +35,12 @@ use idevice::{
 const CLIENT_SUPPORTED_FEATURES: u64 = 140;
 
 /// Time the phone needs to match its HID surfaces to a new media stream.
-const WARMUP: Duration = Duration::from_millis(1000);
+/// Gestures sent sooner are dropped more often. With a new session for every
+/// command (2026-11-11, Settings, rounds of tap + edge swipe back, the swipe
+/// going out 60 ms after this wait): at 1 s 1 of 20 taps and 8 of 20 swipes
+/// were lost; at 2.5 s or more, 2 of 107 taps and 10 of 107 swipes. Longer
+/// (4 s) did no better, and the rest is not explained: see how-it-works §3.
+const WARMUP: Duration = Duration::from_millis(2500);
 /// Keep the touch connection quiet for this long after a release; closing or
 /// reusing it earlier makes the phone drop some taps. The wait happens before
 /// the next input (and before closing), not after each one, so the caller can
