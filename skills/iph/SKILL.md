@@ -116,7 +116,8 @@ After `launch`, that app must stay in front; if another one comes up, the script
 ## When something is off
 
 - **A reading takes about 20 s once and then things are normal again:** the phone's accessibility service had stopped answering and iph restarted it by itself. Nothing to do. This happens mostly over Wi-Fi.
-- **`ax_timeout` keeps coming back:** the restart did not help, so the phone is most likely locked or its screen is off. Ask the user to look at the phone. Do not loop on `iph stop`.
+- **`ax_timeout` keeps coming back:** follow the error's hint. Over Control Center (or the home screen) it says to close it: `iph button home` or `iph launch <app>`, which go out without a reading; Control Center cannot be read at all while the screen is being recorded. Otherwise the phone is most likely locked, its screen is off, or the restart did not help; ask the user to look at the phone, or to lock and unlock it. Do not loop on `iph stop`.
+- **`verified: false` with a `note` that the screen could not be read:** a point tap, a swipe or a button went out on the last known screen size without a reading before or after. Read the screen before relying on what it did.
 - **`input_failed` or `input_unavailable` come back, or readings take many seconds every time:** stop sending input, because a late reading can show an earlier screen and a tap would then go to the wrong place. Read once more after a moment, and tell the user if it does not clear. Over Wi-Fi everything is slower and less steady than over the cable; if the cable is at hand, suggest plugging it in.
 - **The element list looks wrong for what the user describes:** `iph screenshot -o <file>` shows what is really on screen. Banners and system pop-ups are never in the list.
 - **The phone is locked:** nothing works until the user unlocks it.

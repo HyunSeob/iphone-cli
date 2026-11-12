@@ -95,7 +95,7 @@ pub enum View {
 
 /// The home screen, Control Center and the system's other panels have an
 /// application element without a name; apps have one.
-fn system_ui(screen: &Screen) -> bool {
+pub(crate) fn system_ui(screen: &Screen) -> bool {
     screen.apps.first().is_some_and(|a| a.name.is_none())
 }
 

@@ -49,6 +49,9 @@ const ASK_WAIT: Duration = Duration::from_millis(1000);
 /// An unasked dump this recently before an input means the app is one that
 /// triggers them; its readings are then double-checked.
 const UNASKED_MEMORY: Duration = Duration::from_secs(5);
+/// The result's note for an input sent while the screen could not be read.
+const UNREAD_NOTE: &str =
+    "the screen could not be read; sent on the last known screen size, not verified";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -164,6 +167,13 @@ pub fn brief(el: &Element) -> Value {
 pub enum Target {
     Selector(Selector),
     Point(f64, f64),
+}
+
+/// The reading failed because the phone's accessibility daemon gave none on a
+/// phone not known to be locked (`Session::unread_size`).
+fn daemon_silent(read_failed: &Fail) -> bool {
+    let locked = read_failed.extra.get("phone_locked").and_then(Value::as_bool) == Some(true);
+    read_failed.code == "ax_timeout" && !locked
 }
 
 pub fn parse_target(v: &Value) -> Res<Target> {
@@ -516,7 +526,10 @@ impl Session {
             return Err(Fail::invalid("--long must be 1..60000 ms"));
         }
         let target = parse_target(&args.target)?;
-        let (screen, mut points) = self.locate_ready(std::slice::from_ref(&target)).await?;
+        let (screen, mut points) = match self.locate_ready(std::slice::from_ref(&target)).await {
+            Ok(located) => located,
+            Err(read_failed) => return self.tap_unread(&target, &args, read_failed).await,
+        };
         let (x, y, element) = points.remove(0);
         let element_json = element.as_ref().map(brief);
 
@@ -571,6 +584,47 @@ impl Session {
                 out.insert("elements".into(), json!(screen.elements));
             }
         Ok(out)
+    }
+
+    /// The last known screen size, when `read_failed` is the phone's
+    /// accessibility daemon giving no reading on an unlocked phone. Control
+    /// Center does that while a screen recording runs, until it is closed
+    /// (2026-11-12, over Wi-Fi and USB alike), and closing it takes a tap, a
+    /// swipe or a button: input that needs no element then goes out on this
+    /// size, unverified.
+    fn unread_size(&self, read_failed: &Fail) -> Option<(f64, f64)> {
+        if !daemon_silent(read_failed) {
+            return None;
+        }
+        self.screen_size
+    }
+
+    /// A tap on a point while the screen cannot be read (`unread_size`).
+    /// Nothing is read afterwards either: that would only wait out another
+    /// timeout.
+    async fn tap_unread(&mut self, target: &Target, args: &TapArgs, read_failed: Fail) -> Res {
+        let (Target::Point(x, y), Some((w, h))) = (target, self.unread_size(&read_failed)) else {
+            return Err(read_failed);
+        };
+        let (x, y) = (*x, *y);
+        if x < 0.0 || y < 0.0 || x > w || y > h {
+            return Err(Fail::invalid(format!("point {x},{y} is outside the {w}x{h} screen")));
+        }
+        let (nx, ny) = (normalize(x, w), normalize(y, h));
+        let gesture = if args.double {
+            Gesture::DoubleTap { x: nx, y: ny }
+        } else {
+            Gesture::Tap { x: nx, y: ny, hold: Duration::from_millis(args.long_ms.unwrap_or(50)) }
+        };
+        self.send_gesture(gesture).await?;
+        Ok(fields! {
+            "sent": true,
+            "verified": false,
+            "screen_changed": false,
+            "x": (x * 10.0).round() / 10.0,
+            "y": (y * 10.0).round() / 10.0,
+            "note": UNREAD_NOTE,
+        })
     }
 
     /// Tap several targets in a row on the screen as it is now: every target
@@ -680,7 +734,13 @@ impl Session {
     }
 
     pub async fn cmd_swipe(&mut self, args: SwipeArgs) -> Res {
-        let (w, h) = self.screen_size().await?;
+        let read = self
+            .screen(Fresh::MaxAge(reuse()), false, BuildOptions::default())
+            .await;
+        let (w, h) = match &read {
+            Ok((_, screen)) => (screen.width, screen.height),
+            Err(read_failed) => self.unread_size(read_failed).ok_or_else(|| read_failed.clone())?,
+        };
         let (from, to) = match (&args.direction, args.from, args.to) {
             (Some(dir), None, None) => {
                 // The finger moves in the named direction across the middle.
@@ -702,6 +762,25 @@ impl Session {
         };
         let duration = Duration::from_millis(args.duration_ms.unwrap_or(250).clamp(50, 10_000));
         let motion = if args.drag { Motion::Place } else { Motion::Flick };
+        if read.is_err() {
+            // `unread_size`: drag on the last known size, read nothing after.
+            for (x, y) in [from, to] {
+                if x < 0.0 || y < 0.0 || x > w || y > h {
+                    return Err(Fail::invalid(format!("point {x},{y} is outside the {w}x{h} screen")));
+                }
+            }
+            let a = (normalize(from.0, w), normalize(from.1, h));
+            let b = (normalize(to.0, w), normalize(to.1, h));
+            self.send_gesture(Gesture::Drag { from: a, to: b, duration, motion }).await?;
+            return Ok(fields! {
+                "sent": true,
+                "verified": false,
+                "screen_changed": false,
+                "from": [from.0, from.1],
+                "to": [to.0, to.1],
+                "note": UNREAD_NOTE,
+            });
+        }
         let (changed, after) = self.drag_points(from, to, duration, motion).await?;
         Ok(fields! {
             "sent": true,
@@ -830,22 +909,31 @@ impl Session {
 
     pub async fn cmd_button(&mut self, args: ButtonArgs) -> Res {
         let (page, usage, hold) = crate::keys::button(&args.button).map_err(Fail::invalid)?;
-        let (_, screen) = self
+        // A button needs no screen size; the reading is only to compare with.
+        let before = match self
             .screen(Fresh::MaxAge(reuse()), false, BuildOptions::default())
-            .await?;
-        let before = Some(screen.signature());
+            .await
+        {
+            Ok((_, screen)) => Some(screen.signature()),
+            Err(read_failed) if daemon_silent(&read_failed) => None,
+            Err(read_failed) => return Err(read_failed),
+        };
         let input_began = Instant::now();
         self.send_gesture(Gesture::Button { page, usage, hold: Duration::from_millis(hold) }).await?;
-        let changed = match before {
-            Some(sig) => self.observe(input_began, AFTER_LAUNCH).await.map(|(_, sc)| sc.signature() != sig),
+        let changed = match &before {
+            Some(sig) => self.observe(input_began, AFTER_LAUNCH).await.map(|(_, sc)| sc.signature() != *sig),
             None => None,
         };
-        Ok(fields! {
+        let mut out = fields! {
             "sent": true,
             "verified": changed.is_some(),
             "screen_changed": changed.unwrap_or(false),
             "button": args.button,
-        })
+        };
+        if before.is_none() {
+            out.insert("note".into(), json!(UNREAD_NOTE));
+        }
+        Ok(out)
     }
 
     pub async fn cmd_apps(&mut self) -> Res {
