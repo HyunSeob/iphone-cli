@@ -20,17 +20,8 @@ scroll(direction, {until, max}), type(text, {clear, submit}), key(name), button(
 readField({selector, take, regex}) → text, readList({row, columns, group, stop_below, max_scrolls}) → {rows, scrolls, ended}, sleep(ms), log(…), output(key, value). \
 tap(target) waits up to 5 s for a selector to appear and hold still; tap([a, b, c]) presses a keypad without re-reading. \
 A call that fails throws an Error with .code, .outcome, .hint and .result (the full result object); uncaught, it ends the script and the result says which call and line. \
-After a call whose outcome is \"unknown\" the script is stopped and cannot go on. A tap on a guarded label is refused unless the call says {confirm: true} AND the person \
-approved it: then pass their one-time op_id in this tool's `confirm`. The script itself can never supply an op_id. \
+After a call whose outcome is \"unknown\" the script is stopped and cannot go on. \
 No files, network or timers; Date, JSON, RegExp, Map and the rest of the language are there. The result has outputs (the returned object, plus output() calls), logs, calls and inputs_sent.";
-
-static CONFIRM_DOC: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
-    json!({
-        "description": "One-time op_id, or a list of them, for calls the script marks {confirm: true}: one id per such call, in order. Only after the user approved what will be pressed.",
-        "type": ["string", "array"],
-        "items": { "type": "string" },
-    })
-});
 
 const SELECTOR_DOC: &str = "Selector: a plain string is an exact label (the name part of a \"name, value\" row also counts). \
 Or combine terms: label=\"exact\", label~=\"contains\", label/regex/, role=button, id=<identifier or element id>, \
@@ -74,13 +65,11 @@ fn tools() -> Vec<Value> {
         tool(
             "iph_tap",
             "Tap an element (selector) or a point (\"x,y\" in points). The result says whether the screen changed. \
-             A target whose label is a guarded word (pay, send, order …) returns outcome \"blocked\" with code confirm_required: \
-             ask the user before passing `confirm` with a new one-time id. Never retry a tap whose outcome is \"unknown\".",
+             Never retry a tap whose outcome is \"unknown\".",
             json!({
                 "target": { "description": format!("A selector, or \"x,y\". {SELECTOR_DOC}"), "type": ["string", "object"] },
                 "long_ms": { "type": "integer", "description": "Hold this long instead of a short tap." },
                 "double": { "type": "boolean" },
-                "confirm": { "type": "string", "description": "One-time op_id that allows a guarded tap." },
             }),
             &["target"],
         ),
@@ -141,8 +130,8 @@ fn tools() -> Vec<Value> {
         tool("iph_apps", "List installed apps with their bundle ids.", json!({}), &[]),
         tool(
             "iph_dnd",
-            "Do Not Disturb on the phone, so a notification banner cannot take a tap. iph turns it on by itself before the first \
-             input and puts the earlier Focus back after five idle minutes; call this with \"off\" when the work is done to put it back at once.",
+            "Do Not Disturb on the phone, so a notification banner cannot take a tap. \"on\" before the work, \"off\" when it is done \
+             (puts back the Focus that was on).",
             json!({ "action": { "type": "string", "enum": ["on", "off", "status"] } }),
             &["action"],
         ),
@@ -167,7 +156,6 @@ fn tools() -> Vec<Value> {
             json!({
                 "code": { "type": "string", "description": "JavaScript. The body of a function: `return` ends it and its value becomes `outputs`." },
                 "args": { "type": "object", "description": "What the script reads as `args`." },
-                "confirm": CONFIRM_DOC.clone(),
             }),
             &["code"],
         ),
@@ -177,7 +165,6 @@ fn tools() -> Vec<Value> {
             json!({
                 "name": { "type": "string" },
                 "args": { "type": "object", "description": "What the script reads as `args`." },
-                "confirm": CONFIRM_DOC.clone(),
             }),
             &["name"],
         ),
@@ -220,7 +207,6 @@ fn script_request(tool: &str, args: &Value) -> Result<Value, Fail> {
         Some(Value::Object(map)) => map,
         Some(_) => return Err(Fail::invalid("`args` takes an object")),
     };
-    let confirm = script::confirm_ids(args.get("confirm"))?;
     let text = |key: &str| {
         args.get(key)
             .and_then(|v| v.as_str())
@@ -233,11 +219,11 @@ fn script_request(tool: &str, args: &Value) -> Result<Value, Fail> {
             Some(code) if args.get("code").is_none() => code,
             _ => text("code")?,
         };
-        return Ok(script::request(code, given, &confirm, None));
+        return Ok(script::request(code, given, None));
     }
     let name = text("name")?;
     let (code, source) = script::load(name)?;
-    Ok(script::request(&code, given, &confirm, Some((name, &source))))
+    Ok(script::request(&code, given, Some((name, &source))))
 }
 
 fn response(id: &Value, result: Value) -> Value {
@@ -279,8 +265,7 @@ async fn handle(udid: &str, only: &[String], msg: &Value) -> Option<Value> {
                     "serverInfo": { "name": "iph", "version": env!("CARGO_PKG_VERSION") },
                     "instructions": "Operate a real iPhone through its accessibility tree. Read the screen with iph_read, act with iph_tap / iph_type / iph_scroll, \
                                      and check `screen_changed` in each result. For a known sequence prefer one iph_script (or a saved one with iph_run): one call instead of one per step. \
-                                     Outcome \"unknown\" means input may have gone out: read the screen, never resend. Outcome \"blocked\" means the safety guard \
-                                     stopped a pay/send/order tap: ask the user before confirming.",
+                                     Outcome \"unknown\" means input may have gone out: read the screen, never resend.",
                 }),
             )
         }
@@ -355,8 +340,8 @@ mod tests {
 
     #[test]
     fn a_script_request_takes_code_or_a_saved_name() {
-        let req = script_request("iph_script", &json!({"code": "return 1", "args": {"n": 2}, "confirm": "ok-1"})).unwrap();
-        assert_eq!(req, json!({"code": "return 1", "args": {"n": 2}, "confirm": ["ok-1"]}));
+        let req = script_request("iph_script", &json!({"code": "return 1", "args": {"n": 2}})).unwrap();
+        assert_eq!(req, json!({"code": "return 1", "args": {"n": 2}}));
         // The name a model guesses from the tool's name works too.
         let req = script_request("iph_script", &json!({"script": "return 2"})).unwrap();
         assert_eq!(req["code"], "return 2");
@@ -364,7 +349,7 @@ mod tests {
         assert_eq!(req["script"], "settings-version");
         assert_eq!(req["source"], "builtin:settings-version");
         assert!(req["code"].as_str().unwrap().contains("launch("));
-        for bad in [json!({}), json!({"code": 1}), json!({"code": "x", "args": [1]}), json!({"code": "x", "confirm": "a b"})] {
+        for bad in [json!({}), json!({"code": 1}), json!({"code": "x", "args": [1]})] {
             assert_eq!(script_request("iph_script", &bad).unwrap_err().code, "invalid_argument", "{bad}");
         }
         assert_eq!(script_request("iph_run", &json!({"name": "nope"})).unwrap_err().code, "script_not_found");

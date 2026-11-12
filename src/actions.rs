@@ -17,7 +17,6 @@ use crate::{
     fields,
     i18n::t,
     reply::{Fail, Res},
-    safety::{self, OpRecord},
     selector::{Selector, dedupe_targets},
 };
 
@@ -63,7 +62,6 @@ pub struct TapArgs {
     pub target: Value,
     pub long_ms: Option<u64>,
     pub double: bool,
-    pub confirm: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -353,98 +351,6 @@ impl Session {
         self.observe_with(since, delay, false).await
     }
 
-    /// Check the safety guard for a tap on `el`. `Ok(Some(record))` means the
-    /// tap is confirmed and the record must be finished afterwards.
-    pub fn guard_tap(
-        &self,
-        el: Option<&Element>,
-        confirm: Option<&str>,
-        command: &str,
-        force_confirm: bool,
-    ) -> Res<Option<OpRecord>> {
-        let label = el.and_then(|e| e.label.as_deref()).unwrap_or("");
-        let matched = self.guard.check(label).map(String::from);
-        if matched.is_none() && !force_confirm {
-            return Ok(None);
-        }
-        let element = el.map(brief).unwrap_or(Value::Null);
-        let Some(op_id) = confirm else {
-            let mut fail = Fail::blocked(
-                "confirm_required",
-                match &matched {
-                    Some(w) => format!("the target's label contains the guarded word \"{w}\""),
-                    None => "this tap is marked `confirm: true`".to_string(),
-                },
-            )
-            .hint(t(
-                "정말 눌러야 한다면 사람에게 확인받은 뒤 새 ID로 `--confirm <op_id>`를 붙여 다시 실행하세요. 같은 op_id는 한 번만 쓸 수 있습니다.",
-                "If it really must be pressed, get a person's approval and run again with `--confirm <op_id>` using a new id. An op_id works once.",
-            ))
-            .with("element", element);
-            if let Some(w) = matched {
-                fail = fail.with("matched_word", w);
-            }
-            return Err(fail);
-        };
-        if !safety::valid_op_id(op_id) {
-            return Err(Fail::invalid(
-                "op_id must be 1-128 characters of letters, digits and -_.:#",
-            ));
-        }
-        let rec = OpRecord {
-            op_id: op_id.to_string(),
-            at: safety::now_utc(),
-            udid: self.udid.clone(),
-            state: "started".into(),
-            command: command.to_string(),
-            target: el.and_then(|e| e.label.clone()),
-            matched_word: matched,
-        };
-        match safety::begin(&rec) {
-            Ok(Ok(())) => Ok(Some(rec)),
-            Ok(Err(earlier)) => Err(Fail::blocked(
-                "op_already_used",
-                format!("op_id \"{op_id}\" was already used"),
-            )
-            .hint(t(
-                "같은 op_id로는 다시 누르지 않습니다. 결과는 `iph op <op_id>`로 조회하세요. 결과가 불확실하면 새 ID로 재시도하지 말고 화면을 확인하세요.",
-                "The same op_id is never pressed twice. Look it up with `iph op <op_id>`. If the outcome is uncertain, check the screen instead of retrying with a new id.",
-            ))
-            .with("records", json!(earlier))),
-            Err(e) => Err(Fail::not_sent("ops_log_failed", format!("{e:#}"))),
-        }
-    }
-
-    /// A drag that begins and ends on one element can press it, just as a
-    /// tap would. On a guarded label it is refused: a swipe has no
-    /// `--confirm`, and whoever means to press it can say so with a tap.
-    pub fn guard_drag(&self, screen: &Screen, from: (f64, f64), to: (f64, f64)) -> Res<()> {
-        let (Some(a), Some(b)) = (screen.element_at(from.0, from.1), screen.element_at(to.0, to.1)) else {
-            return Ok(());
-        };
-        if a.id != b.id {
-            return Ok(());
-        }
-        self.guard_tap(Some(a), None, "swipe", false).map(|_| ()).map_err(|f| {
-            f.hint(t(
-                "스와이프의 시작과 끝이 같은 요소 위라 탭처럼 눌릴 수 있습니다. 정말 눌러야 한다면 사람에게 확인받고 `tap --confirm`을 쓰세요.",
-                "This swipe begins and ends on one element and could press it like a tap. If it must be pressed, get a person's approval and use `tap --confirm`.",
-            ))
-        })
-    }
-
-    pub fn finish_op(rec: Option<OpRecord>, state: &str) {
-        if let Some(mut rec) = rec {
-            rec.state = state.to_string();
-            rec.at = safety::now_utc();
-            let _ = safety::finish(&rec);
-        }
-    }
-
-    pub async fn cmd_tap(&mut self, args: TapArgs) -> Res {
-        self.tap_impl(args, false).await
-    }
-
     /// Read the screen and find where to tap for each target. Fails without
     /// sending anything when a target is missing, ambiguous or covered.
     async fn locate(
@@ -478,7 +384,6 @@ impl Session {
                 }
             });
         }
-        self.check_front_allowed(&screen).await?;
         Ok((screen, points))
     }
 
@@ -486,39 +391,17 @@ impl Session {
     /// if getting ready took long enough for the screen to have moved on: a
     /// cold input session takes seconds to open, and a tap must never go to
     /// where something used to be.
-    ///
-    /// Guarded targets without a confirmation are refused here, before the
-    /// input session is touched.
-    async fn locate_ready(
-        &mut self,
-        targets: &[Target],
-        confirm_given: bool,
-        force_confirm: bool,
-    ) -> Res<(Screen, Vec<(f64, f64, Option<Element>)>)> {
+    async fn locate_ready(&mut self, targets: &[Target]) -> Res<(Screen, Vec<(f64, f64, Option<Element>)>)> {
         let located = self.locate(targets, Fresh::MaxAge(reuse())).await?;
-        if !confirm_given {
-            for (_, _, el) in &located.1 {
-                self.guard_tap(el.as_ref(), None, "tap", force_confirm)?;
-            }
-        }
         let started = std::time::Instant::now();
         self.ensure_input().await?;
         if started.elapsed() < Duration::from_millis(400) {
             return Ok(located);
         }
-        let again = self.locate(targets, Fresh::Force).await?;
-        if !confirm_given {
-            for (_, _, el) in &again.1 {
-                self.guard_tap(el.as_ref(), None, "tap", force_confirm)?;
-            }
-        }
-        Ok(again)
+        self.locate(targets, Fresh::Force).await
     }
 
-    /// `force_confirm`: the caller (a script call or a batch step marked
-    /// `confirm: true`) requires an op_id even when the label is not a
-    /// guarded word.
-    pub(crate) async fn tap_impl(&mut self, args: TapArgs, force_confirm: bool) -> Res {
+    pub async fn cmd_tap(&mut self, args: TapArgs) -> Res {
         if args.double && args.long_ms.is_some() {
             return Err(Fail::invalid("--double and --long cannot be combined"));
         }
@@ -528,14 +411,9 @@ impl Session {
             return Err(Fail::invalid("--long must be 1..60000 ms"));
         }
         let target = parse_target(&args.target)?;
-        let (screen, mut points) = self
-            .locate_ready(std::slice::from_ref(&target), args.confirm.is_some(), force_confirm)
-            .await?;
+        let (screen, mut points) = self.locate_ready(std::slice::from_ref(&target)).await?;
         let (x, y, element) = points.remove(0);
         let element_json = element.as_ref().map(brief);
-        // Claims the op_id when the target is guarded; from here on the id is spent.
-        let op = self.guard_tap(element.as_ref(), args.confirm.as_deref(), "tap", force_confirm)?;
-        let op_id = op.as_ref().map(|o| o.op_id.clone());
 
         let (nx, ny) = (normalize(x, screen.width), normalize(y, screen.height));
         let before = screen.signature();
@@ -545,19 +423,9 @@ impl Session {
         } else {
             Gesture::Tap { x: nx, y: ny, hold: Duration::from_millis(args.long_ms.unwrap_or(50)) }
         };
-        if let Err(mut fail) = self.send_gesture(gesture).await {
-            // `not_sent`: no input session could be opened. Otherwise the
-            // report may or may not have reached the phone.
-            let state = if fail.outcome == crate::reply::Outcome::NotSent { "not_sent" } else { "unknown" };
-            Self::finish_op(op, state);
-            if let Some(id) = op_id {
-                fail = fail.with("op_id", id);
-            }
-            return Err(fail);
-        }
+        self.send_gesture(gesture).await?;
         let after = self.observe(input_began, AFTER_TAP).await;
         let changed = after.as_ref().map(|(_, s)| s.signature() != before);
-        Self::finish_op(op, "done");
         let app_change = after.as_ref().and_then(|(_, s)| app_changed(&screen, s));
         if app_change.as_ref().is_some_and(|c| c["name"].is_null()) {
             // Something of the system's is over the app now.
@@ -574,9 +442,6 @@ impl Session {
         if let Some(e) = element_json {
             out.insert("element".into(), e);
         }
-        if let Some(id) = op_id {
-            out.insert("op_id".into(), json!(id));
-        }
         if changed.is_none() {
             out.insert(
                 "note".into(),
@@ -591,7 +456,7 @@ impl Session {
     }
 
     /// Tap several targets in a row on the screen as it is now: every target
-    /// is found (and checked by the safety guard) before the first tap goes
+    /// is found before the first tap goes
     /// out, nothing is re-read in between, and the screen is read once at the
     /// end. For keypads and other screens that hold still while tapped.
     pub(crate) async fn tap_sequence(&mut self, targets: &[Value]) -> Res {
@@ -599,9 +464,7 @@ impl Session {
             return Err(Fail::invalid("the tap list is empty"));
         }
         let parsed: Vec<Target> = targets.iter().map(parse_target).collect::<Res<_>>()?;
-        // A guarded target stops the whole sequence before it starts; a
-        // confirmed tap is always a step of its own.
-        let (screen, points) = self.locate_ready(&parsed, false, false).await?;
+        let (screen, points) = self.locate_ready(&parsed).await?;
         let before = screen.signature();
         let normalized: Vec<(u16, u16)> = points
             .iter()
@@ -667,8 +530,6 @@ impl Session {
                 )));
             }
         }
-        self.check_front_allowed(&screen).await?;
-        self.guard_drag(&screen, from, to)?;
         let before = screen.signature();
         let a = (normalize(from.0, screen.width), normalize(from.1, screen.height));
         let b = (normalize(to.0, screen.width), normalize(to.1, screen.height));
@@ -830,7 +691,6 @@ impl Session {
         let (_, screen) = self
             .screen(Fresh::MaxAge(reuse()), false, BuildOptions::default())
             .await?;
-        self.check_front_allowed(&screen).await?;
         let before = Some(screen.signature());
         let input_began = Instant::now();
         let input = self.ensure_input().await?;
@@ -855,7 +715,6 @@ impl Session {
         let (_, screen) = self
             .screen(Fresh::MaxAge(reuse()), false, BuildOptions::default())
             .await?;
-        self.check_front_allowed(&screen).await?;
         let before = Some(screen.signature());
         let input_began = Instant::now();
         self.send_gesture(Gesture::Button { page, usage, hold: Duration::from_millis(hold) }).await?;
@@ -920,7 +779,6 @@ impl Session {
 
     pub async fn cmd_launch(&mut self, args: LaunchArgs) -> Res {
         let bundle = self.resolve_bundle(&args.app).await?;
-        self.check_launch_allowed(&bundle)?;
         let mut svc = self.app_service().await?;
         let launch_began = Instant::now();
         // From here the launch request may have reached the phone.
@@ -1005,7 +863,6 @@ impl Session {
             .with("screen_summary", screen.summary(12)));
         };
         let before_value = field.value.clone().unwrap_or_default();
-        self.check_front_allowed(&screen).await?;
         trace(|| "type: focused field found".into());
 
         // The input session first: if it cannot be had, nothing has been

@@ -16,8 +16,6 @@ pub enum Outcome {
     NotSent,
     /// Input may have reached the phone. Look at the screen; do not resend.
     Unknown,
-    /// Refused by the safety guard.
-    Blocked,
 }
 
 impl Outcome {
@@ -26,7 +24,6 @@ impl Outcome {
             Outcome::Done => "done",
             Outcome::NotSent => "not_sent",
             Outcome::Unknown => "unknown",
-            Outcome::Blocked => "blocked",
         }
     }
 }
@@ -61,10 +58,6 @@ impl Fail {
 
     pub fn unknown(code: &str, message: impl Into<String>) -> Self {
         Self::new(Outcome::Unknown, code, message)
-    }
-
-    pub fn blocked(code: &str, message: impl Into<String>) -> Self {
-        Self::new(Outcome::Blocked, code, message)
     }
 
     pub fn invalid(message: impl Into<String>) -> Self {
@@ -146,15 +139,15 @@ mod tests {
         assert!(ok.get("error").is_none());
 
         let fail = envelope(
-            Err(Fail::blocked("confirm_required", "needs confirm")
-                .hint("pass --confirm")
-                .with("matched_word", "결제")),
+            Err(Fail::not_sent("element_not_found", "no such element")
+                .hint("read the screen")
+                .with("candidates", "일반")),
             Instant::now(),
         );
         assert_eq!(fail["ok"], false);
-        assert_eq!(fail["outcome"], "blocked");
-        assert_eq!(fail["error"]["code"], "confirm_required");
-        assert_eq!(fail["error"]["hint"], "pass --confirm");
-        assert_eq!(fail["matched_word"], "결제");
+        assert_eq!(fail["outcome"], "not_sent");
+        assert_eq!(fail["error"]["code"], "element_not_found");
+        assert_eq!(fail["error"]["hint"], "read the screen");
+        assert_eq!(fail["candidates"], "일반");
     }
 }

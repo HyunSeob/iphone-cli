@@ -30,28 +30,16 @@ This is a real phone with the user's accounts on it. A tap cannot be taken back,
 | `done` | Continue. With `ok: false` (only `scroll --until` that did not find its target, `error.code: "not_found"`): the scrolls went out; the target is not in that direction. |
 | `not_sent` | Nothing reached the phone. Fix the cause (`error.code`, `error.hint`) and try again. |
 | `unknown` | Input may have reached the phone. Do not send it again: a second tap on a button that did work is a double order or a double message. Run `iph read` and look. |
-| `blocked` | The safety guard refused. See "Money, messages, orders". |
 
-Frequent `error.code`s: `not_found` (`screen_summary.labels` shows what is on screen; scroll or go to the right screen), `ambiguous_selector` (`candidates` lists the matches; narrow with `role=`, `within=`, `index=`), `covered` (something overlaps the target; scroll), `no_focused_field` (tap the text field first), `app_not_allowed` (the user limited iph to certain apps in `[safety] only_apps`; ask before anything else, and do not edit that list yourself).
+Frequent `error.code`s: `not_found` (`screen_summary.labels` shows what is on screen; scroll or go to the right screen), `ambiguous_selector` (`candidates` lists the matches; narrow with `role=`, `within=`, `index=`), `covered` (something overlaps the target; scroll), `no_focused_field` (tap the text field first).
 
 ## Do Not Disturb
 
-A notification banner drops over the top of the screen, is not in the element list, and takes the tap meant for what is under it. So before your first input iph switches the phone to Do Not Disturb by itself (11 to 36 s; Control Center shows for a moment) and reports it as `dnd` in that command's result.
-
-- `dnd.on: false` means it could not. Go on with care near the top of the screen and tell the user why (`dnd.message`, `dnd.hint`).
-- When the work is done, give the user's Focus back: `iph dnd off` (MCP: `iph_dnd` with `"action": "off"`). Left alone, iph does it after five minutes without a command, and until then the user misses notifications.
-- `control_center_open`: Do Not Disturb could not be set and Control Center may be lying over the app, so the command was not sent. `iph dnd status` closes it; then read the screen.
+A notification banner drops over the top of the screen, is not in the element list, and takes the tap meant for what is under it. iph does not switch Focus by itself. For long work, turn Do Not Disturb on first with `iph dnd on` (MCP: `iph_dnd` with `"action": "on"`; 11 to 36 s, Control Center shows for a moment), and put the user's Focus back with `iph dnd off` when the work is done; until then the user misses notifications.
 
 ## Money, messages, orders
 
-A tap on an element labelled with 결제 · 송금 · 보내기 · 이체 · 주문 · 구매 · 지불 · 충전 · pay · purchase · buy · send money · transfer · place order returns `outcome: "blocked"`, `error.code: "confirm_required"`, and nothing is sent.
-
-- Confirming is the user's decision, not yours. Show them what would be pressed (`element`, `matched_word`) and ask.
-- After they say yes, repeat the same tap with `--confirm <op_id>` (MCP: `"confirm": "<op_id>"`), using a new id such as `order-20261111-1`.
-- In a script, mark the call that pays, sends or orders: `tap("보내기", { confirm: true })`. A script cannot confirm by itself: an op_id written into the script is refused (`confirm_not_allowed`), wherever it came from. Run the script without `--confirm` first; it stops at the marked call with `outcome: "blocked"` and shows what would be pressed. Ask the user, then run it again with `--confirm <new id>` (MCP: `confirm`). One id presses one marked call; a script with two needs two `--confirm`. Because the second run starts over, begin such scripts from a known screen (`launch(app, { restart: true })`).
-- An `op_id` works once. If the result is `unknown`, do not make a new id and try again: run `iph op <op_id>`, read the screen, and report.
-- The guard only reads labels. A button with no label or a neutral one ("다음", "확인") passes it, so on any screen that moves money or sends something, stop and ask even when the guard is silent.
-- Never answer a Face ID, passcode or payment-authentication prompt. Tell the user the phone is waiting for them.
+iph has no guard: it presses pay, send and order buttons like any other, in any app. What to press follows the user's instructions. After such a tap comes back `unknown`, read the screen before anything else: a second press is a second payment or a second message. A Face ID, passcode or payment-authentication prompt waits for the user.
 
 ## What is on the screen belongs to the user
 
@@ -101,7 +89,6 @@ try { tap("닫기", { timeout_ms: 1500 }); } catch (e) { if (e.code !== "wait_ti
 
 The `outcome` of a script that stopped:
 
-- `blocked`: the safety guard stopped a call. See "Money, messages, orders".
 - `unknown`: input had gone out before it stopped. Running it again would send that input again, so read the screen first. After a call whose own outcome is `unknown` the script is ended and cannot go on, even if it catches the error.
 - `not_sent`: nothing had been sent. Fix the cause and run it again.
 
@@ -123,7 +110,7 @@ After `launch`, that app must stay in front; if another one comes up, the script
 
 ## Commands at a glance
 
-`read`, `find`, `tap`, `swipe`, `scroll`, `type`, `key`, `button`, `launch`, `apps` (bundle ids), `screenshot`, `script`, `run`, `scripts`, `batch`, `op`, `dnd`, `doctor`, `devices`, `stop`. `iph <command> --help` has the flags; add `--human` to read a result yourself.
+`read`, `find`, `tap`, `swipe`, `scroll`, `type`, `key`, `button`, `launch`, `apps` (bundle ids), `screenshot`, `script`, `run`, `scripts`, `batch`, `dnd`, `doctor`, `devices`, `stop`. `iph <command> --help` has the flags; add `--human` to read a result yourself.
 
 ## When something is off
 
@@ -132,4 +119,4 @@ After `launch`, that app must stay in front; if another one comes up, the script
 - **`input_failed` or `input_unavailable` come back, or readings take many seconds every time:** stop sending input, because a late reading can show an earlier screen and a tap would then go to the wrong place. Read once more after a moment, and tell the user if it does not clear. Over Wi-Fi everything is slower and less steady than over the cable; if the cable is at hand, suggest plugging it in.
 - **The element list looks wrong for what the user describes:** `iph screenshot -o <file>` shows what is really on screen. Banners and system pop-ups are never in the list.
 - **The phone is locked:** nothing works until the user unlocks it.
-- **iph was killed and the phone stayed in Do Not Disturb:** `iph dnd status` shows whether iph set it; `iph dnd off` puts the earlier Focus back.
+- **The phone stayed in Do Not Disturb after the work:** `iph dnd status` shows whether `iph dnd on` set it; `iph dnd off` puts the earlier Focus back.

@@ -46,50 +46,7 @@ fn element_line(e: &Value) -> String {
     line
 }
 
-/// What happened to Do Not Disturb around the command, when something did.
-fn dnd_line(d: &Value) -> Option<String> {
-    if d["on"] == true {
-        return (d["changed"] == true).then(|| match d["previous"].as_str() {
-            Some(p) => format!("  do not disturb on (was: {p})"),
-            None => "  do not disturb on".to_string(),
-        });
-    }
-    if d["on"] == false {
-        let mut line = format!("  ! do not disturb not on ({}): {}", s(&d["code"]), s(&d["message"]));
-        if let Some(h) = d["hint"].as_str() {
-            line.push_str(&format!("\n    → {h}"));
-        }
-        return Some(line);
-    }
-    match d["restored"].as_bool()? {
-        true if d["changed"] == true => Some(match d["focus"].as_str() {
-            Some(f) => format!("  do not disturb off (back to: {f})"),
-            None => "  do not disturb off".to_string(),
-        }),
-        true => None,
-        false => {
-            let mut line = format!("  ! do not disturb not put back ({}): {}", s(&d["code"]), s(&d["message"]));
-            if let Some(h) = d["hint"].as_str() {
-                line.push_str(&format!("\n    → {h}"));
-            }
-            Some(line)
-        }
-    }
-}
-
 pub fn render(cmd: &str, v: &Value) -> String {
-    let mut out = render_result(cmd, v);
-    if let Some(line) = v.get("dnd").and_then(dnd_line) {
-        out.push('\n');
-        out.push_str(&line);
-    }
-    if let Some(note) = v["note"].as_str().filter(|_| cmd == "stop") {
-        out.push_str(&format!("\n  → {note}"));
-    }
-    out
-}
-
-fn render_result(cmd: &str, v: &Value) -> String {
     let mut out = Vec::new();
     if v["ok"] != true {
         out.push(format!(

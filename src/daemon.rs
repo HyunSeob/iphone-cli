@@ -23,7 +23,6 @@ use crate::{
     doctor, fields, ipc, paths,
     reply::{Fail, Res, envelope},
     script,
-    steps::RunOptions,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,7 +53,7 @@ pub fn build_stamp() -> String {
 }
 
 fn log(msg: &str) {
-    eprintln!("[{}] {msg}", crate::safety::now_utc());
+    eprintln!("[{}] {msg}", crate::clock::now_utc());
 }
 
 async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
@@ -75,7 +74,7 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
                 .get("steps")
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| Fail::invalid("batch needs a JSON array of steps"))?;
-            Box::pin(s.run_steps(steps, &Map::new(), &RunOptions { confirm: None, batch: true })).await
+            Box::pin(s.run_steps(steps, &Map::new())).await
         }
         // `iph script` and `iph run`: whoever asks sends the code along.
         "script" => Box::pin(s.serve_script(args)).await,
@@ -146,14 +145,7 @@ async fn handle(stream: ipc::Stream, shared: Arc<Shared>) -> Result<()> {
         "shutdown" => {
             log("shutdown requested");
             let mut session = shared.session.lock().await;
-            // A newer build taking over keeps Do Not Disturb as it is; the
-            // record on disk tells it what to put back later.
-            let keep = req.args.get("keep_dnd").and_then(|v| v.as_bool()).unwrap_or(false);
-            let dnd = if keep { None } else { session.dnd_restore().await };
-            if let Some(d) = &dnd {
-                log(&format!("do not disturb at shutdown: {d}"));
-            }
-            let reply = json!({ "ok": true, "dnd": dnd });
+            let reply = json!({ "ok": true });
             write.write_all(format!("{reply}\n").as_bytes()).await?;
             write.shutdown().await.ok();
             session.shutdown().await;
@@ -167,40 +159,26 @@ async fn handle(stream: ipc::Stream, shared: Arc<Shared>) -> Result<()> {
         ),
         cmd => {
             let mut session = shared.session.lock().await;
-            let dnd = session.dnd_before(cmd).await;
-            if let Ok(Some(d)) = dnd.as_ref().map(|d| d.as_ref().filter(|d| d["on"] != true)) {
-                log(&format!("do not disturb before {cmd}: {d}"));
-            }
-            let (dnd, result) = match dnd {
-                // Control Center may be over the app: the command stays unsent.
-                Err(fail) => (None, Err(fail)),
-                Ok(dnd) => {
-                    let work = Box::pin(dispatch(&mut session, cmd, &req.args));
-                    let result = match tokio::time::timeout(budget(cmd), work).await {
-                        Ok(r) => r,
-                        Err(_) => {
-                            // Whatever was in flight is abandoned with its connections.
-                            session.reset();
-                            Err(Fail::unknown(
-                                "timeout",
-                                format!("`{cmd}` did not finish within {} s", budget(cmd).as_secs()),
-                            )
-                            .hint(crate::i18n::t(
-                                "입력이 일부 나갔을 수 있습니다. `iph read`로 화면을 확인하세요.",
-                                "Some input may have gone out. Check the screen with `iph read`.",
-                            )))
-                        }
-                    };
-                    (dnd, result)
+            let work = Box::pin(dispatch(&mut session, cmd, &req.args));
+            let result = match tokio::time::timeout(budget(cmd), work).await {
+                Ok(r) => r,
+                Err(_) => {
+                    // Whatever was in flight is abandoned with its connections.
+                    session.reset();
+                    Err(Fail::unknown(
+                        "timeout",
+                        format!("`{cmd}` did not finish within {} s", budget(cmd).as_secs()),
+                    )
+                    .hint(crate::i18n::t(
+                        "입력이 일부 나갔을 수 있습니다. `iph read`로 화면을 확인하세요.",
+                        "Some input may have gone out. Check the screen with `iph read`.",
+                    )))
                 }
             };
             if let Err(f) = &result {
                 log(&format!("{cmd} -> {} {}", f.outcome.as_str(), f.code));
             }
-            let mut reply = envelope(result, started);
-            if let Some(d) = dnd {
-                reply["dnd"] = d;
-            }
+            let reply = envelope(result, started);
             session.close_input_if_unheld().await;
             session.sweep().await;
             reply
@@ -259,18 +237,9 @@ pub async fn run(udid: String) -> Result<()> {
                     let idle = keeper.last_request.lock().unwrap().elapsed();
                     if let Ok(mut session) = keeper.session.try_lock() {
                         session.sweep().await;
-                        if let Some(d) = session.dnd_restore_if_idle(idle).await {
-                            log(&format!("do not disturb after {} s idle: {d}", idle.as_secs()));
-                            // Nothing else is going on: do not leave the
-                            // phone sharing its screen for this.
-                            session.close_input().await;
-                        }
                         session.close_idle_input().await;
                         if idle > idle_exit {
                             log("idle, exiting");
-                            if let Some(d) = session.dnd_restore().await {
-                                log(&format!("do not disturb at exit: {d}"));
-                            }
                             session.shutdown().await;
                             ipc::cleanup(&keeper.udid);
                             let _ = std::fs::remove_file(paths::daemon_pid(&keeper.udid));

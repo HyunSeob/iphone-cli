@@ -128,15 +128,14 @@ async fn connect(udid: &str) -> Result<ipc::Stream, String> {
 }
 
 /// Ask the daemon to step down and wait until it has. `None` when none was
-/// running, otherwise its last words. Unless `keep_dnd`, it first puts back
-/// the Focus it replaced with Do Not Disturb, which takes some seconds.
-async fn stop(udid: &str, keep_dnd: bool) -> Option<Value> {
+/// running, otherwise its last words.
+async fn stop(udid: &str) -> Option<Value> {
     let mut s = ipc::connect(udid).await.ok()?;
-    let req = Request { build: build_stamp(), cmd: "shutdown".into(), args: json!({ "keep_dnd": keep_dnd }) };
+    let req = Request { build: build_stamp(), cmd: "shutdown".into(), args: Value::Null };
     let _ = s.write_all(format!("{}\n", serde_json::to_string(&req).unwrap()).as_bytes()).await;
     let mut line = String::new();
-    // It answers after the command in flight and the Focus change.
-    let patience = crate::daemon::budget("shutdown") + Duration::from_secs(70);
+    // It answers after the command in flight.
+    let patience = crate::daemon::budget("shutdown");
     if tokio::time::timeout(patience, BufReader::new(&mut s).read_line(&mut line)).await.is_err() {
         kill_daemon(udid);
         return Some(json!({ "ok": true, "killed": true }));
@@ -165,8 +164,8 @@ fn kill_daemon(udid: &str) {
 }
 
 /// Stop the daemon for `udid`. `None` when none was running.
-pub async fn stop_daemon(udid: &str, keep_dnd: bool) -> Option<Value> {
-    stop(udid, keep_dnd).await
+pub async fn stop_daemon(udid: &str) -> Option<Value> {
+    stop(udid).await
 }
 
 /// Send one command and return the result envelope.
@@ -225,7 +224,7 @@ pub async fn request(udid: &str, cmd: &str, args: Value) -> Value {
         };
         if value["error"]["code"] == "daemon_outdated" {
             // It refused before doing anything; replace it and ask again.
-            stop(udid, true).await;
+            stop(udid).await;
             continue;
         }
         return value;

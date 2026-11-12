@@ -6,6 +6,7 @@
 pub mod actions;
 pub mod ax;
 pub mod client;
+pub mod clock;
 pub mod config;
 pub mod daemon;
 pub mod ddi;
@@ -22,6 +23,5 @@ pub mod paths;
 pub mod script;
 pub mod steps;
 pub mod reply;
-pub mod safety;
 pub mod selector;
 pub mod setup;

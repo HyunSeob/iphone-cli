@@ -4,11 +4,10 @@ use std::{io::Read, time::Instant};
 
 use clap::{Parser, Subcommand};
 use iphone_cli::{
-    client, daemon, devices, dnd, fields, human,
-    i18n::t,
+    client, clock, daemon, devices, fields, human,
     mcp,
     reply::{Fail, envelope},
-    safety, script, setup,
+    script, setup,
 };
 use serde_json::{Map, Value, json};
 
@@ -19,7 +18,7 @@ use serde_json::{Map, Value, json};
     about = "Read and operate any app on a real iPhone through its accessibility tree",
     long_about = "Read and operate any app on a real iPhone through its accessibility tree.\n\
                   No XCUITest, WebDriverAgent or Xcode signing. Output is JSON; add --human for people.\n\
-                  Exit codes: 0 ok, 1 nothing was sent, 2 outcome unknown (check the screen), 3 blocked by the safety guard."
+                  Exit codes: 0 ok, 1 nothing was sent, 2 outcome unknown (check the screen)."
 )]
 struct Cli {
     /// Device to use. Defaults to IPH_UDID, config.toml, or the only connected iPhone.
@@ -79,9 +78,6 @@ enum Cmd {
         long: Option<u64>,
         #[arg(long)]
         double: bool,
-        /// One-time id that allows a guarded tap (pay, send, order …).
-        #[arg(long)]
-        confirm: Option<String>,
     },
     /// Swipe: up, down, left, right, or x1,y1,x2,y2.
     Swipe {
@@ -137,9 +133,6 @@ enum Cmd {
         /// Argument the script reads as `args.name`, repeatable: --arg name=value
         #[arg(long = "arg", value_name = "K=V")]
         args: Vec<String>,
-        /// One-time id for a call the script marks `confirm: true`; one per such call.
-        #[arg(long, value_name = "OP_ID")]
-        confirm: Vec<String>,
     },
     /// Run a saved script by name (see `iph scripts`).
     Run {
@@ -147,14 +140,9 @@ enum Cmd {
         /// Argument the script reads as `args.name`, repeatable: --arg name=value
         #[arg(long = "arg", value_name = "K=V")]
         args: Vec<String>,
-        /// One-time id for a call the script marks `confirm: true`; one per such call.
-        #[arg(long, value_name = "OP_ID")]
-        confirm: Vec<String>,
     },
     /// List saved scripts.
     Scripts,
-    /// Look up what happened to a confirmed operation.
-    Op { op_id: String },
     /// Serve the same commands as MCP tools over stdio.
     Mcp {
         /// Offer only these tools (comma separated, e.g. read,find,run).
@@ -162,15 +150,9 @@ enum Cmd {
         tools: Vec<String>,
     },
     /// Do Not Disturb on the phone: on, off (back to the Focus that was on), status.
-    /// With `[safety] dnd = true` (the default) iph does this by itself around its input.
     Dnd { action: String },
     /// Stop the background daemon for this phone.
-    Stop {
-        /// Leave Do Not Disturb as it is instead of putting the earlier Focus
-        /// back (that takes input on the phone). `iph dnd off` does it later.
-        #[arg(long)]
-        keep_dnd: bool,
-    },
+    Stop,
     /// Internal: the resident process.
     #[command(hide = true)]
     Daemon,
@@ -195,7 +177,6 @@ fn exit_code(value: &Value) -> i32 {
     }
     match value["outcome"].as_str() {
         Some("unknown") => 2,
-        Some("blocked") => 3,
         _ => 1,
     }
 }
@@ -265,22 +246,6 @@ async fn run(cli: Cli) -> i32 {
             print(&v, human_out, "scripts");
             return exit_code(&v);
         }
-        Cmd::Op { op_id } => {
-            let result = safety::lookup(op_id)
-                .map_err(|e| Fail::not_sent("ops_log_failed", format!("{e:#}")))
-                .map(|records| {
-                    let state = records.last().map(|r| r.state.clone());
-                    fields! {
-                        "op_id": op_id,
-                        "found": !records.is_empty(),
-                        "state": state,
-                        "records": records,
-                    }
-                });
-            let v = envelope(result, started);
-            print(&v, human_out, "op");
-            return exit_code(&v);
-        }
         Cmd::Devices => {
             let v = envelope(devices::cmd_devices(cli.udid.clone()).await, started);
             print(&v, human_out, "devices");
@@ -318,22 +283,9 @@ async fn run(cli: Cli) -> i32 {
             };
         }
         Cmd::Setup => return setup::run(&udid).await,
-        Cmd::Stop { keep_dnd } => {
-            let last = client::stop_daemon(&udid, keep_dnd).await;
-            let mut out = fields! { "stopped": last.is_some() };
-            if let Some(d) = last.as_ref().map(|l| &l["dnd"]).filter(|d| !d.is_null()) {
-                out.insert("dnd".into(), d.clone());
-            } else if last.is_none() && dnd::Record::load(&udid).is_some() {
-                // A daemon that died left the phone quiet.
-                out.insert(
-                    "note".into(),
-                    json!(t(
-                        "iph가 켠 방해금지 모드가 폰에 남아 있습니다. `iph dnd off`로 되돌리세요.",
-                        "Do Not Disturb that iph turned on is still on. Put it back with `iph dnd off`.",
-                    )),
-                );
-            }
-            let v = envelope(Ok(out), started);
+        Cmd::Stop => {
+            let last = client::stop_daemon(&udid).await;
+            let v = envelope(Ok(fields! { "stopped": last.is_some() }), started);
             print(&v, human_out, "stop");
             return 0;
         }
@@ -348,10 +300,9 @@ async fn run(cli: Cli) -> i32 {
             json!({ "app": app, "all": all, "full": full, "raw": raw, "max_age_ms": max_age }),
         ),
         Cmd::Find { selector, all } => ("find", json!({ "selector": selector, "all": all })),
-        Cmd::Tap { target, long, double, confirm } => (
-            "tap",
-            json!({ "target": target, "long_ms": long, "double": double, "confirm": confirm }),
-        ),
+        Cmd::Tap { target, long, double } => {
+            ("tap", json!({ "target": target, "long_ms": long, "double": double }))
+        }
         Cmd::Swipe { direction, duration, drag } => match swipe_args(&direction, duration, drag) {
             Ok(v) => ("swipe", v),
             Err(f) => {
@@ -374,7 +325,7 @@ async fn run(cli: Cli) -> i32 {
         Cmd::Apps => ("apps", Value::Null),
         Cmd::Screenshot { output } => {
             let name = output.unwrap_or_else(|| {
-                format!("iph-screenshot-{}.png", safety::now_utc().replace([':', '-'], ""))
+                format!("iph-screenshot-{}.png", clock::now_utc().replace([':', '-'], ""))
             });
             // The daemon writes the file, so the path must not depend on its cwd.
             let path = std::path::absolute(&name)
@@ -408,7 +359,7 @@ async fn run(cli: Cli) -> i32 {
                 }
             }
         }
-        Cmd::Script { file, args, confirm } => {
+        Cmd::Script { file, args } => {
             let code = if file == "-" {
                 let mut s = String::new();
                 std::io::stdin().read_to_string(&mut s).map(|_| s)
@@ -417,7 +368,7 @@ async fn run(cli: Cli) -> i32 {
             };
             let request = code
                 .map_err(|e| Fail::invalid(format!("{file}: {e}")))
-                .and_then(|code| Ok(script::request(&code, &script_args(&args)?, &confirm, None)));
+                .and_then(|code| Ok(script::request(&code, &script_args(&args)?, None)));
             match request {
                 Ok(request) => ("script", request),
                 Err(f) => {
@@ -427,9 +378,9 @@ async fn run(cli: Cli) -> i32 {
                 }
             }
         }
-        Cmd::Run { name, args, confirm } => {
+        Cmd::Run { name, args } => {
             let request = script::load(&name).and_then(|(code, source)| {
-                Ok(script::request(&code, &script_args(&args)?, &confirm, Some((&name, &source))))
+                Ok(script::request(&code, &script_args(&args)?, Some((&name, &source))))
             });
             match request {
                 Ok(request) => ("script", request),
@@ -440,7 +391,7 @@ async fn run(cli: Cli) -> i32 {
                 }
             }
         }
-        Cmd::Scripts | Cmd::Op { .. } | Cmd::Devices => unreachable!(),
+        Cmd::Scripts | Cmd::Devices => unreachable!(),
     };
 
     let value = client::request(&udid, cmd, args).await;

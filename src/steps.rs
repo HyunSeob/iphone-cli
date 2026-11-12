@@ -3,7 +3,7 @@
 //!
 //! A step is a one-key map. Kinds: `launch`, `wait_for`, `tap`, `type`,
 //! `swipe`, `scroll_until`, `read_field`, `read_list`, `assert`, `button`,
-//! `key`, `sleep`. Any step may add `confirm`, `when: "a == b"` (run the
+//! `key`, `sleep`. Any step may add `when: "a == b"` (run the
 //! step only then) and `hint: "…"` (what to tell the person if it fails). A
 //! step that fails stops the run; nothing is guessed.
 //!
@@ -21,8 +21,7 @@ use crate::{
     device::session::{Fresh, Session, reuse},
     fields,
     i18n::t,
-    reply::{Fail, Outcome, Res},
-    safety::{self, OpRecord},
+    reply::{Fail, Res},
     selector::{Selector, dedupe_targets},
 };
 
@@ -42,13 +41,11 @@ const KINDS: &[&str] = &[
 ];
 
 /// Keys a step may carry next to its kind.
-const MODIFIERS: &[&str] = &["confirm", "when", "hint"];
+const MODIFIERS: &[&str] = &["when", "hint"];
 
-/// Split a step into (kind, body, confirm).
-fn split_step(step: &Value) -> Result<(&str, &Value, &Value), String> {
+/// Split a step into (kind, body).
+fn split_step(step: &Value) -> Result<(&str, &Value), String> {
     let map = step.as_object().ok_or("a step is a map like `tap: {...}`")?;
-    static NULL: Value = Value::Null;
-    let confirm = map.get("confirm").unwrap_or(&NULL);
     for key in ["when", "hint"] {
         if map.get(key).is_some_and(|v| !v.is_string()) {
             return Err(format!("`{key}` must be text"));
@@ -63,12 +60,12 @@ fn split_step(step: &Value) -> Result<(&str, &Value, &Value), String> {
     let mut kinds = map.iter().filter(|(k, _)| !MODIFIERS.contains(&k.as_str()));
     let (kind, body) = kinds.next().ok_or("a step needs a kind")?;
     if kinds.next().is_some() {
-        return Err("a step has exactly one kind (plus optional `confirm`, `when`, `hint`)".into());
+        return Err("a step has exactly one kind (plus optional `when`, `hint`)".into());
     }
     if !KINDS.contains(&kind.as_str()) {
         return Err(format!("unknown step kind `{kind}` ({})", KINDS.join(", ")));
     }
-    Ok((kind.as_str(), body, confirm))
+    Ok((kind.as_str(), body))
 }
 
 /// Whether a step's `when` holds: `a == b` or `a != b`, compared as text
@@ -527,13 +524,6 @@ fn step_failure(
 
 /// Extra fields for a step's record and, for read steps, the value read.
 type StepOutput = (Map<String, Value>, Option<(String, Value)>);
-
-pub struct RunOptions {
-    /// `--confirm <op_id>` for steps marked `confirm: true`.
-    pub confirm: Option<String>,
-    /// True for `iph batch`: a step's `confirm` may carry its own op_id.
-    pub batch: bool,
-}
 
 impl Session {
     pub(crate) async fn wait_for(&mut self, sel: &Selector, timeout: Duration) -> Res<Element> {
@@ -1052,13 +1042,7 @@ impl Session {
 
     /// Run one step. Returns extra fields for the step's record and, for read
     /// steps, the value read.
-    async fn run_step(
-        &mut self,
-        kind: &str,
-        body: &Value,
-        confirm_op: Option<&str>,
-        needs_confirm: bool,
-    ) -> Res<StepOutput> {
+    async fn run_step(&mut self, kind: &str, body: &Value) -> Res<StepOutput> {
         fn no_value(f: Map<String, Value>) -> Res<StepOutput> {
             Ok((f, None))
         }
@@ -1098,11 +1082,6 @@ impl Session {
                 no_value(fields! { "element": brief(&el) })
             }
             "tap" if body.is_array() => {
-                if needs_confirm {
-                    return Err(Fail::invalid(
-                        "a tap list cannot be confirmed; make the guarded tap a step of its own",
-                    ));
-                }
                 let r = Box::pin(self.tap_sequence(body.as_array().unwrap())).await?;
                 no_value(fields! {
                     "screen_changed": r.get("screen_changed").cloned().unwrap_or(Value::Null),
@@ -1121,15 +1100,11 @@ impl Session {
                     Some(m) if m.contains_key("selector") => m["selector"].clone(),
                     _ => body.clone(),
                 };
-                let r = Box::pin(self.tap_impl(
-                    TapArgs {
-                        target,
-                        long_ms: opt_u64(&options, "long_ms"),
-                        double: options.get("double").and_then(|v| v.as_bool()).unwrap_or(false),
-                        confirm: confirm_op.map(String::from),
-                    },
-                    needs_confirm,
-                ))
+                let r = Box::pin(self.cmd_tap(TapArgs {
+                    target,
+                    long_ms: opt_u64(&options, "long_ms"),
+                    double: options.get("double").and_then(|v| v.as_bool()).unwrap_or(false),
+                }))
                 .await?;
                 no_value(fields! {
                     "screen_changed": r.get("screen_changed").cloned().unwrap_or(Value::Null),
@@ -1208,12 +1183,7 @@ impl Session {
     }
 
     /// Run steps in order and stop at the first failure.
-    pub async fn run_steps(
-        &mut self,
-        steps: &[Value],
-        args: &Map<String, Value>,
-        opts: &RunOptions,
-    ) -> Res {
+    pub async fn run_steps(&mut self, steps: &[Value], args: &Map<String, Value>) -> Res {
         let mut records: Vec<Value> = Vec::new();
         let mut outputs = Map::new();
         // The app the last `launch` step brought to the front. Every later
@@ -1226,7 +1196,7 @@ impl Session {
             let index = i + 1;
             let started = Instant::now();
             let step = substitute(raw, args, today);
-            let (kind, body, confirm) = match split_step(&step) {
+            let (kind, body) = match split_step(&step) {
                 Ok(x) => x,
                 Err(e) => return Err(step_failure(index, raw, Fail::invalid(e), "?", &records, &outputs, 0)),
             };
@@ -1249,69 +1219,12 @@ impl Session {
                 return Err(step_failure(index, raw, f, kind, &records, &outputs, 0));
             }
             let hint = step.get("hint").and_then(|v| v.as_str()).map(String::from);
-            // `confirm: true` needs the run's op_id; in a batch a step may
-            // name its own.
-            let (needs_confirm, op_base): (bool, Option<String>) = match confirm {
-                Value::Bool(true) => (true, opts.confirm.clone()),
-                Value::String(s) if opts.batch => (true, Some(s.clone())),
-                Value::Null | Value::Bool(false) => (false, None),
-                _ => {
-                    return Err(step_failure(index, raw, Fail::invalid("`confirm` must be true"),
-                        kind,
-                        &records,
-                        &outputs,
-                        0,
-                    ));
-                }
-            };
-            let op_id = op_base.map(|base| if opts.batch { base } else { format!("{base}#{index}") });
-            // A tap claims its op_id inside the tap, after it knows the target.
-            // Other confirmed steps claim it here.
-            let mut claimed: Option<OpRecord> = None;
-            if needs_confirm && kind != "tap" {
-                let Some(id) = &op_id else {
-                    let f = Fail::blocked("confirm_required", "this step is marked confirm: true").hint(t(
-                        "사람에게 확인받은 뒤 `--confirm <op_id>`를 붙여 다시 실행하세요.",
-                        "Get a person's approval and run again with `--confirm <op_id>`.",
-                    ));
-                    return Err(step_failure(index, raw, f, kind, &records, &outputs, 0));
-                };
-                if !safety::valid_op_id(id) {
-                    return Err(step_failure(index, raw, Fail::invalid("bad op_id"), kind, &records, &outputs, 0));
-                }
-                let rec = OpRecord {
-                    op_id: id.clone(),
-                    at: safety::now_utc(),
-                    udid: self.udid.clone(),
-                    state: "started".into(),
-                    command: format!("step:{kind}"),
-                    target: None,
-                    matched_word: None,
-                };
-                match safety::begin(&rec) {
-                    Ok(Ok(())) => claimed = Some(rec),
-                    Ok(Err(earlier)) => {
-                        let f = Fail::blocked("op_already_used", format!("op_id \"{id}\" was already used"))
-                            .with("records", json!(earlier));
-                        return Err(step_failure(index, raw, f, kind, &records, &outputs, 0));
-                    }
-                    Err(e) => {
-                        return Err(step_failure(index, raw, Fail::not_sent("ops_log_failed", format!("{e:#}")),
-                            kind,
-                            &records,
-                            &outputs,
-                            0,
-                        ));
-                    }
-                }
-            }
             // Boxed: the step futures are large and would otherwise pile up on
             // the stack of whoever polls the run.
-            let result = Box::pin(self.run_step(kind, body, op_id.as_deref(), needs_confirm)).await;
+            let result = Box::pin(self.run_step(kind, body)).await;
             let ms = started.elapsed().as_millis() as u64;
             match result {
                 Ok((extra, value)) => {
-                    Session::finish_op(claimed, "done");
                     if kind == "launch" {
                         expected_pid = extra.get("pid").and_then(|v| v.as_i64());
                     }
@@ -1333,13 +1246,6 @@ impl Session {
                     }
                 }
                 Err(mut f) => {
-                    Session::finish_op(
-                        claimed,
-                        match f.outcome {
-                            Outcome::NotSent | Outcome::Blocked => "not_sent",
-                            _ => "unknown",
-                        },
-                    );
                     // Whoever wrote the steps knows what this one usually waits on.
                     if let Some(hint) = hint {
                         f.hint = Some(hint);
@@ -1364,7 +1270,8 @@ mod tests {
     fn rejects_bad_steps() {
         assert!(split_step(&json!({"fly": "away"})).unwrap_err().contains("unknown step kind"));
         assert!(split_step(&json!({"tap": "a", "type": "b"})).unwrap_err().contains("exactly one kind"));
-        assert!(split_step(&json!({"tap": "a", "confirm": true, "hint": "look"})).is_ok());
+        assert!(split_step(&json!({"tap": "a", "hint": "look"})).is_ok());
+        assert!(split_step(&json!({"tap": "a", "confirm": true})).is_err());
     }
 
     #[test]

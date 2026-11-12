@@ -1,9 +1,8 @@
 //! The exit code of `iph batch` and `iph script` follows the outcome, as the
 //! README's table says: a caller that only looks at the exit code must not
-//! take a blocked or unsent run for a success. No phone is involved: the runs
-//! are refused before anything goes to one (an app outside `only_apps`, a step
-//! or script that cannot run), on a made-up udid with its own daemon and
-//! folders.
+//! take an unsent run for a success. No phone is involved: the runs are
+//! refused before anything goes to one (a step or script that cannot run), on
+//! a made-up udid with its own daemon and folders.
 
 use std::{
     path::{Path, PathBuf},
@@ -26,7 +25,7 @@ impl Sandbox {
         std::fs::create_dir_all(dir.join("config")).unwrap();
         std::fs::write(
             dir.join("config/config.toml"),
-            format!("udid = \"{NO_SUCH_PHONE}\"\n[safety]\nonly_apps = [\"com.apple.Preferences\"]\ndnd = false\n"),
+            format!("udid = \"{NO_SUCH_PHONE}\"\n"),
         )
         .unwrap();
         Sandbox { dir }
@@ -68,14 +67,6 @@ fn path(p: &Path) -> &str {
 #[test]
 fn batch_and_script_exit_codes_follow_the_outcome() {
     let s = Sandbox::new();
-
-    let blocked = s.file("blocked.json", r#"[{"launch": "com.apple.mobilesafari"}]"#);
-    let (code, v) = s.iph(&["batch", path(&blocked)]);
-    assert_eq!((code, v["outcome"].as_str()), (3, Some("blocked")), "{v}");
-
-    let blocked = s.file("blocked.js", r#"launch("com.apple.mobilesafari")"#);
-    let (code, v) = s.iph(&["script", path(&blocked)]);
-    assert_eq!((code, v["outcome"].as_str()), (3, Some("blocked")), "{v}");
 
     let unsent = s.file("unsent.json", r#"[{"fly": "away"}]"#);
     let (code, v) = s.iph(&["batch", path(&unsent)]);

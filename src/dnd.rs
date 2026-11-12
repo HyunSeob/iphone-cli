@@ -1,11 +1,10 @@
-//! Do Not Disturb around the automation.
+//! `iph dnd`: Do Not Disturb on the phone.
 //!
 //! A notification banner drops over the top of the screen and takes the tap
 //! meant for whatever is under it. The accessibility tree of the app in front
 //! does not show it, so it cannot be seen coming (2026-11-10: a banner took a
-//! tap on a back button and opened another app). So before the first input
-//! iph switches the phone to Do Not Disturb, and puts back the Focus that was
-//! on once the work is over.
+//! tap on a back button and opened another app). `iph dnd on` keeps banners
+//! away while iph works, and `iph dnd off` puts back the Focus that was on.
 //!
 //! No service on the phone offers this. iph does what a person does: pull
 //! Control Center down, hold the Focus control, pick the mode from the list,
@@ -15,13 +14,12 @@
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     actions::{AFTER_DRAG, AFTER_TAP},
     ax::tree::{BuildOptions, Rect, Screen},
-    config::SafetyConfig,
+    config::DndConfig,
     device::{
         ax::trace,
         input::{Motion, normalize},
@@ -31,7 +29,7 @@ use crate::{
     i18n::t,
     paths,
     reply::{Fail, Res},
-    safety::now_utc,
+    clock::now_utc,
 };
 
 /// Label of the Focus control in Control Center, by phone language.
@@ -46,27 +44,6 @@ const AFTER_HOME: Duration = Duration::from_millis(500);
 const BETWEEN_HOME: Duration = Duration::from_millis(600);
 /// How long to keep reading for the screen an input should bring up.
 const WAIT: Duration = Duration::from_secs(5);
-/// The whole switch, when run on iph's own initiative.
-const LIMIT: Duration = Duration::from_secs(50);
-/// Looking for a Control Center left open, after the limit ran out.
-const TIDY_LIMIT: Duration = Duration::from_secs(25);
-/// After a failed attempt to put the earlier Focus back, wait this long.
-const RETRY_RESTORE: Duration = Duration::from_secs(120);
-/// Commands that send input, and so are worth going quiet for.
-const INPUT_COMMANDS: [&str; 8] = [
-    "tap", "swipe", "scroll", "type", "key", "button", "launch", "batch",
-];
-/// Failures that say the phone cannot be reached at all. The command that
-/// follows reports them itself; they are not counted against Do Not Disturb.
-const NOT_ABOUT_FOCUS: [&str; 6] = [
-    "tunnel_failed",
-    "ax_unavailable",
-    "ax_timeout",
-    "input_unavailable",
-    "service_unavailable",
-    "no_screen_size",
-];
-
 fn nfc(s: &str) -> String {
     s.nfc().collect()
 }
@@ -84,10 +61,10 @@ pub struct Labels {
 }
 
 impl Labels {
-    pub fn new(config: &SafetyConfig) -> Self {
+    pub fn new(config: &DndConfig) -> Self {
         let mut control: Vec<String> = CONTROL_LABELS.iter().map(|s| s.to_string()).collect();
-        control.extend(config.dnd_control.as_deref().map(nfc));
-        let mode = match &config.dnd_focus {
+        control.extend(config.control.as_deref().map(nfc));
+        let mode = match &config.focus {
             Some(name) => vec![nfc(name)],
             None => MODE_LABELS.iter().map(|s| s.to_string()).collect(),
         };
@@ -199,8 +176,8 @@ pub fn reached(rows: &[Row], labels: &Labels, want: &Want) -> bool {
     }
 }
 
-/// What iph replaced with Do Not Disturb and has yet to put back. Kept in a
-/// file so that a daemon that dies leaves the next one able to undo it.
+/// What `iph dnd on` replaced with Do Not Disturb, for `iph dnd off` to put
+/// back. Kept in a file so that it outlives the daemon.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
     /// The Focus that was on, if any.
@@ -234,16 +211,11 @@ impl Record {
 #[derive(Debug, Default)]
 pub struct State {
     pub record: Option<Record>,
-    /// Nothing more to do before the next input: Do Not Disturb is on, or
-    /// turning it on failed twice and is not tried again.
-    settled: bool,
-    failures: u8,
-    retry_restore_at: Option<Instant>,
 }
 
 impl State {
     pub fn load(udid: &str) -> Self {
-        Self { record: Record::load(udid), ..Default::default() }
+        Self { record: Record::load(udid) }
     }
 }
 
@@ -275,15 +247,15 @@ pub struct DndArgs {
 
 fn no_control() -> Fail {
     Fail::unknown("control_center_unavailable", "Control Center did not show a Focus control").hint(t(
-        "제어 센터 첫 페이지에 '집중 모드' 항목이 있어야 하고, 앱을 쓰는 중에도 제어 센터가 열려야 합니다. 폰 언어가 한국어 · 영어가 아니면 config.toml의 [safety] dnd_control에 그 항목의 이름을 적으세요. 이 기능을 끄려면 [safety] dnd = false.",
-        "Control Center's first page must hold the Focus control, and Control Center must open while an app is in front. For a phone in a language other than Korean or English, put the control's label in [safety] dnd_control in config.toml. [safety] dnd = false turns this off.",
+        "제어 센터 첫 페이지에 '집중 모드' 항목이 있어야 하고, 앱을 쓰는 중에도 제어 센터가 열려야 합니다. 폰 언어가 한국어 · 영어가 아니면 config.toml의 [dnd] control에 그 항목의 이름을 적으세요.",
+        "Control Center's first page must hold the Focus control, and Control Center must open while an app is in front. For a phone in a language other than Korean or English, put the control's label in [dnd] control in config.toml.",
     ))
 }
 
 fn no_list() -> Fail {
     Fail::unknown("focus_list_unavailable", "the list of Focus modes did not show Do Not Disturb").hint(t(
-        "폰에 보이는 방해금지 모드의 이름을 config.toml의 [safety] dnd_focus에 적으세요.",
-        "Put the name the phone shows for Do Not Disturb in [safety] dnd_focus in config.toml.",
+        "폰에 보이는 방해금지 모드의 이름을 config.toml의 [dnd] focus에 적으세요.",
+        "Put the name the phone shows for Do Not Disturb in [dnd] focus in config.toml.",
     ))
 }
 
@@ -405,13 +377,12 @@ impl Session {
     }
 
     /// Open Control Center, bring Focus to what `want` asks for, and close
-    /// it again. This is iph's own errand in the system's panel, so
-    /// `only_apps` and the guarded words do not apply to it.
+    /// it again.
     ///
     /// A failure carries `control_center: "may still be open"` when the
     /// panel could not be seen closed afterwards.
     pub(crate) async fn focus_switch(&mut self, want: Want) -> Res<Switch> {
-        let labels = Labels::new(&self.config.safety);
+        let labels = Labels::new(&self.config.dnd);
         let (_, mut start) = self.screen(Fresh::Force, false, BuildOptions::default()).await?;
         if start.width <= 0.0 || start.height <= 0.0 {
             return Err(Fail::not_sent("no_screen_size", "the reading has no application frame"));
@@ -539,131 +510,11 @@ impl Session {
         Ok(Switch { before: active, after, changed, app_changed })
     }
 
-    /// After a switch that was cut short: close Control Center if it is up.
-    async fn dnd_tidy(&mut self) -> Res<()> {
-        let labels = Labels::new(&self.config.safety);
-        let (screen, seen) = self.dnd_look(Duration::ZERO, &labels).await?;
-        let start = screen.clone();
-        self.dnd_close(&start, false, &labels, Some((screen, seen))).await?;
-        self.invalidate_readings();
-        Ok(())
-    }
-
-    /// `focus_switch` within `LIMIT`. Past the limit the connections are
-    /// dropped and Control Center is looked for once more, to close it.
-    async fn focus_switch_bounded(&mut self, want: Want) -> Res<Switch> {
-        if let Ok(result) = tokio::time::timeout(LIMIT, Box::pin(self.focus_switch(want))).await {
-            return result;
-        }
-        // Whatever was in flight is abandoned with its connections.
-        self.reset();
-        let fail = Fail::unknown("timeout", format!("no result within {} s", LIMIT.as_secs()));
-        match tokio::time::timeout(TIDY_LIMIT, Box::pin(self.dnd_tidy())).await {
-            Ok(Ok(())) => Err(fail),
-            _ => {
-                self.reset();
-                Err(fail.with("control_center", "may still be open"))
-            }
-        }
-    }
-
-    /// Before a command that sends input: see that Do Not Disturb is on.
-    /// `Ok` carries what to report with the command's result, if anything;
-    /// not getting Do Not Disturb on does not stop the command. `Err` does:
-    /// Control Center may be lying over the app, and input must not go there.
-    pub async fn dnd_before(&mut self, cmd: &str) -> Res<Option<Value>> {
-        if !self.config.safety.dnd || self.dnd.settled || !INPUT_COMMANDS.contains(&cmd) {
-            return Ok(None);
-        }
-        let began = Instant::now();
-        let outcome = self.focus_switch_bounded(Want::Quiet).await;
-        let elapsed = began.elapsed().as_millis() as u64;
-        let fail = match outcome {
-            Ok(switch) => {
-                self.dnd.settled = true;
-                self.dnd.failures = 0;
-                let mut report = json!({ "on": true, "changed": switch.changed, "elapsed_ms": elapsed });
-                if switch.changed {
-                    report["previous"] = json!(switch.before);
-                }
-                if switch.app_changed {
-                    report["app_changed"] = json!(true);
-                }
-                return Ok(Some(report));
-            }
-            Err(f) if f.extra.contains_key("control_center") => {
-                return Err(Fail::unknown(
-                    "control_center_open",
-                    format!("turning Do Not Disturb on failed ({}: {}) and Control Center may still be open", f.code, f.message),
-                )
-                .hint(t(
-                    "`iph read`로 화면을 확인하세요. 제어 센터가 열려 있으면 `iph dnd status`가 닫습니다. 이 명령은 보내지 않았습니다.",
-                    "Check the screen with `iph read`. If Control Center is open, `iph dnd status` closes it. This command was not sent.",
-                )));
-            }
-            Err(f) if NOT_ABOUT_FOCUS.contains(&f.code.as_str()) => return Ok(None),
-            Err(f) => f,
-        };
-        self.dnd.failures += 1;
-        if self.dnd.failures >= 2 {
-            self.dnd.settled = true;
-        }
-        let mut report = json!({
-            "on": false,
-            "code": fail.code,
-            "message": fail.message,
-            "elapsed_ms": elapsed,
-        });
-        if let Some(hint) = fail.hint {
-            report["hint"] = json!(hint);
-        }
-        Ok(Some(report))
-    }
-
-    /// Put back what iph replaced with Do Not Disturb. `None` when there is
-    /// nothing of iph's to undo.
-    pub async fn dnd_restore(&mut self) -> Option<Value> {
-        let record = self.dnd.record.clone()?;
-        let fail = match self.focus_switch_bounded(Want::Back(record.previous.clone())).await {
-            Ok(switch) => {
-                Record::clear(&self.udid);
-                self.dnd = State::default();
-                return Some(json!({ "restored": true, "changed": switch.changed, "focus": switch.after }));
-            }
-            Err(f) => f,
-        };
-        self.dnd.retry_restore_at = Some(Instant::now() + RETRY_RESTORE);
-        Some(json!({
-            "restored": false,
-            "code": fail.code,
-            "message": fail.message,
-            "hint": t(
-                "폰이 방해금지 모드로 남아 있을 수 있습니다. `iph dnd off`를 실행하거나 폰의 제어 센터에서 직접 끄세요.",
-                "The phone may still be in Do Not Disturb. Run `iph dnd off` or turn it off in the phone's Control Center.",
-            ),
-        }))
-    }
-
-    /// Housekeeping: put the earlier Focus back once no command has come for
-    /// `dnd_idle_secs`.
-    pub async fn dnd_restore_if_idle(&mut self, idle: Duration) -> Option<Value> {
-        let limit = self.config.safety.dnd_idle_secs;
-        if limit == 0 || idle < Duration::from_secs(limit) || self.dnd.record.is_none() {
-            return None;
-        }
-        if self.dnd.retry_restore_at.is_some_and(|at| Instant::now() < at) {
-            return None;
-        }
-        self.dnd_restore().await
-    }
-
     pub async fn cmd_dnd(&mut self, args: DndArgs) -> Res {
-        let labels = Labels::new(&self.config.safety);
+        let labels = Labels::new(&self.config.dnd);
         match args.action.as_str() {
             "on" => {
                 let switch = self.focus_switch(Want::Quiet).await?;
-                self.dnd.settled = true;
-                self.dnd.failures = 0;
                 Ok(fields! {
                     "on": true,
                     "changed": switch.changed,
@@ -686,7 +537,6 @@ impl Session {
                     "focus": switch.before,
                     "set_by_iph": self.dnd.record.is_some(),
                     "previous": self.dnd.record.as_ref().and_then(|r| r.previous.clone()),
-                    "auto": self.config.safety.dnd,
                 })
             }
             other => Err(Fail::invalid(format!("unknown action `{other}` (on, off, status)"))),
@@ -697,9 +547,10 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
 
     fn labels() -> Labels {
-        Labels::new(&SafetyConfig::default())
+        Labels::new(&DndConfig::default())
     }
 
     fn button(label: &str, value: Option<&str>, selected: bool, frame: [f64; 4]) -> Value {
@@ -823,7 +674,7 @@ mod tests {
 
     #[test]
     fn another_focus_can_stand_in_for_do_not_disturb() {
-        let l = Labels::new(&SafetyConfig { dnd_focus: Some("독서".into()), ..Default::default() });
+        let l = Labels::new(&DndConfig { focus: Some("독서".into()), ..Default::default() });
         let View::List { rows } = view(&list(Some("업무")), &l) else { panic!("not a list") };
         assert_eq!(pick(&rows, &l, &Want::Quiet).unwrap().label, "독서");
         assert!(l.is_mode("독서") && !l.is_mode("방해금지 모드"));

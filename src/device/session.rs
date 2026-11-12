@@ -27,7 +27,6 @@ use crate::{
     },
     i18n::t,
     reply::{Fail, Res},
-    safety::Guard,
 };
 
 const APP_SERVICE: &str = "com.apple.coredevice.appservice";
@@ -102,7 +101,6 @@ pub(crate) fn ax_stall(empty: u64, unparsed: u64) -> Option<AxStall> {
 pub struct Session {
     pub udid: String,
     pub config: Config,
-    pub guard: Guard,
     pub tunnel: Option<Tunnel>,
     pub ax: Option<AxSub>,
     pub input: Option<InputSession>,
@@ -124,8 +122,6 @@ pub struct Session {
     /// Readings that arrived before this moment no longer describe the
     /// screen (something changed it after they were taken).
     stale_before: Option<Instant>,
-    /// pid → bundle id of processes seen in front (None = not an installed app).
-    bundles: std::collections::HashMap<i64, Option<String>>,
     /// Counts tunnel (re)connections, for `iph doctor` and logs.
     pub connects: u64,
     /// How often, and when last, the phone's accessibility daemon was ended
@@ -194,12 +190,10 @@ async fn bounded<T, E: std::fmt::Debug>(
 
 impl Session {
     pub fn new(udid: String, config: Config) -> Self {
-        let guard = Guard::new(&config.safety);
         let dnd = crate::dnd::State::load(&udid);
         Self {
             udid,
             config,
-            guard,
             tunnel: None,
             ax: None,
             input: None,
@@ -210,7 +204,6 @@ impl Session {
             apps: None,
             screen_size: None,
             stale_before: None,
-            bundles: std::collections::HashMap::new(),
             connects: 0,
             ax_restarts: 0,
             ax_restarted_at: None,
@@ -459,7 +452,7 @@ impl Session {
                         Ok(pid) => {
                             eprintln!(
                                 "[{}] the phone's accessibility daemon {how} for {waited} s; ended it (pid {pid}) so the phone starts a new one",
-                                crate::safety::now_utc()
+                                crate::clock::now_utc()
                             );
                             self.ax_restarted_at = Some(Instant::now());
                             self.ax_restarts += 1;
@@ -471,7 +464,7 @@ impl Session {
                         Err(e) => {
                             eprintln!(
                                 "[{}] the phone's accessibility daemon {how} for {waited} s and could not be restarted: {e}",
-                                crate::safety::now_utc()
+                                crate::clock::now_utc()
                             );
                             why_not = "ending it failed";
                         }
@@ -639,7 +632,7 @@ impl Session {
             self.drop_input();
             if attempt == 0 && untouched {
                 crate::device::ax::trace(|| format!("gesture not sent ({e:#}); trying once on a new session"));
-                eprintln!("[{}] input connection was closed ({e:#}); sending again on a new session", crate::safety::now_utc());
+                eprintln!("[{}] input connection was closed ({e:#}); sending again on a new session", crate::clock::now_utc());
                 continue;
             }
             return Err(Fail::unknown("input_failed", format!("{e:#}")).hint(t(
@@ -748,72 +741,6 @@ impl Session {
             self.apps = Some(apps);
         }
         Ok(self.apps.clone().unwrap_or_default())
-    }
-
-    /// Bundle id of the app running as `pid`, if it is an installed app.
-    pub async fn bundle_for_pid(&mut self, pid: i64) -> Option<String> {
-        if let Some(known) = self.bundles.get(&pid) {
-            return known.clone();
-        }
-        let mut svc = self.app_service().await.ok()?;
-        let processes = tokio::time::timeout(Duration::from_secs(10), svc.list_processes())
-            .await
-            .ok()?
-            .ok()?;
-        let exe = processes
-            .iter()
-            .find(|p| p.pid as i64 == pid)
-            .and_then(|p| p.executable_url.as_ref())
-            .map(|u| plain_path(&u.relative))?;
-        let apps = self.list_apps(false).await.ok()?;
-        let found = apps
-            .iter()
-            .filter(|a| exe.starts_with(&format!("{}/", plain_path(&a.path))))
-            .max_by_key(|a| a.path.len())
-            .map(|a| a.bundle_identifier.clone());
-        self.bundles.insert(pid, found.clone());
-        found
-    }
-
-    /// Refuse input when `only_apps` is set and something else is in front.
-    pub async fn check_front_allowed(&mut self, screen: &Screen) -> Res<()> {
-        if self.config.safety.only_apps.is_empty() {
-            return Ok(());
-        }
-        let allowed = self.config.safety.only_apps.clone();
-        for app in &screen.apps {
-            let bundle = self.bundle_for_pid(app.pid).await;
-            if !bundle.as_ref().is_some_and(|b| allowed.contains(b)) {
-                return Err(Fail::blocked(
-                    "app_not_allowed",
-                    format!(
-                        "the app in front ({}) is not in safety.only_apps",
-                        bundle.clone().or_else(|| app.name.clone()).unwrap_or_else(|| "unknown".into())
-                    ),
-                )
-                .hint(t(
-                    "config.toml의 [safety] only_apps에 있는 앱만 조작합니다. `iph launch <허용된 앱>`으로 돌아가거나 목록을 고치세요.",
-                    "Only apps listed in [safety] only_apps in config.toml are operated. Go back with `iph launch <allowed app>` or change the list.",
-                ))
-                .with("front_app", serde_json::json!({ "name": app.name, "bundle_id": bundle, "pid": app.pid })));
-            }
-        }
-        if screen.apps.is_empty() {
-            return Err(Fail::blocked("app_not_allowed", "cannot tell which app is in front"));
-        }
-        Ok(())
-    }
-
-    /// Refuse to launch an app outside `only_apps`.
-    pub fn check_launch_allowed(&self, bundle: &str) -> Res<()> {
-        let allowed = &self.config.safety.only_apps;
-        if allowed.is_empty() || allowed.iter().any(|b| b == bundle) {
-            return Ok(());
-        }
-        Err(Fail::blocked(
-            "app_not_allowed",
-            format!("{bundle} is not in safety.only_apps"),
-        ))
     }
 
     pub async fn screenshot_png(&mut self) -> Res<Vec<u8>> {

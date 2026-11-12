@@ -8,20 +8,13 @@
 //!
 //! The engine is QuickJS. A script has no files, no network and no
 //! processes: only the functions set up below. It runs on a thread of its
-//! own, and every call crosses over to the daemon's task, so the safety
-//! guard and everything else apply to it exactly as to a command typed at
-//! the shell.
+//! own, and every call crosses over to the daemon's task, where it runs
+//! exactly as a command typed at the shell.
 //!
-//! What a script cannot do, by construction:
-//! - confirm a guarded tap on its own. It may only mark a call
-//!   `{confirm: true}`; the op_id comes from the person who started the run
-//!   (`--confirm <op_id>`), and each marked call spends one. One id, one
-//!   press: a script cannot press more guarded things than ids were given.
-//! - go on after a call whose input may or may not have reached the phone.
-//!   The run ends there, with `outcome: "unknown"`.
+//! A script cannot go on after a call whose input may or may not have
+//! reached the phone. The run ends there, with `outcome: "unknown"`.
 
 use std::{
-    collections::VecDeque,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -40,7 +33,6 @@ use crate::{
     i18n::t,
     paths,
     reply::{Fail, Outcome, Res, envelope},
-    safety::{self, OpRecord},
     selector::Selector,
 };
 
@@ -196,12 +188,6 @@ pub struct Limits {
 /// The phone side of a run.
 #[allow(async_fn_in_trait)]
 pub trait ScriptHost {
-    /// What has to happen before a call and must not be cut short by the
-    /// script's time limit. `Some` is the call's result when the call is not
-    /// to be made after all.
-    async fn before(&mut self, _cmd: &str) -> Option<Value> {
-        None
-    }
     /// Run one call and give back the object the command would print.
     async fn call(&mut self, cmd: &str, args: Value) -> Value;
     /// True once the run must not go on.
@@ -395,21 +381,13 @@ pub async fn run<H: ScriptHost>(host: &mut H, code: &str, args: &Map<String, Val
         let Some(call) = next else { break };
         calls += 1;
         let args = serde_json::from_str(&call.args).unwrap_or_else(|_| json!({}));
-        let reply = match host.before(&call.cmd).await {
-            Some(refused) => refused.to_string(),
-            // Time ran out while getting ready: the call is not made.
-            None if tokio::time::Instant::now() >= deadline => {
+        let reply = match tokio::time::timeout_at(deadline, host.call(&call.cmd, args)).await {
+            Ok(result) => result.to_string(),
+            Err(_) => {
+                host.cut_off(&call.cmd);
                 stopped = Some("timeout");
                 STOPPED.to_string()
             }
-            None => match tokio::time::timeout_at(deadline, host.call(&call.cmd, args)).await {
-                Ok(result) => result.to_string(),
-                Err(_) => {
-                    host.cut_off(&call.cmd);
-                    stopped = Some("timeout");
-                    STOPPED.to_string()
-                }
-            },
         };
         if stopped.is_none() && host.must_stop() {
             stopped = Some("unknown_outcome");
@@ -461,21 +439,11 @@ const NEEDS_APP: [&str; 8] = ["tap", "swipe", "scroll", "type", "key", "button",
 #[derive(Debug)]
 pub struct Prepared {
     pub args: Value,
-    /// The op_id this call spends, when the script marked it `confirm: true`
-    /// and the person who started the run had one left to give.
-    pub confirm: Option<String>,
-    /// The call was marked `confirm: true`: it needs an op_id even when the
-    /// safety guard would not ask for one.
-    pub marked: bool,
     pub hint: Option<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct RunState {
-    /// Op_ids from whoever started the run (`--confirm`), not yet spent.
-    confirms: VecDeque<String>,
-    /// How many of them marked calls have taken.
-    pub confirms_spent: u32,
     /// Calls that sent input, or may have.
     pub inputs_sent: u32,
     /// The app the last `launch` brought to the front.
@@ -485,44 +453,13 @@ pub struct RunState {
 }
 
 impl RunState {
-    pub fn new(confirms: Vec<String>) -> Self {
-        Self { confirms: confirms.into(), ..Default::default() }
-    }
-
     /// Apply the run's rules to one call's arguments.
-    ///
-    /// `confirm` is the point: a script may write `confirm: true` and nothing
-    /// else. An op_id in its place is refused, whatever it is and wherever
-    /// the script got it, because an id only counts when a person passed it
-    /// to the run. A marked call takes the next id the person gave; when
-    /// they are used up it goes on without one and is refused further down.
     pub fn prepare(&mut self, cmd: &str, args: Value) -> Res<Prepared> {
         let Value::Object(mut map) = args else {
             return Err(Fail::invalid(format!("`{cmd}` takes an object of arguments")));
         };
         let hint = map.remove("hint").and_then(|v| v.as_str().map(String::from));
-        let marked = match map.remove("confirm") {
-            None | Some(Value::Null) | Some(Value::Bool(false)) => false,
-            Some(Value::Bool(true)) => true,
-            Some(_) => {
-                return Err(Fail::blocked(
-                    "confirm_not_allowed",
-                    "a script cannot supply an op_id; write `confirm: true` and let the person running it pass --confirm <op_id>",
-                )
-                .hint(t(
-                    "확인은 사람이 `iph run … --confirm <op_id>`로 줄 때만 유효합니다. 스크립트에는 `confirm: true`만 적으세요.",
-                    "A confirmation only counts when a person passes it: `iph run … --confirm <op_id>`. In the script write `confirm: true` and nothing more.",
-                )));
-            }
-        };
-        if marked && !INPUTS.contains(&cmd) {
-            return Err(Fail::invalid(format!("`confirm: true` has no meaning on `{cmd}`")));
-        }
-        let confirm = if marked { self.confirms.pop_front() } else { None };
-        if confirm.is_some() {
-            self.confirms_spent += 1;
-        }
-        Ok(Prepared { args: Value::Object(map), confirm, marked, hint })
+        Ok(Prepared { args: Value::Object(map), hint })
     }
 
     /// Take note of how a call ended.
@@ -567,11 +504,10 @@ fn script_line(stack: Option<&str>) -> Option<u64> {
 pub fn finish(ended: Ended, state: &RunState) -> Res {
     let Ended { end, mut outputs, logs, calls, lines } = ended;
     let sent = state.inputs_sent;
-    // The run's outcome. A call that was refused is `blocked`; anything else
-    // that stops a run after input has gone out is `unknown`, because running
-    // the script again would send that input again.
+    // The run's outcome. Anything that stops a run after input has gone out
+    // is `unknown`, because running the script again would send that input
+    // again.
     let outcome_of = |call: Option<&Value>| match call.and_then(|c| c["outcome"].as_str()) {
-        Some("blocked") => Outcome::Blocked,
         Some("unknown") => Outcome::Unknown,
         _ if sent > 0 => Outcome::Unknown,
         _ => Outcome::NotSent,
@@ -587,19 +523,13 @@ pub fn finish(ended: Ended, state: &RunState) -> Res {
         f = f
             .with("failed_call", json!({ "cmd": cmd, "line": line, "outcome": result["outcome"] }))
             .with("reason", json!({ "code": reason["code"], "message": reason["message"] }));
-        // What the failed call had to say (candidates, the guarded element …).
+        // What the failed call had to say (candidates, the screen …).
         if let Some(extra) = result.as_object() {
             for (k, v) in extra {
                 if !matches!(k.as_str(), "ok" | "outcome" | "error" | "elapsed_ms") {
                     f.extra.entry(k.clone()).or_insert(v.clone());
                 }
             }
-        }
-        if reason["code"] == "confirm_required" && state.confirms_spent > 0 {
-            f = f.with("confirms_spent", state.confirms_spent).hint(t(
-                "이 실행에 준 op_id는 앞선 호출이 이미 썼습니다. op_id 하나는 한 번만 누릅니다. 사람에게 확인받은 뒤 누를 것마다 `--confirm <op_id>`를 하나씩 주세요.",
-                "The op_ids given to this run were spent by earlier calls. One op_id presses once: get a person's approval and pass one `--confirm <op_id>` for each press.",
-            ));
         }
         f
     };
@@ -665,41 +595,10 @@ pub fn finish(ended: Ended, state: &RunState) -> Res {
 struct PhoneHost<'a> {
     session: &'a mut Session,
     state: RunState,
-    /// What turning Do Not Disturb on had to report, for the run's result.
-    dnd: Option<Value>,
 }
 
 impl PhoneHost<'_> {
-    /// Claim the op_id of a marked call that is not a tap (a tap claims its
-    /// own once it knows what it is about to press).
-    fn claim(&self, cmd: &str, confirm: Option<&str>, marked: bool) -> Res<Option<OpRecord>> {
-        if !marked {
-            return Ok(None);
-        }
-        let Some(id) = confirm else {
-            return Err(Fail::blocked("confirm_required", "this call is marked `confirm: true`").hint(t(
-                "사람에게 확인받은 뒤 `--confirm <op_id>`를 붙여 다시 실행하세요.",
-                "Get a person's approval and run again with `--confirm <op_id>`.",
-            )));
-        };
-        let rec = OpRecord {
-            op_id: id.to_string(),
-            at: safety::now_utc(),
-            udid: self.session.udid.clone(),
-            state: "started".into(),
-            command: format!("script:{cmd}"),
-            target: None,
-            matched_word: None,
-        };
-        match safety::begin(&rec) {
-            Ok(Ok(())) => Ok(Some(rec)),
-            Ok(Err(earlier)) => Err(Fail::blocked("op_already_used", format!("op_id \"{id}\" was already used"))
-                .with("records", json!(earlier))),
-            Err(e) => Err(Fail::not_sent("ops_log_failed", format!("{e:#}"))),
-        }
-    }
-
-    async fn tap(&mut self, args: Value, confirm: Option<String>, marked: bool) -> Res {
+    async fn tap(&mut self, args: Value) -> Res {
         let s = &mut *self.session;
         let Value::Object(mut map) = args else {
             return Err(Fail::invalid("tap takes a target"));
@@ -710,11 +609,6 @@ impl PhoneHost<'_> {
         let settle = map.remove("settle").and_then(|v| v.as_bool()).unwrap_or(true);
         let target = map.get("target").cloned().unwrap_or(Value::Null);
         if let Some(list) = target.as_array() {
-            if marked {
-                return Err(Fail::invalid(
-                    "a tap list cannot be confirmed; make the guarded tap a call of its own",
-                ));
-            }
             return Box::pin(s.tap_sequence(list)).await;
         }
         if let Target::Selector(sel) = parse_target(&target)? {
@@ -725,14 +619,11 @@ impl PhoneHost<'_> {
                 Box::pin(s.settle_target(&sel)).await?;
             }
         }
-        let mut tap: TapArgs = parse_args(&Value::Object(map))?;
-        // Only what the person gave the run, and only on a marked call. A tap
-        // on a guarded label that the script did not mark stays refused.
-        tap.confirm = confirm;
-        Box::pin(s.tap_impl(tap, marked)).await
+        let tap: TapArgs = parse_args(&Value::Object(map))?;
+        Box::pin(s.cmd_tap(tap)).await
     }
 
-    async fn dispatch(&mut self, cmd: &str, args: Value, confirm: Option<String>, marked: bool) -> Res {
+    async fn dispatch(&mut self, cmd: &str, args: Value) -> Res {
         if NEEDS_APP.contains(&cmd)
             && let Some(f) = self.session.unexpected_app(self.state.expected_pid)
         {
@@ -743,23 +634,17 @@ impl PhoneHost<'_> {
             "find" => Box::pin(self.session.cmd_find(parse_args(&args)?)).await,
             "apps" => self.session.cmd_apps().await,
             "launch" => {
-                let claimed = self.claim(cmd, confirm.as_deref(), marked)?;
-                let result = Box::pin(self.session.cmd_launch(parse_args(&args)?)).await.and_then(|r| {
-                    if r.get("foreground").and_then(|v| v.as_bool()) != Some(true) {
-                        return Err(Fail::unknown("launch_not_verified", "the app was launched but is not in front"));
-                    }
-                    Ok(r)
-                });
-                Session::finish_op(claimed, op_state(&result));
-                let r = result?;
+                let r = Box::pin(self.session.cmd_launch(parse_args(&args)?)).await?;
+                if r.get("foreground").and_then(|v| v.as_bool()) != Some(true) {
+                    return Err(Fail::unknown("launch_not_verified", "the app was launched but is not in front"));
+                }
                 self.state.expected_pid = r.get("pid").and_then(|v| v.as_i64());
                 Ok(r)
             }
-            "tap" => self.tap(args, confirm, marked).await,
+            "tap" => self.tap(args).await,
             "swipe" | "scroll" | "type" | "key" | "button" | "read_list" => {
-                let claimed = self.claim(cmd, confirm.as_deref(), marked)?;
                 let s = &mut *self.session;
-                let result = match cmd {
+                match cmd {
                     "swipe" => Box::pin(s.cmd_swipe(parse_args(&args)?)).await,
                     "scroll" => Box::pin(s.cmd_scroll(parse_args(&args)?)).await,
                     "type" => Box::pin(s.cmd_type(parse_args(&args)?)).await,
@@ -769,9 +654,7 @@ impl PhoneHost<'_> {
                         let count = rows.as_array().map(|a| a.len()).unwrap_or(0);
                         fields! { "rows": rows, "count": count, "scrolls": info["scrolls"], "ended": info["ended"] }
                     }),
-                };
-                Session::finish_op(claimed, op_state(&result));
-                result
+                }
             }
             "wait_for" => {
                 let selector = args.get("selector").cloned().unwrap_or(Value::Null);
@@ -791,46 +674,12 @@ impl PhoneHost<'_> {
     }
 }
 
-/// What to write in the operation record for a claimed call that ended so.
-fn op_state(result: &Res) -> &'static str {
-    match result {
-        Ok(_) => "done",
-        Err(f) if matches!(f.outcome, Outcome::NotSent | Outcome::Blocked) => "not_sent",
-        Err(_) => "unknown",
-    }
-}
-
 impl ScriptHost for PhoneHost<'_> {
-    /// Do Not Disturb goes on before the first input, as it does for a
-    /// command typed at the shell; a script that only reads leaves the
-    /// phone's Focus alone. It is done here, outside the script's time limit:
-    /// cut off half way, it would leave Control Center open over the app
-    /// (2026-11-11, with a 6 s limit).
-    async fn before(&mut self, cmd: &str) -> Option<Value> {
-        if !INPUTS.contains(&cmd) {
-            return None;
-        }
-        let started = Instant::now();
-        // Asked as "tap": any input command will do.
-        match Box::pin(self.session.dnd_before("tap")).await {
-            Ok(report) => {
-                self.dnd = self.dnd.take().or(report);
-                None
-            }
-            // Control Center may be over the app: the call stays unsent.
-            Err(f) => {
-                let value = envelope(Err(f), started);
-                self.state.note(cmd, &value);
-                Some(value)
-            }
-        }
-    }
-
     async fn call(&mut self, cmd: &str, args: Value) -> Value {
         let started = Instant::now();
         let result = match self.state.prepare(cmd, args) {
-            Ok(Prepared { args, confirm, marked, hint }) => {
-                Box::pin(self.dispatch(cmd, args, confirm, marked)).await.map_err(|mut f| {
+            Ok(Prepared { args, hint }) => {
+                Box::pin(self.dispatch(cmd, args)).await.map_err(|mut f| {
                     // Whoever wrote the script knows what this call waits on.
                     if let Some(hint) = hint {
                         f.hint = Some(hint);
@@ -858,30 +707,10 @@ impl ScriptHost for PhoneHost<'_> {
     }
 }
 
-/// The op_ids a request carries in `confirm`: none, one, or a list.
-pub fn confirm_ids(v: Option<&Value>) -> Res<Vec<String>> {
-    let ids: Vec<String> = match v {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::String(id)) => vec![id.clone()],
-        Some(Value::Array(list)) => list
-            .iter()
-            .map(|id| id.as_str().map(String::from).ok_or_else(|| Fail::invalid("`confirm` takes op_ids (strings)")))
-            .collect::<Res<_>>()?,
-        Some(_) => return Err(Fail::invalid("`confirm` takes an op_id or a list of them")),
-    };
-    if ids.iter().any(|id| !safety::valid_op_id(id)) {
-        return Err(Fail::invalid("op_id must be 1-128 characters of letters, digits and -_.:#"));
-    }
-    if ids.iter().enumerate().any(|(i, id)| ids[..i].contains(id)) {
-        return Err(Fail::invalid("the same op_id was given twice; each one presses once"));
-    }
-    Ok(ids)
-}
-
 /// The request for the resident process: the code travels with it, so a
 /// saved script or a file is read by whoever asks, not by the daemon.
-pub fn request(code: &str, args: &Map<String, Value>, confirm: &[String], saved: Option<(&str, &str)>) -> Value {
-    let mut req = json!({ "code": code, "args": args, "confirm": confirm });
+pub fn request(code: &str, args: &Map<String, Value>, saved: Option<(&str, &str)>) -> Value {
+    let mut req = json!({ "code": code, "args": args });
     if let Some((name, source)) = saved {
         req["script"] = json!(name);
         req["source"] = json!(source);
@@ -896,33 +725,22 @@ impl Session {
         Some(Screen::build(&dump, BuildOptions::default()).summary(12))
     }
 
-    pub async fn cmd_script(&mut self, code: &str, args: &Map<String, Value>, confirms: Vec<String>) -> Res {
+    pub async fn cmd_script(&mut self, code: &str, args: &Map<String, Value>) -> Res {
         let limits = Limits {
             timeout: Duration::from_secs(self.config.script.timeout_secs.clamp(1, MAX_TIMEOUT_SECS)),
             memory: (self.config.script.memory_mb.clamp(8, 1024) as usize) << 20,
         };
-        let mut host = PhoneHost { session: self, state: RunState::new(confirms), dnd: None };
+        let mut host = PhoneHost { session: self, state: RunState::default() };
         let ended = run(&mut host, code, args, &limits).await;
-        let PhoneHost { session, state, dnd } = host;
-        match finish(ended, &state) {
-            Ok(mut out) => {
-                if let Some(dnd) = dnd {
-                    out.insert("dnd".into(), dnd);
-                }
-                Ok(out)
+        let PhoneHost { session, state } = host;
+        finish(ended, &state).map_err(|mut f| {
+            if !f.extra.contains_key("screen_summary")
+                && let Some(seen) = session.last_seen()
+            {
+                f = f.with("screen_summary", seen);
             }
-            Err(mut f) => {
-                if !f.extra.contains_key("screen_summary")
-                    && let Some(seen) = session.last_seen()
-                {
-                    f = f.with("screen_summary", seen);
-                }
-                Err(match dnd {
-                    Some(dnd) => f.with("dnd", dnd),
-                    None => f,
-                })
-            }
-        }
+            f
+        })
     }
 
     /// Serve a `script` request (see [`request`]).
@@ -933,12 +751,11 @@ impl Session {
             .ok_or_else(|| Fail::invalid("script needs `code`"))?;
         let empty = Map::new();
         let args = req.get("args").and_then(|v| v.as_object()).unwrap_or(&empty);
-        let confirms = confirm_ids(req.get("confirm"))?;
         let saved: Vec<(&str, Value)> = ["script", "source"]
             .into_iter()
             .filter_map(|k| req.get(k).filter(|v| v.is_string()).map(|v| (k, v.clone())))
             .collect();
-        match Box::pin(self.cmd_script(code, args, confirms)).await {
+        match Box::pin(self.cmd_script(code, args)).await {
             Ok(mut out) => {
                 out.extend(saved.into_iter().map(|(k, v)| (k.to_string(), v)));
                 Ok(out)
@@ -956,38 +773,24 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         state: RunState,
-        asked: Vec<(String, Value, Option<String>)>,
+        asked: Vec<(String, Value)>,
         /// cmd → the result to give instead of plain success.
         answers: std::collections::HashMap<String, Value>,
         delay: Option<Duration>,
-        /// How long getting ready for a call takes, and how often it finished.
-        getting_ready: Option<Duration>,
-        got_ready: u32,
     }
 
     impl ScriptHost for Fake {
-        async fn before(&mut self, _cmd: &str) -> Option<Value> {
-            if let Some(d) = self.getting_ready {
-                tokio::time::sleep(d).await;
-                self.got_ready += 1;
-            }
-            None
-        }
         async fn call(&mut self, cmd: &str, args: Value) -> Value {
             if let Some(d) = self.delay {
                 tokio::time::sleep(d).await;
             }
             let value = match self.state.prepare(cmd, args) {
                 Ok(p) => {
-                    self.asked.push((cmd.to_string(), p.args, p.confirm.clone()));
-                    if p.marked && p.confirm.is_none() {
-                        json!({"ok": false, "outcome": "blocked", "error": {"code": "confirm_required", "message": "marked"}})
-                    } else {
-                        self.answers
-                            .get(cmd)
-                            .cloned()
-                            .unwrap_or_else(|| json!({"ok": true, "outcome": "done", "cmd": cmd}))
-                    }
+                    self.asked.push((cmd.to_string(), p.args));
+                    self.answers
+                        .get(cmd)
+                        .cloned()
+                        .unwrap_or_else(|| json!({"ok": true, "outcome": "done", "cmd": cmd}))
                 }
                 Err(f) => envelope(Err(f), Instant::now()),
             };
@@ -1052,7 +855,7 @@ mod tests {
         "#;
         let (res, _) = go(&mut fake, code, json!({}), limits());
         res.unwrap();
-        let asked: Vec<(&str, &Value)> = fake.asked.iter().map(|(c, a, _)| (c.as_str(), a)).collect();
+        let asked: Vec<(&str, &Value)> = fake.asked.iter().map(|(c, a)| (c.as_str(), a)).collect();
         assert_eq!(asked[0], ("tap", &json!({"target": "일반"})));
         assert_eq!(asked[1], ("tap", &json!({"long_ms": 300, "target": {"label": "정보", "role": "button"}})));
         assert_eq!(asked[2], ("scroll", &json!({"until": "개발자", "max": 5, "direction": "down"})));
@@ -1144,19 +947,6 @@ mod tests {
     }
 
     #[test]
-    fn getting_ready_for_a_call_is_never_cut_short() {
-        // Longer than the whole script may run: it still finishes (half-done,
-        // it would leave Control Center open), and then the call is not made.
-        let mut fake = Fake { getting_ready: Some(Duration::from_millis(700)), ..Default::default() };
-        let short = Limits { timeout: Duration::from_millis(300), memory: 32 << 20 };
-        let (res, _) = go(&mut fake, "tap('a'); tap('b')", json!({}), short);
-        let f = res.unwrap_err();
-        assert_eq!((f.code.as_str(), f.outcome), ("script_timeout", Outcome::NotSent));
-        assert_eq!(fake.got_ready, 1);
-        assert!(fake.asked.is_empty(), "no tap went out after the time was up");
-    }
-
-    #[test]
     fn a_script_that_eats_memory_is_stopped() {
         let small = Limits { timeout: Duration::from_secs(20), memory: 8 << 20 };
         let code = "const all = []; while (true) { all.push(new Array(100000).fill('x'.repeat(20))) }";
@@ -1185,73 +975,6 @@ mod tests {
             limits(),
         );
         assert_ne!(res.map(|o| o["outputs"]["result"].clone()).unwrap_or(json!("refused")), json!("loaded"));
-    }
-
-    #[test]
-    fn a_script_cannot_supply_an_op_id() {
-        // No --confirm on the run. The script makes ids up, or takes one from
-        // what a blocked call told it: all refused before reaching the phone.
-        let mut fake = Fake::default();
-        let code = r#"
-            const tries = [];
-            for (const id of ["made-up-1", 1, {id: "x"}, ["x"]]) {
-                try { tap("결제하기", {confirm: id}) } catch (e) { tries.push(e.code) }
-            }
-            let blocked;
-            try { tap("결제하기", {confirm: true}) } catch (e) { blocked = e }
-            try { tap("결제하기", {confirm: (blocked.result.op_id || blocked.result.matched_word || "from-result")}) }
-            catch (e) { tries.push(e.code) }
-            return { tries, blocked: blocked.code, outcome: blocked.outcome };
-        "#;
-        let (res, _) = go(&mut fake, code, json!({}), limits());
-        let out = res.unwrap();
-        assert_eq!(out["outputs"]["tries"], json!(vec!["confirm_not_allowed"; 5]));
-        assert_eq!(out["outputs"]["blocked"], "confirm_required");
-        assert_eq!(out["outputs"]["outcome"], "blocked");
-        // The one call that reached the phone carried no op_id.
-        assert_eq!(fake.asked.len(), 1);
-        assert_eq!(fake.asked[0].2, None);
-        assert_eq!(fake.state.inputs_sent, 0);
-    }
-
-    #[test]
-    fn each_marked_call_spends_one_op_id_the_person_gave() {
-        let ids = |list: &[&str]| RunState::new(list.iter().map(|s| s.to_string()).collect());
-        let mut fake = Fake { state: ids(&["pay-1", "pay-2"]), ..Default::default() };
-        let code = "tap('미리보기'); tap('결제하기', {confirm: true}); key('return', {confirm: true}); tap('닫기');";
-        let (res, _) = go(&mut fake, code, json!({}), limits());
-        res.unwrap();
-        let spent: Vec<Option<&str>> = fake.asked.iter().map(|(_, _, id)| id.as_deref()).collect();
-        assert_eq!(spent, [None, Some("pay-1"), Some("pay-2"), None]);
-        // `confirm` never travels on as an argument.
-        assert!(fake.asked.iter().all(|(_, args, _)| args.get("confirm").is_none()));
-
-        // One id, one press: a loop cannot stretch it.
-        let mut fake = Fake { state: ids(&["pay-3"]), ..Default::default() };
-        let code = "for (let i = 0; i < 3; i++) tap('결제하기', {confirm: true});";
-        let (res, _) = go(&mut fake, code, json!({}), limits());
-        let f = res.unwrap_err();
-        assert_eq!(f.outcome, Outcome::Blocked);
-        assert_eq!(f.extra["reason"]["code"], "confirm_required");
-        assert_eq!(f.extra["confirms_spent"], 1);
-        assert_eq!(f.extra["inputs_sent"], 1);
-        let spent: Vec<Option<&str>> = fake.asked.iter().map(|(_, _, id)| id.as_deref()).collect();
-        assert_eq!(spent, [Some("pay-3"), None]);
-
-        // On a call that sends nothing it is a mistake, not a confirmation.
-        let mut fake = Fake { state: ids(&["x"]), ..Default::default() };
-        let (res, _) = go(&mut fake, "read({confirm: true})", json!({}), limits());
-        assert_eq!(res.unwrap_err().extra["reason"]["code"], "invalid_argument");
-    }
-
-    #[test]
-    fn op_ids_come_as_one_or_a_list_and_never_twice() {
-        assert_eq!(confirm_ids(None).unwrap(), Vec::<String>::new());
-        assert_eq!(confirm_ids(Some(&json!("a-1"))).unwrap(), ["a-1"]);
-        assert_eq!(confirm_ids(Some(&json!(["a-1", "a-2"]))).unwrap(), ["a-1", "a-2"]);
-        for bad in [json!(["a-1", "a-1"]), json!("has space"), json!(true), json!([1])] {
-            assert_eq!(confirm_ids(Some(&bad)).unwrap_err().code, "invalid_argument", "{bad}");
-        }
     }
 
     #[test]
