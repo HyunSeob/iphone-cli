@@ -4,7 +4,7 @@ AI 에이전트가 **실제 아이폰**의 아무 앱이나 화면 요소(접근
 
 [Poki](https://github.com/JosssphZhou/poki)의 원리를 따라 만들었습니다. 코드는 가져오지 않았고, Poki 문서에 적힌 동작 원리와 직접 실험한 결과로 새로 썼습니다. 기기 통신은 [idevice](https://github.com/jkcoxson/idevice)(MIT)에 기대고 있습니다.
 
-English: [README.en.md](README.en.md)
+English: [README.md](README.md)
 
 ```console
 $ iph read --human
