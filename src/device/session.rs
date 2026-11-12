@@ -570,9 +570,10 @@ impl Session {
         if self.input.is_none() {
             self.sweep().await;
             // Keep a new session a little apart from the one before it.
-            // (Lost first gestures turned out to be the first report on a new
-            // connection, which `InputSession::open` now spends on a no-op;
-            // the gap stays as a margin. `IPH_REOPEN_GAP_MS` overrides it.)
+            // (Lost first gestures turned out to be touches sent before the
+            // phone had opened the session's devices, which
+            // `InputSession::open` now waits for; the gap stays as a margin.
+            // `IPH_REOPEN_GAP_MS` overrides it.)
             if let Some(closed) = self.input_closed_at {
                 let gap = std::env::var("IPH_REOPEN_GAP_MS")
                     .ok()

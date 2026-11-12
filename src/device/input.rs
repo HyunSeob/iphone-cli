@@ -34,13 +34,17 @@ use idevice::{
 /// What the controller says it supports. Xcode's device window sends 140.
 const CLIENT_SUPPORTED_FEATURES: u64 = 140;
 
-/// Time the phone needs to match its HID surfaces to a new media stream.
-/// Gestures sent sooner are dropped more often. With a new session for every
-/// command (2026-11-11, Settings, rounds of tap + edge swipe back, the swipe
-/// going out 60 ms after this wait): at 1 s 1 of 20 taps and 8 of 20 swipes
-/// were lost; at 2.5 s or more, 2 of 107 taps and 10 of 107 swipes. Longer
-/// (4 s) did no better, and the rest is not explained: see how-it-works §3.
-const WARMUP: Duration = Duration::from_millis(2500);
+/// Longest wait for the phone to make a new connection's HID devices.
+const DEVICES_READY: Duration = Duration::from_secs(5);
+/// Time between the phone having made its HID devices and the first touch.
+/// The phone makes a connection's devices one after another and the system
+/// then opens them; a touch that comes before the touchscreen is open is held
+/// and delivered with the rest all at once, too fast for an edge swipe
+/// (2026-11-12, dtuhidd's log). The Mac cannot see the opening, so this is
+/// measured: on battery over Wi-Fi with a new session for every command, 0 of
+/// 40 taps and 0 of 40 swipes back lost (it was 2.5 s and some 9% lost while
+/// every session made three connections). See how-it-works §3.
+const WARMUP: Duration = Duration::from_millis(300);
 /// Keep the touch connection quiet for this long after a release; closing or
 /// reusing it earlier makes the phone drop some taps. The wait happens before
 /// the next input (and before closing), not after each one, so the caller can
@@ -64,6 +68,17 @@ fn warmup() -> Duration {
         .and_then(|v| v.parse().ok())
         .map(Duration::from_millis)
         .unwrap_or(WARMUP)
+}
+
+/// Wait until the phone has made this connection's HID devices: when it
+/// answers the list of them. For the trace: when, or why not.
+async fn devices_ready<R: ReadWrite>(client: &mut UniversalHidServiceClient<R>) -> String {
+    let began = now_ms();
+    match tokio::time::timeout(DEVICES_READY, client.list_connected_services()).await {
+        Ok(Ok(_)) => format!("{} ms", now_ms().saturating_sub(began)),
+        Ok(Err(e)) => format!("error {e:?}"),
+        Err(_) => "timed out".to_string(),
+    }
 }
 
 fn now_ms() -> u64 {
@@ -158,11 +173,15 @@ pub struct InputSession {
     display: DisplayServiceClient<Box<dyn ReadWrite>>,
     hid: UniversalHidServiceClient<Box<dyn ReadWrite>>,
     /// A second connection for the keyboard, so its request/response traffic
-    /// stays off the touch connection.
-    keyboard: UniversalHidServiceClient<Box<dyn ReadWrite>>,
+    /// stays off the touch connection. Opened on the first key.
+    keyboard: Option<UniversalHidServiceClient<Box<dyn ReadWrite>>>,
     /// The temporary keyboard while it is registered.
     board: Option<MainKeyboardService>,
+    /// For the hardware buttons. Opened on the first button.
     indigo: Option<IndigoHidClient<Box<dyn ReadWrite>>>,
+    /// To open those two later.
+    adapter: AdapterHandle,
+    rsd: RsdHandshake,
     drain: Drain,
     pub started: Instant,
     last_release: Option<Instant>,
@@ -255,15 +274,14 @@ impl InputSession {
 
         let drain = Drain::start(streams);
 
-        // Connect the HID services first and only then wait, so the first
-        // real report does not go out the instant the connection came up.
+        // Only the touch connection now: every HID connection makes its own
+        // five devices on the phone (a touchscreen, a keyboard, buttons...),
+        // one after another, and a touch waits until the phone has opened
+        // them. The keyboard and the buttons connect when first used.
         let mut hid = UniversalHidServiceClient::connect_rsd(adapter, rsd)
             .await
             .map_err(|e| anyhow!("hid service: {e:?}"))?;
-        let keyboard = UniversalHidServiceClient::connect_rsd(adapter, rsd)
-            .await
-            .map_err(|e| anyhow!("hid service (keyboard): {e:?}"))?;
-        let indigo = IndigoHidClient::connect_rsd(adapter, rsd).await.ok();
+        let hid_ready = devices_ready(&mut hid).await;
         // A "finger up" with no finger down does nothing on the phone, but it
         // is a first report, and the first report on a new connection is
         // sometimes lost, taking a whole gesture with it. Measured with a new
@@ -290,7 +308,7 @@ impl InputSession {
                 })
                 .collect();
             format!(
-                "input: session open after {} ms, first audio/video packet at {}",
+                "input: session open after {} ms, devices ready at {hid_ready}, first audio/video packet at {}",
                 began.elapsed().as_millis(),
                 firsts.join(" / ")
             )
@@ -303,9 +321,11 @@ impl InputSession {
         Ok(Self {
             display,
             hid,
-            keyboard,
+            keyboard: None,
             board: None,
-            indigo,
+            indigo: None,
+            adapter: adapter.clone(),
+            rsd: rsd.clone(),
             drain,
             started: Instant::now(),
             last_release: None,
@@ -453,10 +473,20 @@ impl InputSession {
 
     /// Press and release a hardware button (HID usage page / usage).
     pub async fn button(&mut self, usage_page: u64, usage: u64, hold: Duration) -> Result<()> {
-        let indigo = self
-            .indigo
-            .as_mut()
-            .ok_or_else(|| anyhow!("indigo HID service unavailable"))?;
+        if self.indigo.is_none() {
+            let indigo = IndigoHidClient::connect_rsd(&mut self.adapter, &mut self.rsd)
+                .await
+                .map_err(|e| anyhow!("indigo HID service unavailable: {e:?}"))?;
+            self.indigo = Some(indigo);
+            // Its devices come after those already asked for, so the touch
+            // connection's answer comes once they are made too.
+            let ready = devices_ready(&mut self.hid).await;
+            tokio::time::sleep(WARMUP).await;
+            crate::device::ax::trace(|| format!("input: buttons connected, devices ready at {ready}"));
+        }
+        let Some(indigo) = self.indigo.as_mut() else {
+            unreachable!()
+        };
         indigo
             .send_button(usage_page, usage, ButtonState::Down)
             .await
@@ -478,9 +508,20 @@ impl InputSession {
         if self.board.is_some() {
             return Ok(());
         }
+        if self.keyboard.is_none() {
+            let mut keyboard = UniversalHidServiceClient::connect_rsd(&mut self.adapter, &mut self.rsd)
+                .await
+                .map_err(|e| anyhow!("hid service (keyboard): {e:?}"))?;
+            let ready = devices_ready(&mut keyboard).await;
+            tokio::time::sleep(WARMUP).await;
+            crate::device::ax::trace(|| format!("keyboard: connected, devices ready at {ready}"));
+            self.keyboard = Some(keyboard);
+        }
+        let Some(keyboard) = self.keyboard.as_mut() else {
+            unreachable!()
+        };
         crate::device::ax::trace(|| "keyboard: registering".into());
-        let board = self
-            .keyboard
+        let board = keyboard
             .create_main_keyboard()
             .await
             .map_err(|e| anyhow!("register keyboard: {e}"))?;
@@ -506,26 +547,25 @@ impl InputSession {
                 usage(*m)?;
             }
         }
-        let board = self
-            .board
-            .as_mut()
-            .ok_or_else(|| anyhow!("no keyboard attached"))?;
+        let (Some(board), Some(keyboard)) = (self.board.as_mut(), self.keyboard.as_mut()) else {
+            return Err(anyhow!("no keyboard attached"));
+        };
         for (key, modifiers) in combos {
             crate::device::ax::trace(|| format!("keyboard: combo {key:#x}"));
             for m in modifiers {
-                self.keyboard
+                keyboard
                     .main_keyboard_key_down(board, usage(*m)?)
                     .await
                     .map_err(|e| anyhow!("modifier down: {e}"))?;
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            self.keyboard
+            keyboard
                 .main_keyboard_key_down(board, usage(*key)?)
                 .await
                 .map_err(|e| anyhow!("key down: {e}"))?;
             tokio::time::sleep(Duration::from_millis(40)).await;
             // Everything up at once.
-            self.keyboard
+            keyboard
                 .set_main_keyboard_usages(board, std::iter::empty())
                 .await
                 .map_err(|e| anyhow!("key up: {e}"))?;
@@ -540,8 +580,11 @@ impl InputSession {
         let Some(mut board) = self.board.take() else {
             return Ok(());
         };
+        let Some(keyboard) = self.keyboard.as_mut() else {
+            return Ok(());
+        };
         crate::device::ax::trace(|| "keyboard: removing".into());
-        let removed = self.keyboard.remove_main_keyboard(&mut board).await;
+        let removed = keyboard.remove_main_keyboard(&mut board).await;
         crate::device::ax::trace(|| "keyboard: removed".into());
         removed.map_err(|e| anyhow!("remove keyboard: {e}"))
     }
