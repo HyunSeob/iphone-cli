@@ -212,6 +212,15 @@ impl Session {
     }
 
     /// Mark every reading taken so far as out of date.
+    /// Age of the latest reading, unless it predates `invalidate_readings`.
+    pub(crate) fn reading_age(&self) -> Option<Duration> {
+        let arrived = self.ax.as_ref()?.latest_arrival()?;
+        if self.stale_before.is_some_and(|limit| arrived < limit) {
+            return None;
+        }
+        Some(arrived.elapsed())
+    }
+
     pub fn invalidate_readings(&mut self) {
         self.stale_before = Some(Instant::now());
     }

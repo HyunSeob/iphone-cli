@@ -64,12 +64,14 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "iph_tap",
-            "Tap an element (selector) or a point (\"x,y\" in points). The result says whether the screen changed. \
+            "Tap an element (selector) or a point (\"x,y\" in points). Waits for the screen to change and hold still, \
+             then returns it (`elements`, as iph_read does) and whether it changed. \
              Never retry a tap whose outcome is \"unknown\".",
             json!({
                 "target": { "description": format!("A selector, or \"x,y\". {SELECTOR_DOC}"), "type": ["string", "object"] },
                 "long_ms": { "type": "integer", "description": "Hold this long instead of a short tap." },
                 "double": { "type": "boolean" },
+                "no_wait": { "type": "boolean", "description": "Read the screen once right after the tap instead of waiting for it to settle; the result then has no elements." },
             }),
             &["target"],
         ),
@@ -98,7 +100,7 @@ fn tools() -> Vec<Value> {
         tool(
             "iph_type",
             "Type text into the field that has the keyboard (tap the field first). Pasted through the clipboard, so Korean and emoji work; \
-             the user's clipboard is put back (not content copied in an app: see clipboard_note) and the field's value is checked.",
+             the user's clipboard is put back (not content copied in an app: see clipboard_note). What the field shows comes back as value; it is not judged, since apps format what is pasted.",
             json!({
                 "text": { "type": "string" },
                 "clear": { "type": "boolean", "description": "Replace what the field holds." },

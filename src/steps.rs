@@ -17,7 +17,10 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     actions::{self, ButtonArgs, KeyArgs, LaunchArgs, ScrollArgs, SwipeArgs, TapArgs, TypeArgs, brief},
-    ax::tree::{BuildOptions, Element, Screen},
+    ax::{
+        attrs,
+        tree::{BuildOptions, Element, Rect, Screen},
+    },
     device::session::{Fresh, Session, reuse},
     fields,
     i18n::t,
@@ -567,6 +570,9 @@ impl Session {
             }
         };
         let (_, screen) = self.screen(Fresh::MaxAge(reuse()), full, BuildOptions::default()).await?;
+        if self.held_still(sel, &screen).await {
+            return Ok(());
+        }
         let mut last = place(&screen);
         for _ in 0..4 {
             let (_, again) = self.screen(Fresh::Force, full, BuildOptions::default()).await?;
@@ -579,6 +585,38 @@ impl Session {
         // Still moving after four looks: the tap goes ahead on the last one,
         // as it would have without this check.
         Ok(())
+    }
+
+    /// Whether the one element `sel` finds on `screen` is still where that
+    /// reading put it, asked of the phone directly (tens of milliseconds where
+    /// a fresh reading takes over a second). A target on the move is asked
+    /// again until two answers agree. False sends `settle_target` to full
+    /// readings: no single match, no answer, or the element is gone.
+    async fn held_still(&mut self, sel: &Selector, screen: &Screen) -> bool {
+        let el = match dedupe_targets(sel.find(screen)).as_slice() {
+            [one] => (*one).clone(),
+            _ => return false,
+        };
+        let (Some(key), Some(frame)) = (el.key, el.frame) else { return false };
+        let round = |r: &Rect| (r.x.round() as i64, r.y.round() as i64, r.w.round() as i64, r.h.round() as i64);
+        let mut last = round(&frame);
+        for _ in 0..8 {
+            let Some(ax) = self.ax.as_mut() else { return false };
+            let now = ax
+                .ask(key, attrs::FRAME, Duration::from_secs(1))
+                .await
+                .and_then(|v| v.get("NS.rectval").and_then(|r| r.as_str()).and_then(Rect::parse));
+            let Some(now) = now.map(|r| round(&r)) else { return false };
+            if now.2 == 0 && now.3 == 0 {
+                return false;
+            }
+            if now == last {
+                return true;
+            }
+            last = now;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        false
     }
 
     /// `name` is what a batch files the value under; a script has no use for it.
@@ -1104,6 +1142,7 @@ impl Session {
                     target,
                     long_ms: opt_u64(&options, "long_ms"),
                     double: options.get("double").and_then(|v| v.as_bool()).unwrap_or(false),
+                    no_wait: options.get("no_wait").and_then(|v| v.as_bool()).unwrap_or(false),
                 }))
                 .await?;
                 no_value(fields! {
@@ -1622,6 +1661,7 @@ mod tests {
             pid: 1,
             on_screen: true,
             raw: None,
+            key: None,
         };
         assert_eq!(take(&el, "value").as_deref(), Some("27.0.1"));
         assert_eq!(take(&el, "label").as_deref(), Some("iOS 버전, 27.0.1"));

@@ -28,13 +28,18 @@ use idevice::{
 };
 use tokio::sync::{mpsc, watch};
 
-use crate::ax::dump::{Dump, DumpKind, Payload};
+use crate::ax::{
+    archive::Ka,
+    dump::{Answer, Dump, DumpKind, ObjKey, Payload},
+    request,
+};
 
 pub const SERVICE: &str = "com.apple.accessibility.axAuditDaemon.remoteAXService";
 /// The phone never answers a request sooner than this (about 1.1 s typical).
 pub const ANSWER_AT_LEAST: Duration = Duration::from_millis(700);
 const SUBSCRIBE: &str = "clientNeedsAccessibility:";
 const PUSH: &str = "processDataFromRemoteDevice:";
+const ASK: &str = "processDataFromHost:";
 
 #[derive(Default)]
 pub struct AxState {
@@ -59,10 +64,13 @@ pub struct AxState {
     /// Dumps that arrived without any element (seen during animations).
     pub empty: u64,
     pub closed: bool,
+    /// Answers to `ask`, newest last, until the asker takes them.
+    pub answers: std::collections::VecDeque<(Instant, Answer)>,
 }
 
 enum Cmd {
     Subscribe,
+    Ask(Vec<u8>),
 }
 
 /// `IPH_TRACE=1` logs every request and dump with a millisecond clock, to the
@@ -123,6 +131,15 @@ impl AxSub {
                                 break;
                             }
                         }
+                        Some(Cmd::Ask(bytes)) => {
+                            trace(|| "ax ask".into());
+                            let sent = dtx
+                                .call_method(0, Some(ASK), Some(vec![AuxValue::Array(bytes)]), false)
+                                .await;
+                            if sent.is_err() {
+                                break;
+                            }
+                        }
                         None => break,
                     },
                     msg = dtx.read_message(0) => {
@@ -150,6 +167,18 @@ impl AxSub {
                             Ok((Ok(Payload::Dump(dump)), _)) => dump,
                             Ok((Ok(Payload::Notification(n)), _)) => {
                                 trace(|| format!("ax notification {n} bytes={size}"));
+                                continue;
+                            }
+                            Ok((Ok(Payload::Answer(a)), _)) => {
+                                trace(|| format!("ax answer attribute={} bytes={size}", a.attribute));
+                                let mut s = task_state.lock().unwrap();
+                                s.answers.push_back((arrived, a));
+                                while s.answers.len() > 32 {
+                                    s.answers.pop_front();
+                                }
+                                drop(s);
+                                ticks += 1;
+                                let _ = changed_tx.send(ticks);
                                 continue;
                             }
                             Ok((Err(e), bytes)) => {
@@ -223,6 +252,35 @@ impl AxSub {
                     && let Some(d) = s.initial.clone() {
                         return Some((s.seq, d));
                     }
+                if s.closed {
+                    return None;
+                }
+            }
+            let left = deadline.checked_duration_since(Instant::now())?;
+            match tokio::time::timeout(left, self.changed.changed()).await {
+                Ok(Ok(())) => {}
+                _ => return None,
+            }
+        }
+    }
+
+    /// Ask for one attribute of one element. The phone answers in tens of
+    /// milliseconds and, unlike a dump, does not wait for the screen to be
+    /// still. `Some(Ka::Null)` means the element has no such attribute (or is
+    /// gone); `None` that no answer came within `timeout`.
+    pub async fn ask(&mut self, key: ObjKey, attribute: i64, timeout: Duration) -> Option<Ka> {
+        let asked = Instant::now();
+        self.cmd.send(Cmd::Ask(request::attribute(key, attribute))).ok()?;
+        let deadline = asked + timeout;
+        loop {
+            {
+                let mut s = self.state.lock().unwrap();
+                let hit = s.answers.iter().position(|(at, a)| {
+                    *at >= asked && a.attribute == attribute && a.key == Some(key)
+                });
+                if let Some(i) = hit {
+                    return s.answers.remove(i).map(|(_, a)| a.value);
+                }
                 if s.closed {
                     return None;
                 }

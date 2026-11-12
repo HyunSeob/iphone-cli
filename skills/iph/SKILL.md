@@ -17,10 +17,11 @@ This is a real phone with the user's accounts on it. A tap cannot be taken back,
 
 ## The loop: read, act, check
 
-1. **Read** before you act: `iph read` gives `elements[]` with `id`, `role`, `label`, `value`, `frame` (points), `enabled`. Only what is on screen, unless `--all`.
+1. **Read** before you act: `iph read` gives `elements[]` with `id`, `role`, `label`, `value`, `frame` (points), `enabled`. Only what is on screen, unless `--all`. What labels cannot tell you (what a photo shows) needs `iph screenshot -o /tmp/screen.png`, then look at the file: always PNG, about 1 s on a plain screen and 5 s on one full of photos, so take one only when the labels are not enough.
 2. **Act** on an element by what it says, not by coordinates: `iph tap "일반"`, `iph type "hello"`, `iph scroll down --until "개발자"`. Coordinates go stale the moment the screen moves; a label is found again each time.
 3. **Check** the result, because the phone never confirms that a touch arrived:
-   - `screen_changed: false` after a tap means nothing visible happened. Read the screen before deciding what next; do not tap again on the assumption that it was lost.
+   - A tap waits for the screen to change and hold still (up to 2.5 s for the change, 5 s in all), then returns that screen: `elements[]` as `iph read` gives them. Decide the next step from those; no `iph read` needs to follow. `--no-wait` (script and MCP: `no_wait: true`) reads once right after the tap and returns no elements, for taps that change nothing, such as a keypad.
+   - `screen_changed: false` after a tap means nothing visible happened within 2.5 s. Look at the returned elements before deciding what next; do not tap again on the assumption that it was lost.
    - `app_changed: true` means another app came to the front (a banner was hit, a link opened). Stop and tell the user.
 
 ## Outcomes
@@ -35,7 +36,7 @@ Frequent `error.code`s: `not_found` (`screen_summary.labels` shows what is on sc
 
 ## Do Not Disturb
 
-A notification banner drops over the top of the screen, is not in the element list, and takes the tap meant for what is under it. iph does not switch Focus by itself. For long work, turn Do Not Disturb on first with `iph dnd on` (MCP: `iph_dnd` with `"action": "on"`; 11 to 36 s, Control Center shows for a moment), and put the user's Focus back with `iph dnd off` when the work is done; until then the user misses notifications.
+A notification banner drops over the top of the screen, is not in the element list, and takes the tap meant for what is under it. iph does not switch Focus by itself, and you do not need to either: start the work without it. Only when a banner has taken a tap in this work, turn Do Not Disturb on with `iph dnd on` (MCP: `iph_dnd` with `"action": "on"`; 11 to 36 s, Control Center shows for a moment), and put the user's Focus back with `iph dnd off` when the work is done; until then the user misses notifications.
 
 ## Money, messages, orders
 
@@ -47,9 +48,9 @@ Answer with what was asked for. Do not copy readings of banking, messaging or ac
 
 ## One action, then one script, then a saved script
 
-A fresh reading takes 1 to 2 s and a checked tap about 2 s; that is the phone's pace, not something to retry around. What you can save is the model turn between steps. Work in this order:
+A fresh reading takes 1 to 2 s and a tap about 3 s with the screen it brings up; that is the phone's pace, not something to retry around. What you can save is the model turn between steps. Work in this order:
 
-1. **One action at a time** while the screen is new to you: `iph read`, one `iph tap`, read again. Note the labels you see; the script will use them.
+1. **One action at a time** while the screen is new to you: `iph read`, then one `iph tap` at a time, each returning the next screen. Note the labels you see; the script will use them.
 2. **One script** once you know the way: put the steps into a single `iph script -` call (MCP: `iph_script` with `code` and `args`). Loops, conditions and date arithmetic run inside that one call.
 3. **Save it** when the user will want the same thing again: write the code to `~/.config/iph/scripts/<name>.js`, first line a `// comment` that says what it does, and run it with `iph run <name> [--arg k=v]` (MCP: `iph_run`). `iph scripts` lists what exists; look there before writing a new one. Personal scripts live in that folder, not in a repository. Run a new script three times before calling it done: one that passes once can still break on a slow screen.
 
@@ -63,14 +64,14 @@ return { ios_version: readField({ selector: { label: "iOS 버전" }, take: "valu
 EOF
 ```
 
-The result: `outputs` (what the script returned), `logs`, `calls`, `inputs_sent`.
+The result: `outputs` (what the script returned), `logs`, `calls`, `inputs_sent`. A `tap()` returns the screen it brought up (`elements`), so end a script with `return tap(...)`, or with `return read()` after other commands, to see where it ended; an `iph read` after the script costs another turn.
 
 ### What a script can call
 
 A script is the body of a function, so `return` ends it. The commands are functions that take the same arguments and return the same result objects as the CLI:
 
 - `read(opts)`, `find(selector)`, `tap(target, opts)`, `swipe(direction | {from, to}, opts)`, `scroll(direction, {until, max})`, `type(text, {clear, submit})`, `key(name)`, `button(name)`, `launch(app, {restart})`, `apps()`. For example `read({ app: true }).elements`, `tap("일반").screen_changed`, `find("label~=업데이트").count`.
-- `tap(selector)` waits up to 5 s for the element and taps once it holds still (a screen that has just come up may still shift its rows); `{timeout_ms, settle: false}` change that. `tap([a, b, c])` presses several targets in a row without re-reading, for keypads.
+- `tap(selector)` waits up to 5 s for the element and taps once it holds still (a screen that has just come up may still shift its rows); `{timeout_ms, settle: false}` change that. Like the CLI it then waits for the screen to settle; `{no_wait: true}` skips that. `tap([a, b, c])` presses several targets in a row without re-reading, for keypads.
 - `waitFor(selector, {timeout_ms})` waits for an element (8 s by default) and sits out a system panel that covers the app for a moment.
 - `readField({selector, take, regex})` returns one text. `take`: `value` | `label` | `identifier` | `text`; `regex` keeps its first capture group.
 - `readList({row, columns, key, group, stop_below, max_scrolls})` scrolls a list and returns `{rows, scrolls, ended}` with each row once. `columns: {name: {take, regex}}`, or `{name: {value: "…"}}` for a constant. `group: {selector, regex, as}` gives each row the heading it stands under (a date line), and `stop_below: N` stops once a heading's number falls below N. `key: "column"` names the column that identifies a row; use it when rows change while the list is read (a clock, time left).
@@ -106,7 +107,7 @@ After `launch`, that app must stay in front; if another one comes up, the script
 
 ## Typing
 
-`iph type "글"` pastes into the field that has the keyboard, so tap the field first. `--clear` replaces the content, `--submit` presses Return. The result has `value` (what the field holds now) and `clipboard_restored`. When the user had copied something in an app, it cannot be put back (`clipboard_restored: false`, `clipboard_note`); tell the user. The on-screen keyboard disappears for a moment while typing; that is expected.
+`iph type "글"` pastes into the field that has the keyboard, so tap the field first. `--clear` replaces the content, `--submit` presses Return. The result has `value` (what the field shows now) and `clipboard_restored`. iph does not judge `value`: apps format, mask and correct what is pasted (`30000` shows as `₩ 30,000`), so you decide whether it is right. A `value` that is still what the field held before means the paste did not happen; before `--submit` sends something that matters, type without it, look at `value`, then `iph key return`. When the user had copied something in an app, it cannot be put back (`clipboard_restored: false`, `clipboard_note`); tell the user. The on-screen keyboard disappears for a moment while typing; that is expected.
 
 ## Commands at a glance
 

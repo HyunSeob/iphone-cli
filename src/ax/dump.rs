@@ -68,6 +68,17 @@ pub enum Payload {
     /// A short notice about one element (an announcement, a screen change)
     /// with the phone's notification number. Not a reading.
     Notification(i64),
+    /// The answer to one translator request (`request::attribute`).
+    Answer(Answer),
+}
+
+/// One attribute of one element, as the phone answered a request for it.
+#[derive(Debug, Clone)]
+pub struct Answer {
+    pub key: Option<ObjKey>,
+    pub attribute: i64,
+    /// `Ka::Null` when the element has no such attribute or no longer exists.
+    pub value: Ka,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +117,11 @@ impl Payload {
             if notification != 0 {
                 return Ok(Payload::Notification(notification));
             }
+            return Ok(Payload::Answer(Answer {
+                key: root.get("associatedTranslationObject").and_then(ObjKey::from_ka),
+                attribute: root.get("attribute").and_then(|a| a.as_i64()).unwrap_or(0),
+                value: result.clone(),
+            }));
         }
         Dump::from_response(result).map(Payload::Dump)
     }
@@ -116,6 +132,7 @@ impl Dump {
         match Payload::parse(bytes)? {
             Payload::Dump(d) => Ok(d),
             Payload::Notification(n) => bail!("payload is notification {n}, not a tree dump"),
+            Payload::Answer(_) => bail!("payload is a translator answer, not a tree dump"),
         }
     }
 
