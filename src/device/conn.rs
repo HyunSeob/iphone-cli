@@ -178,15 +178,27 @@ async fn step<T, E: std::fmt::Debug>(
     }
 }
 
+fn t0_stamp() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
+
 /// Open the userspace tunnel and read the RSD service list.
 pub async fn open_tunnel(udid: &str) -> Result<Tunnel> {
     let t0 = Instant::now();
     let route = route(udid).await?;
     let proxy = step("CoreDeviceProxy", CoreDeviceProxy::connect(&*route.provider)).await?;
     let rsd_port = proxy.tunnel_info().server_rsd_port;
-    let adapter = proxy
+    let mut adapter = proxy
         .create_software_tunnel()
         .map_err(|e| anyhow!("software tunnel: {e:?}"))?;
+    // `IPH_PCAP=<folder>`: every packet of this tunnel, for Wireshark. Holds
+    // whatever the phone sends, so only for a short look, then delete it.
+    if let Ok(dir) = std::env::var("IPH_PCAP") {
+        let path = std::path::Path::new(&dir).join(format!("tunnel-{}.pcap", t0_stamp()));
+        if let Err(e) = adapter.pcap(&path).await {
+            tracing::warn!("pcap {}: {e}", path.display());
+        }
+    }
     let mut adapter = adapter.to_async_handle();
     let stream = step("RSD connect", adapter.connect(rsd_port)).await?;
     let rsd = step("RSD handshake", RsdHandshake::new(stream)).await?;

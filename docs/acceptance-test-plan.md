@@ -95,7 +95,7 @@ export ACC=/Volumes/AppsBuilds/AppWork/iphone-cli/acceptance/20261111
 export IPH=$ACC/install/bin/iph                             # A1에서 만드는 바이너리
 export IPH_STATE_DIR=$ACC/state                             # 소켓 · 로그 · ops.jsonl을 시험용으로 분리
 export IPH_CONFIG_DIR=$ACC/cfg-night                        # 지난밤과 같은 허용 목록
-unset IPH_TRACE IPH_DUMP_DIR IPH_DEBUG                      # 화면 원본을 디스크에 남기는 스위치를 끈다
+unset IPH_TRACE IPH_DUMP_DIR IPH_DEBUG IPH_PCAP             # 화면 원본을 디스크에 남기는 스위치를 끈다
 [ "$IPH_UDID" = 00008130-001E219222F9001C ] || { echo "STOP: 대상 폰이 고정되지 않음"; exit 9; }
 mkdir -p $ACC/{state,out,cfg-night,cfg-idle0,mcp}
 printf 'udid = "%s"\n[safety]\nonly_apps = ["com.apple.Preferences", "com.apple.calculator", "com.apple.mobilenotes", "com.apple.mobiletimer"]\n' "$IPH_UDID" > $ACC/cfg-night/config.toml

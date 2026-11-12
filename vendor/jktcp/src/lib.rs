@@ -170,7 +170,7 @@ pub(crate) fn log_packet(file: &PcapLog, packet: &[u8]) {
         file.write_all(&(now.duration_since(UNIX_EPOCH).unwrap().as_secs() as u32).to_le_bytes())
             .await
             .unwrap();
-        let micros = now.duration_since(UNIX_EPOCH).unwrap().as_micros() % 1_000_000_000;
+        let micros = now.duration_since(UNIX_EPOCH).unwrap().subsec_micros();
         file.write_all(&(micros as u32).to_le_bytes())
             .await
             .unwrap();

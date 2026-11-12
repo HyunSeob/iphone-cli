@@ -313,8 +313,9 @@ iph mcp  ──┼─ unix socket ─ iph daemon ─ lockdown → CoreDeviceProx
 ```sh
 cargo test          # runs without a phone: parser (real Calculator dumps), selectors, safety guard, scripts
 IPH_TRACE=1 iph …   # logs request and dump times to ~/Library/Application Support/iph/<udid>.log
+IPH_PCAP=<dir> iph … # writes the tunnel's packets out for Wireshark; they hold screen contents, delete them after
 ```
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The media-session bring-up is adapted from an idevice example tool ([LICENSE.idevice](LICENSE.idevice)). `vendor/jktcp` is the tunnel's TCP stack, jktcp 0.1.8 (MIT), with two constants changed so that it waits longer before giving a connection up ([vendor/jktcp/LICENSE](vendor/jktcp/LICENSE)).
+MIT, see [LICENSE](LICENSE). The media-session bring-up is adapted from an idevice example tool ([LICENSE.idevice](LICENSE.idevice)). `vendor/jktcp` is the tunnel's TCP stack, jktcp 0.1.8 (MIT), with two constants changed so that it waits longer before giving a connection up, and the microseconds of its packet capture fixed ([vendor/jktcp/LICENSE](vendor/jktcp/LICENSE)).

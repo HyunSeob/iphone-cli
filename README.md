@@ -316,8 +316,9 @@ iph mcp  ──┼─ unix socket ─ iph daemon ─ lockdown → CoreDeviceProx
 ```sh
 cargo test          # 폰 없이 도는 시험: 파서(실제 계산기 화면 덤프), 셀렉터, 안전장치, 스크립트
 IPH_TRACE=1 iph …   # 상주 프로세스 로그에 요청 · 덤프 시각을 남김 (~/Library/Application Support/iph/<udid>.log)
+IPH_PCAP=<폴더> iph … # 터널의 패킷을 Wireshark용 파일로 남김. 화면 내용이 들어 있으니 다 보면 지울 것
 ```
 
 ## 라이선스
 
-MIT. [LICENSE](LICENSE). 미디어 세션 시작 부분은 idevice의 예제 도구를 고쳐 썼습니다 ([LICENSE.idevice](LICENSE.idevice)). `vendor/jktcp`는 터널의 TCP 스택 jktcp 0.1.8(MIT)에서 연결을 포기하기까지의 시간 상수 두 개만 늘린 사본입니다 ([vendor/jktcp/LICENSE](vendor/jktcp/LICENSE)).
+MIT. [LICENSE](LICENSE). 미디어 세션 시작 부분은 idevice의 예제 도구를 고쳐 썼습니다 ([LICENSE.idevice](LICENSE.idevice)). `vendor/jktcp`는 터널의 TCP 스택 jktcp 0.1.8(MIT)에서 연결을 포기하기까지의 시간 상수 두 개를 늘리고 패킷 기록의 마이크로초 값을 고친 사본입니다 ([vendor/jktcp/LICENSE](vendor/jktcp/LICENSE)).
