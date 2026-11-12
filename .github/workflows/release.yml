@@ -25,7 +25,9 @@ jobs:
           lipo -create -output dist/iph/iph \
             target/aarch64-apple-darwin/release/iph \
             target/x86_64-apple-darwin/release/iph
-          # lipo keeps each slice's ad-hoc signature; check it is still valid.
+          # The merged file comes out unsigned, and Apple silicon will not run
+          # unsigned code: sign every slice ad hoc.
+          codesign --force --sign - dist/iph/iph
           codesign --verify --verbose dist/iph/iph
           lipo -info dist/iph/iph
           dist/iph/iph --version
