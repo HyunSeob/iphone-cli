@@ -24,11 +24,11 @@ use anyhow::{Result, anyhow};
 use idevice::{
     dvt::{message::AuxValue, remote_server::RemoteServerClient},
     rsd::RsdHandshake,
-    tcp::handle::AdapterHandle,
 };
 use tokio::sync::{mpsc, watch};
 
 use crate::ax::dump::{Dump, DumpKind, Payload};
+use crate::tcp::handle::AdapterHandle;
 
 pub const SERVICE: &str = "com.apple.accessibility.axAuditDaemon.remoteAXService";
 /// The phone never answers a request sooner than this (about 1.1 s typical).

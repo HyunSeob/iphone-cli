@@ -1,17 +1,17 @@
-//! Thread-safe handle over a background-task [`crate::adapter::Adapter`].
+//! Thread-safe handle over a background-task [`crate::tcp::adapter::Adapter`].
 //!
 //! [`AdapterHandle`] spawns the adapter's I/O loop onto whatever async
 //! executor is current (tokio on native, `wasm_bindgen_futures::spawn_local`
 //! on `wasm32-unknown-unknown`) and communicates with it through tokio
 //! `mpsc` channels. The resulting [`StreamHandle`] is `Send + Sync + 'static`,
-//! enabling use cases that [`crate::stream::AdapterStream`] cannot support:
+//! enabling use cases that [`crate::tcp::stream::AdapterStream`] cannot support:
 //!
 //! - **Multiple concurrent connections** on the same adapter.
 //! - Passing a stream to a `spawn` call or storing it in an `Arc<Mutex<…>>`.
 //! - Storing the stream in a struct without a lifetime parameter.
 //! - FFI or any context that requires `'static` bounds.
 //!
-//! The trade-off versus [`crate::stream::AdapterStream`] is a small channel
+//! The trade-off versus [`crate::tcp::stream::AdapterStream`] is a small channel
 //! round-trip on every write, and the adapter runs in a dedicated background
 //! task rather than being driven directly by the caller.
 //!
@@ -31,19 +31,19 @@
 
 use std::{collections::HashMap, net::IpAddr, sync::Mutex, task::Poll};
 
-#[cfg(feature = "pcap")]
 use std::path::PathBuf;
 
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{mpsc, oneshot},
 };
 use tracing::trace;
 
-use crate::adapter::{ConnectionStatus, UdpDatagram};
-use crate::time::timeout;
+use crate::tcp::adapter::{ConnectionStatus, UdpDatagram};
+use crate::tcp::time::timeout;
 
+#[allow(clippy::type_complexity)]
 enum HandleMessage {
     /// Returns the host port
     ConnectToPort {
@@ -79,8 +79,7 @@ enum HandleMessage {
         data: Vec<u8>,
         res: oneshot::Sender<Result<(), std::io::Error>>,
     },
-    #[cfg(feature = "pcap")]
-    Pcap {
+        Pcap {
         path: PathBuf,
         res: oneshot::Sender<Result<(), std::io::Error>>,
     },
@@ -90,7 +89,7 @@ enum HandleMessage {
 /// Push newly received bytes to each connection's channel, and close the ones
 /// that died, passing any error other than a clean EOF on to the reader.
 async fn deliver(
-    adapter: &mut crate::adapter::Adapter,
+    adapter: &mut crate::tcp::adapter::Adapter,
     handles: &mut HashMap<u16, mpsc::UnboundedSender<Result<Vec<u8>, std::io::Error>>>,
 ) {
     let mut dead = Vec::new();
@@ -129,9 +128,9 @@ async fn deliver(
     }
 }
 
-/// A cloneable, thread-safe handle to a background [`crate::adapter::Adapter`] task.
+/// A cloneable, thread-safe handle to a background [`crate::tcp::adapter::Adapter`] task.
 ///
-/// Constructed via [`crate::adapter::Adapter::to_async_handle`]. Cheap to clone.
+/// Constructed via [`crate::tcp::adapter::Adapter::to_async_handle`]. Cheap to clone.
 /// Each clone shares the same channel sender to the background task.
 ///
 /// Drop all clones (or call [`AdapterHandle::close`]) to shut down the background task.
@@ -143,11 +142,11 @@ pub struct AdapterHandle {
 }
 
 impl AdapterHandle {
-    pub fn new(mut adapter: crate::adapter::Adapter) -> Self {
+    pub fn new(mut adapter: crate::tcp::adapter::Adapter) -> Self {
         let host_ip = adapter.host_ip();
         let peer_ip = adapter.peer_ip();
         let (tx, mut rx) = mpsc::unbounded_channel::<HandleMessage>();
-        crate::spawn(async move {
+        crate::tcp::spawn(async move {
             let mut handles: HashMap<u16, mpsc::UnboundedSender<Result<Vec<u8>, std::io::Error>>> =
                 HashMap::new();
             let mut udp_handles: HashMap<u16, mpsc::UnboundedSender<UdpDatagram>> = HashMap::new();
@@ -208,8 +207,7 @@ impl AdapterHandle {
                                         .await;
                                     res.send(r).ok();
                                 }
-                                #[cfg(feature = "pcap")]
-                                HandleMessage::Pcap {
+                                                                HandleMessage::Pcap {
                                     path,
                                     res
                                 } => {
@@ -249,7 +247,7 @@ impl AdapterHandle {
                         let _ = adapter.write_buffer_flush().await;
                     }
 
-                    _ = crate::time::sleep(std::time::Duration::from_millis(250)), if has_pending_work => {
+                    _ = crate::tcp::time::sleep(std::time::Duration::from_millis(250)), if has_pending_work => {
                         let _ = adapter.write_buffer_flush().await;
                     }
                 }
@@ -340,8 +338,7 @@ impl AdapterHandle {
         }
     }
 
-    #[cfg(feature = "pcap")]
-    pub async fn pcap(&mut self, path: impl Into<PathBuf>) -> Result<(), std::io::Error> {
+        pub async fn pcap(&mut self, path: impl Into<PathBuf>) -> Result<(), std::io::Error> {
         let (res_tx, res_rx) = oneshot::channel();
         let path: PathBuf = path.into();
 

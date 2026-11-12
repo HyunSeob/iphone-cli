@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::debug;
 
-use crate::PcapLog;
+use crate::tcp::PcapLog;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ProtocolNumber {
@@ -143,7 +143,7 @@ impl Ipv4Packet {
         reader.read_exact(&mut payload).await?;
         if let Some(log) = log {
             log_packet.extend_from_slice(&payload);
-            crate::log_packet(log, &log_packet);
+            crate::tcp::log_packet(log, &log_packet);
         }
 
         Ok(Self {
@@ -283,7 +283,7 @@ impl Ipv6Packet {
             let mut log_packet = Vec::new();
             log_packet.extend_from_slice(&packet[..40]);
             log_packet.extend_from_slice(&payload);
-            crate::log_packet(log, &log_packet);
+            crate::tcp::log_packet(log, &log_packet);
         }
 
         IpParseError::Ok {
@@ -356,7 +356,7 @@ impl Ipv6Packet {
         reader.read_exact(&mut payload).await?;
         if let Some(log) = log {
             log_packet.extend_from_slice(&payload);
-            crate::log_packet(log, &log_packet);
+            crate::tcp::log_packet(log, &log_packet);
         }
 
         Ok(Self {
@@ -847,7 +847,7 @@ mod tests {
         assert_eq!(got, 0xB861);
 
         let mut sum: u32 = 0;
-        for chunk in pkt.chunks_exact(2) {
+        for chunk in pkt.as_chunks::<2>().0 {
             sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
         }
         while sum >> 16 != 0 {

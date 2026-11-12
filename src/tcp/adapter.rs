@@ -4,9 +4,9 @@
 //! It is the entry point for both usage patterns exposed by this crate:
 //!
 //! - **Single-task use**:  keep the `Adapter` directly and open streams with
-//!   [`crate::stream::AdapterStream::connect`].
+//!   [`crate::tcp::stream::AdapterStream::connect`].
 //! - **Multi-task use**: call [`Adapter::to_async_handle`] to move the adapter
-//!   into a background task and obtain an [`crate::handle::AdapterHandle`] that
+//!   into a background task and obtain an [`crate::tcp::handle::AdapterHandle`] that
 //!   can be shared across threads.
 //!
 //! See the [crate-level documentation](crate) for a full comparison.
@@ -18,15 +18,14 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(feature = "pcap")]
 use std::path::Path;
 
-use crate::time::Instant;
+use crate::tcp::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, trace, warn};
 
-use crate::packets::{Ipv4Packet, Ipv6Packet, ProtocolNumber, TcpFlags, TcpPacket, UdpPacket};
-use crate::{PcapLog, ReadWrite, packets::IpParseError};
+use crate::tcp::packets::{Ipv4Packet, Ipv6Packet, ProtocolNumber, TcpFlags, TcpPacket, UdpPacket};
+use crate::tcp::{PcapLog, ReadWrite, packets::IpParseError};
 
 /// A received UDP datagram, addressed from `peer_ip:source_port` to the local
 /// `destination_port`. UDP is connectionless, so there is no socket state
@@ -149,7 +148,7 @@ fn seq_lte(a: u32, b: u32) -> bool {
 // Adapter
 // ---------------------------------------------------------------------------
 
-/// A userspace TCP stack backed by an arbitrary [`crate::ReadWrite`] transport.
+/// A userspace TCP stack backed by an arbitrary [`crate::tcp::ReadWrite`] transport.
 ///
 /// `Adapter` drives the TCP state machine: it sends and receives raw IPv4/IPv6
 /// packets over `peer`, maintains per-connection state, and implements
@@ -159,8 +158,8 @@ fn seq_lte(a: u32, b: u32) -> bool {
 ///
 /// 1. Construct with [`Adapter::new`], supplying the framed transport and the
 ///    local/remote IP addresses.
-/// 2. Open connections with [`crate::stream::AdapterStream::connect`] **or** call
-///    [`Adapter::to_async_handle`] to get a thread-safe [`crate::handle::AdapterHandle`].
+/// 2. Open connections with [`crate::tcp::stream::AdapterStream::connect`] **or** call
+///    [`Adapter::to_async_handle`] to get a thread-safe [`crate::tcp::handle::AdapterHandle`].
 /// 3. Optionally enable PCAP logging with [`Adapter::pcap`].
 ///
 /// See the [crate-level documentation](crate) for a full comparison of both
@@ -235,8 +234,8 @@ impl Adapter {
     }
 
     /// Wraps this adapter in a thread-safe handle.
-    pub fn to_async_handle(self) -> crate::handle::AdapterHandle {
-        crate::handle::AdapterHandle::new(self)
+    pub fn to_async_handle(self) -> crate::tcp::handle::AdapterHandle {
+        crate::tcp::handle::AdapterHandle::new(self)
     }
 
     // -----------------------------------------------------------------------
@@ -288,8 +287,7 @@ impl Adapter {
         Ok(host_port)
     }
 
-    #[cfg(feature = "pcap")]
-    pub async fn pcap(&mut self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        pub async fn pcap(&mut self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
         let mut file = tokio::fs::File::create(path).await?;
         file.write_all(&0xa1b2c3d4_u32.to_le_bytes()).await?;
         file.write_all(&2_u16.to_le_bytes()).await?;
@@ -523,7 +521,7 @@ impl Adapter {
         }
 
         // Reap connections that were dropped while we had the lock.
-        let dropped: Vec<u16> = self.dropped.drain(..).collect();
+        let dropped: Vec<u16> = std::mem::take(&mut self.dropped);
         for hp in dropped {
             if self.states.contains_key(&hp) {
                 self.close(hp).await.ok();
@@ -644,7 +642,7 @@ impl Adapter {
             }
             // Short timeout so retransmissions fire in the AdapterStream case
             // (the AdapterHandle has a 1ms tick that calls write_buffer_flush directly).
-            _ = crate::time::sleep(std::time::Duration::from_millis(500)) => {
+            _ = crate::tcp::time::sleep(std::time::Duration::from_millis(500)) => {
                 self.check_retransmissions().await
             }
         }
@@ -770,7 +768,7 @@ impl Adapter {
                         // Our SYN consumed one sequence number on our side.
                         state.seq = state.seq.wrapping_add(1);
                         state.status = ConnectionStatus::Connected;
-                        state.peer_wscale = crate::packets::parse_window_scale(&res.options);
+                        state.peer_wscale = crate::tcp::packets::parse_window_scale(&res.options);
                         let shift = state.peer_wscale.unwrap_or(0);
                         state.peer_window = (res.window_size as u32) << shift;
                         ack_me = Some(res.destination_port);
@@ -858,7 +856,7 @@ impl Adapter {
             ));
         };
         // Advertise window scaling so the peer can scale its window field.
-        let wscale = crate::packets::window_scale_option(OUR_WSCALE);
+        let wscale = crate::tcp::packets::window_scale_option(OUR_WSCALE);
         let tcp = TcpPacket::create(
             self.host_ip,
             self.peer_ip,
@@ -984,7 +982,7 @@ impl Adapter {
                     if let Some(pcap) = &self.pcap
                         && matches!(self.host_ip, IpAddr::V4(_))
                     {
-                        crate::log_packet(pcap, &self.read_buf[..bytes_consumed]);
+                        crate::tcp::log_packet(pcap, &self.read_buf[..bytes_consumed]);
                     }
 
                     self.read_buf
@@ -1045,7 +1043,7 @@ impl Adapter {
 
     fn log_packet(&self, packet: &[u8]) -> Result<(), std::io::Error> {
         if let Some(file) = &self.pcap {
-            crate::log_packet(file, packet);
+            crate::tcp::log_packet(file, packet);
         }
         Ok(())
     }
@@ -1074,7 +1072,7 @@ impl Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packets::{IpParseError, ProtocolNumber, TcpFlags, TcpPacket};
+    use crate::tcp::packets::{IpParseError, ProtocolNumber, TcpFlags, TcpPacket};
     use std::net::{IpAddr, Ipv6Addr};
     use std::pin::Pin;
     use std::task::{Context, Poll};
@@ -1168,7 +1166,7 @@ mod tests {
         payload: &[u8],
     ) -> Vec<u8> {
         let tcp = tcp_seg(dst_port, seq, ack_num, flags, payload);
-        crate::packets::Ipv6Packet::create(PEER_IP, HOST_IP, ProtocolNumber::Tcp, 255, &tcp)
+        crate::tcp::packets::Ipv6Packet::create(PEER_IP, HOST_IP, ProtocolNumber::Tcp, 255, &tcp)
     }
 
     /// Read one complete IPv6 packet the adapter wrote to the transport.
@@ -1180,7 +1178,7 @@ mod tests {
         reader.read_exact(&mut rest).await.unwrap();
         let mut full = hdr.to_vec();
         full.extend_from_slice(&rest);
-        let ip = match crate::packets::Ipv6Packet::parse(&full, &None) {
+        let ip = match crate::tcp::packets::Ipv6Packet::parse(&full, &None) {
             IpParseError::Ok { packet, .. } => packet,
             _ => panic!("not a valid IPv6 packet from adapter"),
         };
@@ -1454,7 +1452,7 @@ mod tests {
 
         assert!(syn.flags.syn, "first packet must be SYN");
         let shift =
-            crate::packets::parse_window_scale(&syn.options).expect("SYN should include WSopt");
+            crate::tcp::packets::parse_window_scale(&syn.options).expect("SYN should include WSopt");
         assert_eq!(shift, OUR_WSCALE, "advertised wscale should match constant");
     }
 
@@ -1484,7 +1482,7 @@ mod tests {
             let hp = syn.source_port;
 
             // SYN-ACK with WSopt and a tiny scaled window.
-            let wscale_opt = crate::packets::window_scale_option(peer_wscale);
+            let wscale_opt = crate::tcp::packets::window_scale_option(peer_wscale);
             let tcp = TcpPacket::create(
                 IpAddr::V6(PEER_IP),
                 IpAddr::V6(HOST_IP),
@@ -1501,7 +1499,7 @@ mod tests {
                 &wscale_opt,
                 &[],
             );
-            let ip = crate::packets::Ipv6Packet::create(
+            let ip = crate::tcp::packets::Ipv6Packet::create(
                 PEER_IP,
                 HOST_IP,
                 ProtocolNumber::Tcp,

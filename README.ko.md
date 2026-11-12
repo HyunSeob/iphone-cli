@@ -310,4 +310,4 @@ IPH_PCAP=<폴더> iph … # 터널의 패킷을 Wireshark용 파일로 남김. �
 
 ## 라이선스
 
-MIT. [LICENSE](LICENSE). 미디어 세션 시작 부분은 idevice의 예제 도구를 고쳐 썼습니다 ([LICENSE.idevice](LICENSE.idevice)). `vendor/jktcp`는 터널의 TCP 스택 jktcp 0.1.8(MIT)에서 연결을 포기하기까지의 시간 상수 두 개를 늘리고 패킷 기록의 마이크로초 값을 고친 사본입니다 ([vendor/jktcp/LICENSE](vendor/jktcp/LICENSE)).
+MIT. [LICENSE](LICENSE). 미디어 세션 시작 부분은 idevice의 예제 도구를 고쳐 썼습니다 ([LICENSE.idevice](LICENSE.idevice)). `src/tcp`는 터널의 TCP 스택으로, jktcp 0.1.8(MIT)을 가져와 연결을 포기하기까지의 시간 상수 두 개를 늘리고 패킷 기록의 마이크로초 값을 고친 것입니다 ([LICENSE.jktcp](LICENSE.jktcp)).

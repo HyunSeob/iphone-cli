@@ -1057,7 +1057,7 @@ impl Clipboard {
     /// Every call uses its own connection, so a late answer to one request
     /// cannot be taken for the answer to the next.
     async fn connect(
-        adapter: &idevice::tcp::handle::AdapterHandle,
+        adapter: &crate::tcp::handle::AdapterHandle,
         port: u16,
     ) -> Result<idevice::core_device::PasteboardServiceClient<Box<dyn idevice::ReadWrite>>, String> {
         use idevice::RsdService;
@@ -1073,7 +1073,7 @@ impl Clipboard {
 
     /// Look at the clipboard. Bytes come along only as promises, and only
     /// those the service holds itself are fetched.
-    async fn peek(adapter: &idevice::tcp::handle::AdapterHandle, port: u16) -> Peek {
+    async fn peek(adapter: &crate::tcp::handle::AdapterHandle, port: u16) -> Peek {
         use idevice::core_device::{DataInclusionPolicy, PasteboardPayload};
         let general = idevice::core_device::GENERAL_PASTEBOARD;
         let Ok(mut clip) = Self::connect(adapter, port).await else {
@@ -1127,7 +1127,7 @@ impl Clipboard {
         Peek::Unknown
     }
 
-    async fn set_text(adapter: &idevice::tcp::handle::AdapterHandle, port: u16, text: &str) -> Result<(), String> {
+    async fn set_text(adapter: &crate::tcp::handle::AdapterHandle, port: u16, text: &str) -> Result<(), String> {
         let mut clip = Self::connect(adapter, port).await?;
         let general = idevice::core_device::GENERAL_PASTEBOARD;
         match tokio::time::timeout(Duration::from_secs(8), clip.set_text(text, general)).await {
@@ -1137,7 +1137,7 @@ impl Clipboard {
         }
     }
 
-    async fn save(adapter: &idevice::tcp::handle::AdapterHandle, port: u16) -> Clipboard {
+    async fn save(adapter: &crate::tcp::handle::AdapterHandle, port: u16) -> Clipboard {
         Clipboard { before: Self::peek(adapter, port).await }
     }
 
@@ -1149,7 +1149,7 @@ impl Clipboard {
 
     /// Put the old content back. True when the clipboard is known to hold
     /// what it held before.
-    async fn restore(&self, adapter: &idevice::tcp::handle::AdapterHandle, port: u16, typed: &str) -> bool {
+    async fn restore(&self, adapter: &crate::tcp::handle::AdapterHandle, port: u16, typed: &str) -> bool {
         if typed.is_empty() {
             return true;
         }

@@ -194,7 +194,7 @@ async fn handle(stream: ipc::Stream, shared: Arc<Shared>) -> Result<()> {
 /// away ("timed out after 5 retransmissions", "RST on hp=…") as `tracing`
 /// warnings. Without a subscriber they are lost and all iph sees later is
 /// "not connected". They carry ports and byte counts, never screen contents.
-/// `IPH_LOG` takes a filter such as `jktcp=debug` for more.
+/// `IPH_LOG` takes a filter such as `iphone_cli::tcp=debug` for more.
 fn keep_library_warnings() {
     let filter = std::env::var("IPH_LOG").unwrap_or_else(|_| "warn".into());
     let _ = tracing_subscriber::fmt()

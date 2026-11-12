@@ -31,7 +31,7 @@ jobs:
           codesign --verify --verbose dist/iph/iph
           lipo -info dist/iph/iph
           dist/iph/iph --version
-          cp LICENSE LICENSE.idevice dist/iph/
+          cp LICENSE LICENSE.idevice LICENSE.jktcp dist/iph/
           tar -C dist -czf dist/iph-macos-universal.tar.gz iph
           (cd dist && shasum -a 256 iph-macos-universal.tar.gz > iph-macos-universal.tar.gz.sha256)
       - uses: actions/upload-artifact@v4
@@ -48,7 +48,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist/iph | Out-Null
-          Copy-Item target/release/iph.exe, LICENSE, LICENSE.idevice dist/iph/
+          Copy-Item target/release/iph.exe, LICENSE, LICENSE.idevice, LICENSE.jktcp dist/iph/
           dist/iph/iph.exe --version
           Compress-Archive -Path dist/iph/* -DestinationPath dist/iph-windows-x86_64.zip
           $hash = (Get-FileHash dist/iph-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
