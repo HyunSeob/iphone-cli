@@ -36,17 +36,25 @@ $ iph run settings-version
 
 ## 설치
 
-Rust(1.88 이상)가 필요합니다. Xcode는 필요 없습니다.
+Rust도 Xcode도 필요 없습니다. 맥에서는 터미널에 한 줄이면 됩니다 (`curl` · `tar` · `shasum` 같은 맥 기본 도구만 씁니다).
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/HyunSeob/iphone-cli/main/install.sh | sh
+iph setup                     # 폰 준비 상태를 차례로 확인하고, 할 일을 알려 줍니다
+```
+
+최신 [릴리스](https://github.com/HyunSeob/iphone-cli/releases)의 유니버설 바이너리(애플 실리콘 · 인텔)를 받아 체크섬을 확인하고 `~/.local/bin/iph`에 넣습니다. 다른 폴더는 `IPH_INSTALL_DIR`, 특정 버전은 `IPH_VERSION=v0.1.0`으로 고릅니다. 윈도는 릴리스에서 `iph-windows-x86_64.zip`을 받아 `iph.exe`를 PATH에 있는 폴더에 두면 됩니다.
 
 - **맥:** 폰을 USB로 꽂고 폰에서 '신뢰'를 누르면 짝짓기가 됩니다.
-- **윈도:** 애플의 기기 연결 서비스가 있어야 합니다. Microsoft Store의 **Apple 기기**(Apple Devices) 앱을 깔거나, `winget install Apple.AppleMobileDeviceSupport`로 서비스만 깔면 됩니다. 그 뒤 폰을 USB로 꽂고 '신뢰'를 누르세요. 빌드에는 Visual Studio Build Tools(C++)가 필요합니다.
+- **윈도:** 애플의 기기 연결 서비스가 있어야 합니다. Microsoft Store의 **Apple 기기**(Apple Devices) 앱을 깔거나, `winget install Apple.AppleMobileDeviceSupport`로 서비스만 깔면 됩니다. 그 뒤 폰을 USB로 꽂고 '신뢰'를 누르세요.
 - **개발자 디스크 이미지:** 폰에 없으면 `iph doctor`가 연결합니다. 맥에 Xcode가 있으면 Xcode의 이미지를 쓰고, 없으면 공개 저장소 [doronz88/DeveloperDiskImage](https://github.com/doronz88/DeveloperDiskImage)에서 처음 한 번 받아 옵니다 (약 18 MB, 커밋과 SHA-256 고정). iph 저장소에는 애플 파일이 들어 있지 않습니다.
+
+소스에서 빌드하려면 Rust 1.88 이상이 필요합니다 (윈도는 Visual Studio Build Tools(C++)도).
 
 ```sh
 git clone https://github.com/HyunSeob/iphone-cli
 cd iphone-cli
 cargo install --path .        # ~/.cargo/bin/iph
-iph setup                     # 폰 준비 상태를 차례로 확인하고, 할 일을 알려 줍니다
 ```
 
 ## 처음 준비

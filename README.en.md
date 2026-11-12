@@ -33,17 +33,25 @@ On Windows, `doctor`, reading, touch and scripts were checked with one iPhone19,
 
 ## Install
 
-Rust 1.88 or later. Xcode is not needed.
+Neither Rust nor Xcode is needed. On a Mac it is one line in Terminal (it uses only tools macOS ships: `curl`, `tar`, `shasum`).
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/HyunSeob/iphone-cli/main/install.sh | sh
+iph setup                     # walks through what the phone needs
+```
+
+It downloads the universal binary (Apple silicon and Intel) from the latest [release](https://github.com/HyunSeob/iphone-cli/releases), checks its checksum and puts it at `~/.local/bin/iph`. `IPH_INSTALL_DIR` picks another folder and `IPH_VERSION=v0.1.0` a specific version. On Windows, download `iph-windows-x86_64.zip` from the releases and put `iph.exe` in a folder on your PATH.
 
 - **Mac:** plug the phone in and tap Trust on it; that pairs it.
-- **Windows:** Apple's device service must be installed: the **Apple Devices** app from the Microsoft Store, or just the service with `winget install Apple.AppleMobileDeviceSupport`. Then plug the phone in and tap Trust. Building needs Visual Studio Build Tools (C++).
+- **Windows:** Apple's device service must be installed: the **Apple Devices** app from the Microsoft Store, or just the service with `winget install Apple.AppleMobileDeviceSupport`. Then plug the phone in and tap Trust.
 - **Developer disk image:** when the phone lacks it, `iph doctor` installs it. It uses Xcode's copy when the Mac has one, and otherwise fetches one once from the public [doronz88/DeveloperDiskImage](https://github.com/doronz88/DeveloperDiskImage) repository (about 18 MB, pinned commit and SHA-256). The iph repository contains no Apple files.
+
+Building from source needs Rust 1.88 or later (and Visual Studio Build Tools (C++) on Windows).
 
 ```sh
 git clone https://github.com/HyunSeob/iphone-cli
 cd iphone-cli
 cargo install --path .        # ~/.cargo/bin/iph
-iph setup                     # walks through what the phone needs
 ```
 
 ## First-time setup

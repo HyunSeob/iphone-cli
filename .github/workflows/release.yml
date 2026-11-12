@@ -1,0 +1,72 @@
+# A tag like v0.1.0 builds iph for macOS (one universal binary, Apple silicon and
+# Intel) and Windows x64 and publishes them as a GitHub release. install.sh
+# downloads the macOS archive from the latest release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: cargo build --release --locked --target aarch64-apple-darwin
+      - run: cargo build --release --locked --target x86_64-apple-darwin
+      - name: Package
+        run: |
+          mkdir -p dist/iph
+          lipo -create -output dist/iph/iph \
+            target/aarch64-apple-darwin/release/iph \
+            target/x86_64-apple-darwin/release/iph
+          # lipo keeps each slice's ad-hoc signature; check it is still valid.
+          codesign --verify --verbose dist/iph/iph
+          lipo -info dist/iph/iph
+          dist/iph/iph --version
+          cp LICENSE LICENSE.idevice dist/iph/
+          tar -C dist -czf dist/iph-macos-universal.tar.gz iph
+          (cd dist && shasum -a 256 iph-macos-universal.tar.gz > iph-macos-universal.tar.gz.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/iph-macos-universal.tar.gz*
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/iph | Out-Null
+          Copy-Item target/release/iph.exe, LICENSE, LICENSE.idevice dist/iph/
+          dist/iph/iph.exe --version
+          Compress-Archive -Path dist/iph/* -DestinationPath dist/iph-windows-x86_64.zip
+          $hash = (Get-FileHash dist/iph-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  iph-windows-x86_64.zip" | Out-File -Encoding ascii -NoNewline dist/iph-windows-x86_64.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/iph-windows-x86_64.zip*
+
+  release:
+    needs: [macos, windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
