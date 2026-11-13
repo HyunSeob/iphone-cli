@@ -1,22 +1,71 @@
-# A tag like v0.1.0 builds iph for macOS (one universal binary, Apple silicon and
-# Intel) and Windows x64 and publishes them as a GitHub release. install.sh
-# downloads the macOS archive from the latest release.
+# Releases whatever version Cargo.toml names, once. A push to main that raises
+# the version (or a v* tag that matches it) builds iph for macOS (one universal
+# binary, Apple silicon and Intel) and Windows x64, publishes them as GitHub
+# release vX.Y.Z, and publishes the crate to crates.io. A version that already
+# has its release, or is already on crates.io, is left alone, so ordinary
+# pushes to main do nothing. install.sh downloads the macOS archive from the
+# latest release.
+#
+# crates.io trusts this workflow (Trusted Publishing, environment crates-io):
+# no token is stored anywhere.
 name: release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# A version bump pushed together with its tag starts two runs; the second one
+# waits and then finds everything done.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      release: ${{ steps.plan.outputs.release }}
+      crate: ${{ steps.plan.outputs.crate }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name=$(sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tag="v$version"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml's version $version"
+            exit 1
+          fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then release=false; else release=true; fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' -A "$GITHUB_REPOSITORY release workflow" \
+            "https://crates.io/api/v1/crates/$name/$version")
+          if [ "$code" = 200 ]; then crate=false; else crate=true; fi
+          echo "$name $version: GitHub release needed: $release, crates.io needed: $crate"
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "release=$release"
+            echo "crate=$crate"
+          } >> "$GITHUB_OUTPUT"
+
   macos:
+    needs: plan
+    if: needs.plan.outputs.release == 'true' || needs.plan.outputs.crate == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: cargo test --locked
       - run: cargo build --release --locked --target aarch64-apple-darwin
       - run: cargo build --release --locked --target x86_64-apple-darwin
       - name: Package
@@ -40,6 +89,8 @@ jobs:
           path: dist/iph-macos-universal.tar.gz*
 
   windows:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -59,16 +110,35 @@ jobs:
           path: dist/iph-windows-x86_64.zip*
 
   release:
-    needs: [macos, windows]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [plan, macos, windows]
+    if: needs.plan.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      # Creates the tag at this commit when it does not exist yet. A tag made
+      # with this workflow's token starts no further runs.
       - env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+
+  crate:
+    needs: [plan, macos]
+    if: needs.plan.outputs.crate == 'true'
+    runs-on: macos-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

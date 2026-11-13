@@ -49,7 +49,13 @@ iph setup                     # 폰 준비 상태를 차례로 확인하고, 할
 - **윈도:** 애플의 기기 연결 서비스가 있어야 합니다. Microsoft Store의 **Apple 기기**(Apple Devices) 앱을 깔거나, `winget install Apple.AppleMobileDeviceSupport`로 서비스만 깔면 됩니다. 그 뒤 폰을 USB로 꽂고 '신뢰'를 누르세요.
 - **개발자 디스크 이미지:** 폰에 없으면 `iph doctor`가 연결합니다. 맥에 Xcode가 있으면 Xcode의 이미지를 쓰고, 없으면 공개 저장소 [doronz88/DeveloperDiskImage](https://github.com/doronz88/DeveloperDiskImage)에서 처음 한 번 받아 옵니다 (약 18 MB, 커밋과 SHA-256 고정). iph 저장소에는 애플 파일이 들어 있지 않습니다.
 
-소스에서 빌드하려면 Rust 1.88 이상이 필요합니다 (윈도는 Visual Studio Build Tools(C++)도).
+Rust 1.88 이상이 있으면 [crates.io](https://crates.io/crates/iphone-cli)의 크레이트로도 같은 `iph`를 깔 수 있습니다 (빌드에 몇 분 걸리고, 윈도는 Visual Studio Build Tools(C++)가 필요합니다).
+
+```sh
+cargo install iphone-cli      # ~/.cargo/bin/iph
+```
+
+소스에서 빌드하려면:
 
 ```sh
 git clone https://github.com/HyunSeob/iphone-cli
@@ -307,6 +313,8 @@ cargo test          # 폰 없이 도는 시험: 파서(실제 계산기 화면 �
 IPH_TRACE=1 iph …   # 상주 프로세스 로그에 요청 · 덤프 시각을 남김 (~/Library/Application Support/iph/<udid>.log)
 IPH_PCAP=<폴더> iph … # 터널의 패킷을 Wireshark용 파일로 남김. 화면 내용이 들어 있으니 다 보면 지울 것
 ```
+
+**릴리스:** `Cargo.toml`의 `version`을 올려 main에 푸시하면 됩니다. [릴리스 워크플로](.github/workflows/release.yml)가 `vX.Y.Z` 태그를 달고, 맥 · 윈도 바이너리를 GitHub 릴리스로 올리고(`install.sh`가 받는 파일), crates.io에 크레이트를 게시합니다. crates.io 게시는 Trusted Publishing이라 어디에도 토큰을 두지 않습니다. 버전을 안 바꾼 푸시는 아무것도 릴리스하지 않습니다.
 
 ## 라이선스
 

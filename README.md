@@ -46,7 +46,13 @@ It downloads the universal binary (Apple silicon and Intel) from the latest [rel
 - **Windows:** Apple's device service must be installed: the **Apple Devices** app from the Microsoft Store, or just the service with `winget install Apple.AppleMobileDeviceSupport`. Then plug the phone in and tap Trust.
 - **Developer disk image:** when the phone lacks it, `iph doctor` installs it. It uses Xcode's copy when the Mac has one, and otherwise fetches one once from the public [doronz88/DeveloperDiskImage](https://github.com/doronz88/DeveloperDiskImage) repository (about 18 MB, pinned commit and SHA-256). The iph repository contains no Apple files.
 
-Building from source needs Rust 1.88 or later (and Visual Studio Build Tools (C++) on Windows).
+With Rust 1.88 or later, the crate on [crates.io](https://crates.io/crates/iphone-cli) installs the same `iph` (building it takes a few minutes; on Windows it needs Visual Studio Build Tools (C++)):
+
+```sh
+cargo install iphone-cli      # ~/.cargo/bin/iph
+```
+
+Or from a checkout:
 
 ```sh
 git clone https://github.com/HyunSeob/iphone-cli
@@ -304,6 +310,8 @@ cargo test          # runs without a phone: parser (real Calculator dumps), sele
 IPH_TRACE=1 iph …   # logs request and dump times to ~/Library/Application Support/iph/<udid>.log
 IPH_PCAP=<dir> iph … # writes the tunnel's packets out for Wireshark; they hold screen contents, delete them after
 ```
+
+**Releasing:** raise `version` in `Cargo.toml` and push to main. The [release workflow](.github/workflows/release.yml) then tags `vX.Y.Z`, publishes the macOS and Windows binaries as a GitHub release (what `install.sh` downloads) and publishes the crate to crates.io through Trusted Publishing, so no token is kept anywhere. Pushes that leave the version alone release nothing.
 
 ## License
 
