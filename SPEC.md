@@ -71,7 +71,7 @@ AI 에이전트가 **실제 아이폰**의 아무 앱이나 화면 요소(접근
 | `iph mcp` | MCP 서버(stdio) |
 
 - **셀렉터:** `label="정확히"`, `label~="포함"`, `label/정규식/`, `role=button`, `id=...`(identifier), `value~=...`, `within=<셀렉터>`, `index=N`. 문자열 하나만 주면 `label="..."`로 본다. 여러 개가 맞으면 오류 + 후보 목록 (멋대로 첫 번째를 누르지 않는다)
-- **모든 입력 뒤 확인:** 탭 · 입력 · 스크롤은 트리를 다시 읽어 `screen_changed: true|false`를 결과에 넣는다. 터치 신호는 기기가 응답하지 않으므로 `sent`와 `verified`를 구분한다
+- **모든 입력 뒤 확인:** 탭 · 입력 · 스크롤은 트리를 다시 읽어 `screen_changed: true|false`를 결과에 넣는다. 터치 신호는 기기가 응답하지 않으므로 `sent`와 `verified`를 구분한다. 탭은 화면이 바뀌고(최대 2.5초) 두 번 연속 같게 읽힐 때까지(합쳐 최대 5초) 기다린 뒤 그 화면(`elements`)을 결과에 넣는다. 폰이 화면 전환을 알리지 않아서 브라우저의 페이지 로드 대기를 이렇게 흉내 낸다. `--no-wait`이면 바로 한 번만 읽고 화면은 넣지 않는다. `type`은 붙여 넣은 뒤 칸을 한 번 읽어 보이는 값(`value`)만 돌려주고 맞는지 판정하지 않는다. 앱이 서식 · 가림 · 자동 고침으로 보이는 값을 바꾸기 때문이다 (Playwright `fill`과 같은 분담)
 - **결과 공통 형태:** `{ok, outcome: "done"|"not_sent"|"unknown", error?: {code, message, hint}, elapsed_ms, ...}`. 종료 코드는 `ok: true`면 0, 아니면 outcome에 따라 unknown 2 · 그 밖 1 (`scroll --until`이 못 찾은 `ok: false` + `done`도 1). batch · script · run도 같다
 - **MCP 도구:** CLI와 1:1 (`iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_button`, `iph_launch`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`). `iph_script`는 `code` + `args`, `iph_run`은 `name` + `args`. 속도 비교 실험의 A 방식(에이전트가 단계마다 판단)은 이 MCP 기본 도구로, B 방식은 `iph_run`으로 한다
 

@@ -104,6 +104,9 @@ pub struct Element {
     /// Every numbered attribute, only with `--raw`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<serde_json::Value>,
+    /// The phone's name for the element, to ask it about one attribute.
+    #[serde(skip)]
+    pub key: Option<ObjKey>,
 }
 
 fn yes() -> bool {
@@ -147,7 +150,7 @@ fn handle(key: &ObjKey) -> String {
     format!("{:08x}", (h >> 32) as u32)
 }
 
-fn text(v: Option<&Ka>) -> Option<String> {
+pub(crate) fn text(v: Option<&Ka>) -> Option<String> {
     let s = match v? {
         Ka::Str(s) => s.clone(),
         other @ Ka::Obj { .. } => other.text()?,
@@ -168,7 +171,7 @@ fn frame_of(raw: &RawElement) -> Option<Rect> {
         .and_then(Rect::parse)
 }
 
-fn children_of(raw: &RawElement, include_offscreen: bool) -> Vec<ObjKey> {
+pub(crate) fn children_of(raw: &RawElement, include_offscreen: bool) -> Vec<ObjKey> {
     let pick = |n: i64| -> Vec<ObjKey> {
         raw.attrs
             .get(&n)
@@ -297,6 +300,7 @@ impl Screen {
                 parent,
                 depth,
                 pid: key.pid,
+                key: Some(key),
                 on_screen,
                 raw: opts.raw.then(|| {
                     let mut m = serde_json::Map::new();

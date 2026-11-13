@@ -118,7 +118,7 @@ pub struct Session {
     abandoned: Vec<(InputSession, Option<Tunnel>)>,
     apps: Option<Vec<AppListEntry>>,
     /// Logical screen size from the last complete reading.
-    screen_size: Option<(f64, f64)>,
+    pub(crate) screen_size: Option<(f64, f64)>,
     /// Readings that arrived before this moment no longer describe the
     /// screen (something changed it after they were taken).
     stale_before: Option<Instant>,
@@ -128,6 +128,18 @@ pub struct Session {
     /// because it had stopped answering.
     pub ax_restarts: u64,
     ax_restarted_at: Option<Instant>,
+    /// The daemon was ended and the one the phone started in its place did
+    /// not answer either, or it could not be ended. It is not ended again
+    /// until a reading comes back: on 2026-11-12, after about six ends in
+    /// ten minutes, the phone stopped starting it at all until the phone was
+    /// locked and unlocked.
+    ax_restart_unhelpful: bool,
+    /// The last complete reading showed the home screen, Control Center or
+    /// another of the system's panels. The daemon is not ended for a stall
+    /// there: Control Center during a screen recording gets no answer from
+    /// a new daemon either, and the old one answers again once it is closed
+    /// (2026-11-12).
+    system_in_front: bool,
     /// Do Not Disturb: whether it is on for this session and what to put back.
     pub dnd: crate::dnd::State,
 }
@@ -207,11 +219,22 @@ impl Session {
             connects: 0,
             ax_restarts: 0,
             ax_restarted_at: None,
+            ax_restart_unhelpful: false,
+            system_in_front: false,
             dnd,
         }
     }
 
     /// Mark every reading taken so far as out of date.
+    /// Age of the latest reading, unless it predates `invalidate_readings`.
+    pub(crate) fn reading_age(&self) -> Option<Duration> {
+        let arrived = self.ax.as_ref()?.latest_arrival()?;
+        if self.stale_before.is_some_and(|limit| arrived < limit) {
+            return None;
+        }
+        Some(arrived.elapsed())
+    }
+
     pub fn invalidate_readings(&mut self) {
         self.stale_before = Some(Instant::now());
     }
@@ -432,9 +455,18 @@ impl Session {
                 };
                 let lately = self.ax_restarted_at.is_some_and(|at| at.elapsed() < AX_RESTART_GAP);
                 let mut why_not = "";
+                if restarted {
+                    // The daemon the phone started in its place did not
+                    // answer either.
+                    self.ax_restart_unhelpful = true;
+                }
                 if stall.is_some() && locked != Some(true) {
                     if restarted {
                         why_not = "it was already ended once during this reading";
+                    } else if self.system_in_front {
+                        why_not = "the home screen or a system panel was in front";
+                    } else if self.ax_restart_unhelpful {
+                        why_not = "ending it last time did not help";
                     } else if lately {
                         why_not = "it was ended less than 2 minutes ago";
                     } else if !self.config.daemon.restart_accessibility {
@@ -467,6 +499,7 @@ impl Session {
                                 crate::clock::now_utc()
                             );
                             why_not = "ending it failed";
+                            self.ax_restart_unhelpful = true;
                         }
                     }
                 }
@@ -480,6 +513,16 @@ impl Session {
                 .with("phone_locked", locked.map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null));
                 return Err(if locked == Some(true) {
                     fail.hint(t("폰이 잠겨 있습니다. 잠금을 풀어 주세요.", "The phone is locked. Unlock it."))
+                } else if stall.is_some() && self.system_in_front {
+                    fail.with("ax_restart_skipped", why_not).hint(t(
+                        "폰의 화면 읽기 서비스가 응답하지 않습니다. 홈 화면이나 제어 센터 같은 시스템 화면이 앞에 있습니다. 화면 기록 중에는 제어 센터가 읽히지 않습니다. `iph button home`으로 닫거나 `iph launch`로 앱을 띄운 뒤 다시 읽으세요. 이 두 명령은 화면을 못 읽어도 나갑니다.",
+                        "The phone's screen-reading service is not answering, and the home screen or a system panel such as Control Center is in front. Control Center cannot be read while the screen is being recorded. Close it with `iph button home` or bring an app up with `iph launch`, then read again; both go out without a reading.",
+                    ))
+                } else if stall.is_some() && self.ax_restart_unhelpful {
+                    fail.with("ax_restart_skipped", why_not).hint(t(
+                        "폰의 화면 읽기 서비스를 다시 띄워도 응답이 없습니다. 폰을 잠갔다가 다시 풀어 주세요.",
+                        "The phone's screen-reading service did not answer after a restart either. Lock the phone and unlock it again.",
+                    ))
                 } else if stall.is_some() {
                     fail.with("ax_restart_skipped", why_not).hint(t(
                         "폰의 화면 읽기 서비스(axauditd)가 응답하지 않습니다. 폰이 잠긴 것은 아닙니다. 잠시 뒤 다시 시도하세요. iph가 2분에 한 번까지 그 서비스를 다시 띄웁니다.",
@@ -530,6 +573,8 @@ impl Session {
         for _ in 0..3 {
             let (seq, dump) = Box::pin(self.dump(fresh, full)).await?;
             let screen = Screen::build(&dump, opts);
+            self.ax_restart_unhelpful = false;
+            self.system_in_front = crate::dnd::system_ui(&screen);
             if screen.width > 0.0 && screen.height > 0.0 {
                 self.screen_size = Some((screen.width, screen.height));
                 return Ok((seq, screen));

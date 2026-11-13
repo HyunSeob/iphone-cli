@@ -399,6 +399,7 @@ mod tests {
             pid: 1,
             on_screen: true,
             raw: None,
+            key: None,
         }
     }
 

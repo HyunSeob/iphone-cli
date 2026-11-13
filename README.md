@@ -4,7 +4,7 @@ A CLI and MCP server that lets AI agents read and operate any app on a **real iP
 
 Built on the principle of [Poki](https://github.com/JosssphZhou/poki). No Poki code is used; this is a new implementation from the behaviour Poki's documentation describes and from experiments on a device. Device communication relies on [idevice](https://github.com/jkcoxson/idevice) (MIT).
 
-한국어: [README.md](README.md)
+한국어: [README.ko.md](README.ko.md)
 
 ```console
 $ iph read --human

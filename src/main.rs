@@ -78,6 +78,9 @@ enum Cmd {
         long: Option<u64>,
         #[arg(long)]
         double: bool,
+        /// Read the screen once right after the tap instead of waiting for it to settle.
+        #[arg(long)]
+        no_wait: bool,
     },
     /// Swipe: up, down, left, right, or x1,y1,x2,y2.
     Swipe {
@@ -300,8 +303,8 @@ async fn run(cli: Cli) -> i32 {
             json!({ "app": app, "all": all, "full": full, "raw": raw, "max_age_ms": max_age }),
         ),
         Cmd::Find { selector, all } => ("find", json!({ "selector": selector, "all": all })),
-        Cmd::Tap { target, long, double } => {
-            ("tap", json!({ "target": target, "long_ms": long, "double": double }))
+        Cmd::Tap { target, long, double, no_wait } => {
+            ("tap", json!({ "target": target, "long_ms": long, "double": double, "no_wait": no_wait }))
         }
         Cmd::Swipe { direction, duration, drag } => match swipe_args(&direction, duration, drag) {
             Ok(v) => ("swipe", v),
