@@ -28,8 +28,9 @@ use idevice::{
         },
     },
     rsd::RsdHandshake,
-    tcp::handle::{AdapterHandle, UdpSocketHandle},
 };
+
+use crate::tcp::handle::{AdapterHandle, UdpSocketHandle};
 
 /// What the controller says it supports. Xcode's device window sends 140.
 const CLIENT_SUPPORTED_FEATURES: u64 = 140;

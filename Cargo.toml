@@ -6,7 +6,6 @@ license = "MIT"
 description = "Let AI agents read and operate any app on a real iPhone through the accessibility tree. No XCUITest, WebDriverAgent or Xcode signing."
 repository = "https://github.com/HyunSeob/iphone-cli"
 readme = "README.md"
-publish = false
 
 [lib]
 name = "iphone_cli"
@@ -21,7 +20,6 @@ idevice = { version = "=0.1.68", features = [
   "usbmuxd",
   "tcp",
   "core_device_proxy",
-  "tunnel_tcp_stack",
   "rsd",
   "xpc",
   "core_device",
@@ -49,8 +47,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rquickjs = "0.14"
 sha2 = "0.10"
-# `IPH_PCAP` (src/device/conn.rs): the tunnel stack can write its packets out.
-jktcp = { version = "0.1.8", features = ["pcap"] }
+# The tunnel's TCP stack (src/tcp, from jktcp).
+rand = "0.9"
+
+[dev-dependencies]
+# src/tcp's tests move the clock by hand.
+tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
@@ -59,9 +61,3 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 opt-level = 3
 debug = false
 strip = true
-
-# The tunnel's TCP stack with a longer patience before it closes a connection
-# (two constants in vendor/jktcp/src/adapter.rs and the capture's microseconds in
-# vendor/jktcp/src/lib.rs; the rest is jktcp 0.1.8, MIT).
-[patch.crates-io]
-jktcp = { path = "vendor/jktcp" }

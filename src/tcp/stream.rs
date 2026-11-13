@@ -10,16 +10,16 @@
 //!   struct (the lifetime parameter `'a` would appear in the struct definition).
 //!
 //! If any of those constraints are inconvenient, use
-//! [`crate::handle::AdapterHandle`] / [`crate::handle::StreamHandle`] instead.
+//! [`crate::tcp::handle::AdapterHandle`] / [`crate::tcp::handle::StreamHandle`] instead.
 
 use std::{future::Future, task::Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::trace;
 
-use crate::adapter::ConnectionStatus;
+use crate::tcp::adapter::ConnectionStatus;
 
-use crate::adapter::Adapter;
+use crate::tcp::adapter::Adapter;
 
 #[derive(Debug)]
 pub struct AdapterStream<'a> {
@@ -102,7 +102,7 @@ impl AsyncRead for AdapterStream<'_> {
         };
 
         // Pin the future and poll it
-        futures::pin_mut!(future);
+        futures_util::pin_mut!(future);
         future.poll(cx)
     }
 }
@@ -142,7 +142,7 @@ impl AsyncWrite for AdapterStream<'_> {
         };
 
         // Pin the future and poll it
-        futures::pin_mut!(future);
+        futures_util::pin_mut!(future);
         future.poll(cx)
     }
 
@@ -154,7 +154,7 @@ impl AsyncWrite for AdapterStream<'_> {
         let future = async { self.close().await };
 
         // Pin the future and poll it
-        futures::pin_mut!(future);
+        futures_util::pin_mut!(future);
         future.poll(cx)
     }
 }

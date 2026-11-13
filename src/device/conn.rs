@@ -12,11 +12,11 @@ use idevice::{
     core_device_proxy::CoreDeviceProxy,
     provider::{IdeviceProvider, TcpProvider},
     rsd::RsdHandshake,
-    tcp::handle::AdapterHandle,
     usbmuxd::{Connection, UsbmuxdAddr, UsbmuxdConnection, UsbmuxdDevice},
 };
 
 use crate::paths;
+use crate::tcp::{adapter::Adapter, handle::AdapterHandle};
 
 pub const LABEL: &str = "iphone-cli";
 const STEP_TIMEOUT: Duration = Duration::from_secs(12);
@@ -187,10 +187,13 @@ pub async fn open_tunnel(udid: &str) -> Result<Tunnel> {
     let t0 = Instant::now();
     let route = route(udid).await?;
     let proxy = step("CoreDeviceProxy", CoreDeviceProxy::connect(&*route.provider)).await?;
-    let rsd_port = proxy.tunnel_info().server_rsd_port;
-    let mut adapter = proxy
-        .create_software_tunnel()
-        .map_err(|e| anyhow!("software tunnel: {e:?}"))?;
+    let info = proxy.tunnel_info().clone();
+    let rsd_port = info.server_rsd_port;
+    let ours: IpAddr = info.client_address.parse().context("tunnel client address")?;
+    let theirs: IpAddr = info.server_address.parse().context("tunnel server address")?;
+    let mut adapter = Adapter::new(Box::new(proxy.into_tunnel().into_inner()), ours, theirs);
+    // Room for the IPv6 and TCP headers.
+    adapter.set_mss((info.mtu as usize).saturating_sub(60));
     // `IPH_PCAP=<folder>`: every packet of this tunnel, for Wireshark. Holds
     // whatever the phone sends, so only for a short look, then delete it.
     if let Ok(dir) = std::env::var("IPH_PCAP") {

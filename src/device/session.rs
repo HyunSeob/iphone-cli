@@ -240,7 +240,7 @@ impl Session {
     }
 
     /// Port of an RSD service, for connections made outside `&mut self`.
-    pub async fn service_port(&mut self, name: &str) -> Res<(idevice::tcp::handle::AdapterHandle, u16)> {
+    pub async fn service_port(&mut self, name: &str) -> Res<(crate::tcp::handle::AdapterHandle, u16)> {
         let tunnel = self.ensure_tunnel().await?;
         let port = tunnel
             .rsd

@@ -307,4 +307,4 @@ IPH_PCAP=<dir> iph … # writes the tunnel's packets out for Wireshark; they hol
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The media-session bring-up is adapted from an idevice example tool ([LICENSE.idevice](LICENSE.idevice)). `vendor/jktcp` is the tunnel's TCP stack, jktcp 0.1.8 (MIT), with two constants changed so that it waits longer before giving a connection up, and the microseconds of its packet capture fixed ([vendor/jktcp/LICENSE](vendor/jktcp/LICENSE)).
+MIT, see [LICENSE](LICENSE). The media-session bring-up is adapted from an idevice example tool ([LICENSE.idevice](LICENSE.idevice)). `src/tcp` is the tunnel's TCP stack, taken from jktcp 0.1.8 (MIT), with two constants changed so that it waits longer before giving a connection up, and the microseconds of its packet capture fixed ([LICENSE.jktcp](LICENSE.jktcp)).
