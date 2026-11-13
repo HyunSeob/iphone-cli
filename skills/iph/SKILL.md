@@ -100,7 +100,7 @@ After `launch`, that app must stay in front; if another one comes up, the script
 ## Selectors
 
 - A plain string is an exact label: `"일반"`. A row labelled `"Wi-Fi, HomeNet"` also matches `"Wi-Fi"`.
-- `label~="contains"`, `label/regex/`, `role=button`, `value~="…"`, `id=<identifier or element id>`, `within="<selector>"`, `index=N`, combined with spaces: `role=button label~="삭제"`.
+- `label~="contains"`, `label/regex/`, `role=button`, `value~="…"`, `id=<identifier or element id>`, `within="<selector>"`, `index=N` (counts from 0 in reading order: `index=1` is the second match), combined with spaces: `role=button label~="삭제"`.
 - In scripts, MCP and batch an object works too: `{"label": "일반", "role": "button"}`, with `label_contains`, `label_regex`, `value`, `value_contains`, `id`, `id_contains`, `id_regex`, `within`, `index`.
 - Several matches are an error, never a guess. Read the `candidates` and narrow.
 - `id=` needs identifiers, which arrive about 0.5 s after the labels (`iph read --full`).

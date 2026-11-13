@@ -21,7 +21,7 @@ fn element_line(e: &Value) -> String {
     if let Some(i) = e["identifier"].as_str() {
         line.push_str(&format!(" #{i}"));
     }
-    if let Some(f) = e["frame"].as_object() {
+    if let f @ Value::Object(_) = &e["frame"] {
         line.push_str(&format!(
             "  @{},{} {}x{}",
             s(&f["x"]),
@@ -63,10 +63,10 @@ pub fn render(cmd: &str, v: &Value) -> String {
                 out.push(format!("  · {}", element_line(e)));
             }
         }
-        if let Some(step) = v["failed_step"].as_object() {
+        if let step @ Value::Object(_) = &v["failed_step"] {
             out.push(format!("  step {} ({})", s(&step["index"]), s(&step["kind"])));
         }
-        if let Some(call) = v["failed_call"].as_object() {
+        if let call @ Value::Object(_) = &v["failed_call"] {
             out.push(match call["line"].as_u64() {
                 Some(line) => format!("  line {line}: {}", s(&call["cmd"])),
                 None => format!("  in {}", s(&call["cmd"])),
@@ -183,12 +183,28 @@ pub fn render(cmd: &str, v: &Value) -> String {
                     parts.push(format!("{key}={}", s(&v[key])));
                 }
             }
-            if let Some(e) = v["element"].as_object() {
-                parts.push(format!("element=\"{}\"", s(&e["label"])));
+            let e = &v["element"];
+            if e.is_object() {
+                let name = ["label", "value", "role"].iter().map(|k| s(&e[*k])).find(|n| !n.is_empty()).unwrap_or_default();
+                parts.push(format!("element=\"{name}\""));
             }
             parts.push(format!("{} ms", s(&v["elapsed_ms"])));
             out.push(parts.join("  "));
         }
     }
     out.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn element_without_label() {
+        let v = json!({"ok": true, "element": {"role": "search_field", "value": "검색"}, "elapsed_ms": 5});
+        assert_eq!(render("tap", &v), "✓  element=\"검색\"  5 ms");
+        let v = json!({"ok": false, "error": {"code": "x", "message": "m"}, "failed_step": {}, "failed_call": {}});
+        render("script", &v);
+    }
 }
