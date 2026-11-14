@@ -2,5 +2,6 @@ target/
 .DS_Store
 *.raw.bin
 /local/
+iph-diagnostics-*.txt
 # throwaway probes used while working out the protocol
 examples/spike_*.rs

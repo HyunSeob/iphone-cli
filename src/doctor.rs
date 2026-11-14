@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use idevice::{
     IdeviceService, amfi::AmfiClient, lockdown::LockdownClient,
-    mobile_image_mounter::ImageMounter, provider::IdeviceProvider, usbmuxd::{UsbmuxdAddr, UsbmuxdConnection},
+    mobile_image_mounter::ImageMounter, provider::IdeviceProvider,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -345,7 +345,11 @@ async fn check_wifi(udid: &str, connection: Option<&str>, fix: bool) -> Check {
     let mut network = Ok(wifi::has_network(&all, udid));
     let mut state = None;
     if let Some(usb) = wifi::usb_device(&all, udid) {
-        let provider = usb.to_provider(UsbmuxdAddr::default(), conn::LABEL);
+        let addr = match conn::mux_addr() {
+            Ok(addr) => addr,
+            Err(e) => return wifi_check(connection, None, Err(format!("{e:#}"))),
+        };
+        let provider = usb.to_provider(addr, conn::LABEL);
         state = Some(wifi::inspect(&provider, fix).await);
         if fix && network == Ok(false)
             && state.as_ref().is_some_and(|s| s.enabled() || !s.changed.is_empty()) {
@@ -365,7 +369,7 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
     };
 
     // 1. Pairing: the Mac holds a pairing record for this phone.
-    let paired = match UsbmuxdConnection::default().await {
+    let paired = match conn::mux_connect().await {
         Ok(mut mux) => with_timeout(mux.get_pair_record(&s.udid)).await.is_some_and(|r| r.is_ok()),
         Err(_) => false,
     };

@@ -1,0 +1,30 @@
+name: Bug report / 버그 신고
+description: Report a reproducible problem with an iph diagnostic attachment.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run `iph diagnose -- <failing iph command>` and attach the generated `.txt` file below.
+        For USB working but Wi-Fi failing, start with USB connected, run `iph diagnose --wifi -- read`, and unplug when prompted.
+        Commands after `--` run once. For example, `iph diagnose -- read --full`.
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce / 재현 순서
+      description: Include the exact command, connection method, and what you did before it failed.
+      placeholder: "1. Connect by USB…\n2. Run…\n3. Unplug…"
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior / 기대한 결과와 실제 결과
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostic attachment / 진단 파일
+      description: Drag the generated iph-diagnostics-*.txt file here. If collection failed, paste its terminal output instead. If the phone was not detected, also include its model and iOS version.
+    validations:
+      required: true

@@ -107,6 +107,13 @@ pub fn render(cmd: &str, v: &Value) -> String {
                 out.push(format!("{indent}{}", element_line(e)));
             }
         }
+        "diagnose" => {
+            out.push(s(&v["report"]));
+            for finding in v["findings"].as_array().into_iter().flatten() {
+                out.push(format!("  {}", s(finding)));
+            }
+            out.push(s(&v["hint"]));
+        }
         "doctor" => {
             for c in v["checks"].as_array().into_iter().flatten() {
                 let mark = match c["status"].as_str() {

@@ -15,7 +15,8 @@ use idevice::{
     usbmuxd::{Connection, UsbmuxdAddr, UsbmuxdConnection, UsbmuxdDevice},
 };
 
-use crate::paths;
+use crate::{events, paths};
+use serde_json::json;
 use crate::tcp::{adapter::Adapter, handle::AdapterHandle};
 
 pub const LABEL: &str = "iphone-cli";
@@ -28,7 +29,7 @@ pub struct DeviceEntry {
     pub connection: String,
 }
 
-fn conn_name(c: &Connection) -> &'static str {
+pub fn conn_name(c: &Connection) -> &'static str {
     match c {
         Connection::Usb => "usb",
         Connection::Network(_) => "wifi",
@@ -39,10 +40,26 @@ fn conn_name(c: &Connection) -> &'static str {
 /// Every (udid, transport) pair usbmuxd knows about. A phone reachable over
 /// both USB and Wi-Fi shows up twice.
 pub async fn list_raw() -> Result<Vec<UsbmuxdDevice>> {
-    let mut mux = UsbmuxdConnection::default()
-        .await
-        .context("cannot reach usbmuxd")?;
-    mux.get_devices().await.context("usbmuxd ListDevices")
+    let mut mux = mux_connect().await?;
+    let devices = events::step("usbmuxd.ListDevices", json!({}), STEP_TIMEOUT, mux.get_devices()).await?;
+    events::record("discovery", "ok", 0, json!({ "devices": describe_raw(&devices) }));
+    Ok(devices)
+}
+
+pub fn mux_addr() -> Result<UsbmuxdAddr> {
+    UsbmuxdAddr::from_env_var().context("invalid USBMUXD_SOCKET_ADDRESS")
+}
+
+pub async fn mux_connect() -> Result<UsbmuxdConnection> {
+    let addr = mux_addr()?;
+    events::step("usbmuxd.connect", json!({ "address": format!("{addr:?}") }), STEP_TIMEOUT, addr.connect(0)).await
+}
+
+pub fn describe_raw(devices: &[UsbmuxdDevice]) -> Vec<serde_json::Value> {
+    devices.iter().map(|d| json!({
+        "udid": d.udid, "device_id": d.device_id, "connection": conn_name(&d.connection_type),
+        "address": match &d.connection_type { Connection::Network(ip) => Some(ip.to_string()), _ => None },
+    })).collect()
 }
 
 /// Connected devices, one entry per phone, USB preferred.
@@ -122,19 +139,20 @@ pub async fn route(udid: &str) -> Result<Route> {
         if let Connection::Network(ip) = &dev.connection_type {
             remember_ip(udid, ip);
         }
+        events::record("route", "ok", 0, json!({ "udid": udid, "source": "usbmuxd", "device": describe_raw(std::slice::from_ref(&dev)) }));
         return Ok(Route {
             connection: conn_name(&dev.connection_type).to_string(),
-            provider: Box::new(dev.to_provider(UsbmuxdAddr::default(), LABEL)),
+            provider: Box::new(dev.to_provider(mux_addr()?, LABEL)),
         });
     }
     // Not listed. Try the last Wi-Fi address with the pairing record usbmuxd
     // keeps for this phone.
     let Some(ip) = recall_ip(udid) else {
+        events::record("route", "error", 0, json!({ "udid": udid, "error": "not listed by usbmuxd; no cached Wi-Fi address" }));
         bail!("device {udid} is not connected (usbmuxd does not list it)");
     };
-    let mut mux = UsbmuxdConnection::default()
-        .await
-        .context("cannot reach usbmuxd")?;
+    events::record("route", "fallback", 0, json!({ "udid": udid, "address": ip, "source": "cached_wifi_address" }));
+    let mut mux = mux_connect().await?;
     let pairing_file = mux
         .get_pair_record(udid)
         .await
@@ -171,11 +189,7 @@ async fn step<T, E: std::fmt::Debug>(
     what: &str,
     fut: impl std::future::Future<Output = std::result::Result<T, E>>,
 ) -> Result<T> {
-    match tokio::time::timeout(STEP_TIMEOUT, fut).await {
-        Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(anyhow!("{what}: {e:?}")),
-        Err(_) => Err(anyhow!("{what}: timed out")),
-    }
+    events::step(what, json!({}), STEP_TIMEOUT, fut).await
 }
 
 fn t0_stamp() -> u128 {
@@ -184,9 +198,14 @@ fn t0_stamp() -> u128 {
 
 /// Open the userspace tunnel and read the RSD service list.
 pub async fn open_tunnel(udid: &str) -> Result<Tunnel> {
-    let t0 = Instant::now();
     let route = route(udid).await?;
-    let proxy = step("CoreDeviceProxy", CoreDeviceProxy::connect(&*route.provider)).await?;
+    open_tunnel_with_provider(&*route.provider, &route.connection).await
+}
+
+/// Test each transport independently, including Wi-Fi while USB is present.
+pub async fn open_tunnel_with_provider(provider: &dyn IdeviceProvider, connection: &str) -> Result<Tunnel> {
+    let t0 = Instant::now();
+    let proxy = step("CoreDeviceProxy", CoreDeviceProxy::connect(provider)).await?;
     let info = proxy.tunnel_info().clone();
     let rsd_port = info.server_rsd_port;
     let ours: IpAddr = info.client_address.parse().context("tunnel client address")?;
@@ -208,7 +227,7 @@ pub async fn open_tunnel(udid: &str) -> Result<Tunnel> {
     Ok(Tunnel {
         adapter,
         rsd,
-        connection: route.connection,
+        connection: connection.into(),
         open_ms: t0.elapsed().as_millis(),
     })
 }
