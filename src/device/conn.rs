@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use idevice::{
     IdeviceService,
     core_device_proxy::CoreDeviceProxy,
+    heartbeat::HeartbeatClient,
     provider::{IdeviceProvider, TcpProvider},
     rsd::RsdHandshake,
     usbmuxd::{Connection, UsbmuxdAddr, UsbmuxdConnection, UsbmuxdDevice},
@@ -21,6 +22,9 @@ use crate::tcp::{adapter::Adapter, handle::AdapterHandle};
 
 pub const LABEL: &str = "iphone-cli";
 const STEP_TIMEOUT: Duration = Duration::from_secs(12);
+/// How long the first Marco may take, and the slack on later ones.
+const HEARTBEAT_FIRST_SECS: u64 = 10;
+const HEARTBEAT_GRACE_SECS: u64 = 5;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DeviceEntry {
@@ -118,6 +122,43 @@ pub struct Route {
     pub provider: Box<dyn IdeviceProvider>,
     /// "usb" | "wifi"
     pub connection: String,
+    /// Only on the cached-address route, which no muxer sits behind.
+    pub heartbeat: Option<Heartbeat>,
+}
+
+/// Answers the phone's heartbeat for as long as it lives. Over Wi-Fi the phone
+/// closes the connections to its services (CoreDeviceProxy, AMFI, the image
+/// mounter) unless some client answers its Marco; usbmuxd and netmuxd do that
+/// for the phones they list, so only a route iph builds itself needs one.
+pub struct Heartbeat(tokio::task::JoinHandle<()>);
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl Heartbeat {
+    /// Connect, answer the first Marco so the phone sees a client before any
+    /// service is asked for, then keep answering in the background.
+    async fn start(provider: &dyn IdeviceProvider) -> Result<Self> {
+        let mut client = step("Heartbeat", HeartbeatClient::connect(provider)).await?;
+        let interval = step("Heartbeat Marco", client.get_marco(HEARTBEAT_FIRST_SECS)).await?;
+        step("Heartbeat Polo", client.send_polo()).await?;
+        Ok(Self::keep(client, interval))
+    }
+
+    fn keep(mut client: HeartbeatClient, mut interval: u64) -> Self {
+        Self(tokio::spawn(async move {
+            // The phone sends a Marco every `interval` seconds; wait a little longer.
+            while let Ok(next) = client.get_marco(interval + HEARTBEAT_GRACE_SECS).await {
+                interval = next;
+                if client.send_polo().await.is_err() {
+                    break;
+                }
+            }
+        }))
+    }
 }
 
 /// How to reach `udid`: USB when plugged in, otherwise Wi-Fi.
@@ -143,6 +184,7 @@ pub async fn route(udid: &str) -> Result<Route> {
         return Ok(Route {
             connection: conn_name(&dev.connection_type).to_string(),
             provider: Box::new(dev.to_provider(mux_addr()?, LABEL)),
+            heartbeat: None,
         });
     }
     // Not listed. Try the last Wi-Fi address with the pairing record usbmuxd
@@ -157,14 +199,20 @@ pub async fn route(udid: &str) -> Result<Route> {
         .get_pair_record(udid)
         .await
         .map_err(|e| anyhow!("device {udid} is not listed and has no pairing record: {e:?}"))?;
+    let provider = TcpProvider {
+        addr: ip,
+        scope_id: None,
+        pairing_file,
+        label: LABEL.into(),
+    };
+    // Without it the phone refuses its services over Wi-Fi (`tunnel_failed`,
+    // TLS closed without close_notify). A failure is already recorded by `step`;
+    // lockdown alone still works without a heartbeat.
+    let heartbeat = Heartbeat::start(&provider).await.ok();
     Ok(Route {
         connection: "wifi".into(),
-        provider: Box::new(TcpProvider {
-            addr: ip,
-            scope_id: None,
-            pairing_file,
-            label: LABEL.into(),
-        }),
+        provider: Box::new(provider),
+        heartbeat,
     })
 }
 
@@ -173,6 +221,8 @@ pub struct Tunnel {
     pub rsd: RsdHandshake,
     pub connection: String,
     pub open_ms: u128,
+    /// Kept so the phone goes on answering the tunnel while it is open.
+    pub heartbeat: Option<Heartbeat>,
 }
 
 impl Drop for Tunnel {
@@ -198,8 +248,10 @@ fn t0_stamp() -> u128 {
 
 /// Open the userspace tunnel and read the RSD service list.
 pub async fn open_tunnel(udid: &str) -> Result<Tunnel> {
-    let route = route(udid).await?;
-    open_tunnel_with_provider(&*route.provider, &route.connection).await
+    let mut route = route(udid).await?;
+    let mut tunnel = open_tunnel_with_provider(&*route.provider, &route.connection).await?;
+    tunnel.heartbeat = route.heartbeat.take();
+    Ok(tunnel)
 }
 
 /// Test each transport independently, including Wi-Fi while USB is present.
@@ -229,5 +281,47 @@ pub async fn open_tunnel_with_provider(provider: &dyn IdeviceProvider, connectio
         rsd,
         connection: connection.into(),
         open_ms: t0.elapsed().as_millis(),
+        heartbeat: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use idevice::Idevice;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+
+    use super::*;
+
+    /// One length-prefixed plist, as lockdown services speak.
+    async fn send(phone: &mut (impl AsyncWriteExt + Unpin), dict: plist::Dictionary) {
+        let mut body = Vec::new();
+        plist::Value::Dictionary(dict).to_writer_xml(&mut body).unwrap();
+        phone.write_all(&(body.len() as u32).to_be_bytes()).await.unwrap();
+        phone.write_all(&body).await.unwrap();
+    }
+
+    async fn recv(phone: &mut (impl AsyncReadExt + Unpin)) -> plist::Dictionary {
+        let mut len = [0u8; 4];
+        phone.read_exact(&mut len).await.unwrap();
+        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+        phone.read_exact(&mut body).await.unwrap();
+        plist::Value::from_reader(std::io::Cursor::new(body)).unwrap().into_dictionary().unwrap()
+    }
+
+    #[tokio::test]
+    async fn heartbeat_answers_every_marco_with_a_polo_until_dropped() {
+        let (host, mut phone) = duplex(4096);
+        let client = HeartbeatClient::new(Idevice::new(Box::new(host), "test"));
+        let heartbeat = Heartbeat::keep(client, 1);
+        for _ in 0..2 {
+            let marco = plist::Dictionary::from_iter([("Interval".to_string(), plist::Value::from(1u64))]);
+            send(&mut phone, marco).await;
+            let polo = recv(&mut phone).await;
+            assert_eq!(polo.get("Command").and_then(|v| v.as_string()), Some("Polo"));
+        }
+        drop(heartbeat);
+        // Dropping stops the task, which closes the host end of the pipe.
+        let mut rest = Vec::new();
+        assert_eq!(phone.read_to_end(&mut rest).await.unwrap(), 0);
+    }
 }
