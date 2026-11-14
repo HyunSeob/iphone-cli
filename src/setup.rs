@@ -7,7 +7,7 @@ use serde_json::json;
 
 use crate::{client, human, i18n::t};
 
-pub async fn run(udid: &str) -> i32 {
+pub async fn run(udid: &str, fix_wifi: bool) -> i32 {
     let interactive = std::io::stdin().is_terminal();
     println!(
         "{}",
@@ -16,8 +16,14 @@ pub async fn run(udid: &str) -> i32 {
             "Checking that the phone is ready for iph. To test touch, Settings opens on the phone and its list scrolls down and back once.",
         )
     );
+    if fix_wifi {
+        println!("{}", t(
+            "--fix-wifi: USB로 연결된 폰의 지원되는 무선 연결/디버깅 플래그를 켭니다.",
+            "--fix-wifi: enabling supported wireless connection/debugging flags on the USB-connected phone.",
+        ));
+    }
     loop {
-        let v = client::request(udid, "doctor", json!({})).await;
+        let v = client::request(udid, "doctor", json!({ "fix_wifi": fix_wifi })).await;
         println!("{}", human::render("doctor", &v));
         if v["ready"] == true {
             println!(

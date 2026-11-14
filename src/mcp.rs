@@ -174,7 +174,10 @@ fn tools() -> Vec<Value> {
         tool(
             "iph_doctor",
             "Check that the phone is ready. Each check says what the user must do when it fails.",
-            json!({ "no_touch_test": { "type": "boolean", "description": "Skip the check that scrolls Settings down and back." } }),
+            json!({
+                "no_touch_test": { "type": "boolean", "description": "Skip the check that scrolls Settings down and back." },
+                "fix_wifi": { "type": "boolean", "description": "Enable disabled Wi-Fi connection/debugging flags over USB and briefly check Network discovery." },
+            }),
             &[],
         ),
     ]

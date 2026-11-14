@@ -39,12 +39,19 @@ enum Cmd {
     /// List connected iPhones.
     Devices,
     /// Walk through the one-time preparation of a phone.
-    Setup,
+    Setup {
+        /// Enable disabled Wi-Fi connection/debugging flags over USB.
+        #[arg(long)]
+        fix_wifi: bool,
+    },
     /// Check that the phone is ready; says what to do for each problem.
     Doctor {
         /// Skip the check that sends a real touch (it scrolls Settings down and back).
         #[arg(long)]
         no_touch_test: bool,
+        /// Enable disabled Wi-Fi connection/debugging flags over USB.
+        #[arg(long)]
+        fix_wifi: bool,
     },
     /// List the elements on screen.
     Read {
@@ -285,7 +292,7 @@ async fn run(cli: Cli) -> i32 {
                 }
             };
         }
-        Cmd::Setup => return setup::run(&udid).await,
+        Cmd::Setup { fix_wifi } => return setup::run(&udid, fix_wifi).await,
         Cmd::Stop => {
             let last = client::stop_daemon(&udid).await;
             let v = envelope(Ok(fields! { "stopped": last.is_some() }), started);
@@ -297,7 +304,7 @@ async fn run(cli: Cli) -> i32 {
             print(&v, human_out, "debug");
             return exit_code(&v);
         }
-        Cmd::Doctor { no_touch_test } => ("doctor", json!({ "no_touch_test": no_touch_test })),
+        Cmd::Doctor { no_touch_test, fix_wifi } => ("doctor", json!({ "no_touch_test": no_touch_test, "fix_wifi": fix_wifi })),
         Cmd::Read { app, all, full, raw, max_age } => (
             "read",
             json!({ "app": app, "all": all, "full": full, "raw": raw, "max_age_ms": max_age }),

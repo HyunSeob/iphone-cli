@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use idevice::{
     IdeviceService, amfi::AmfiClient, lockdown::LockdownClient,
-    mobile_image_mounter::ImageMounter, provider::IdeviceProvider, usbmuxd::UsbmuxdConnection,
+    mobile_image_mounter::ImageMounter, provider::IdeviceProvider, usbmuxd::{UsbmuxdAddr, UsbmuxdConnection},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -17,7 +17,7 @@ use crate::{
     actions::{LaunchArgs, ScrollArgs},
     ax::tree::BuildOptions,
     device::{
-        ax, conn,
+        ax, conn, wifi,
         session::{Fresh, Session},
     },
     fields,
@@ -31,6 +31,9 @@ pub struct DoctorArgs {
     /// Skip the check that sends a real touch (it brings Settings to the front
     /// and scrolls its list down and back).
     pub no_touch_test: bool,
+    /// Enable disabled wireless lockdown flags through USB, then look for
+    /// the device's usbmuxd Network entry. Ordinary doctor only reads them.
+    pub fix_wifi: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -279,6 +282,82 @@ fn front_checks(
     (out, false)
 }
 
+fn wifi_check(
+    connection: Option<&str>,
+    state: Option<&wifi::Wireless>,
+    network: Result<bool, String>,
+) -> Check {
+    let mut c = Check::new("wifi", false);
+    let mut detail = Vec::new();
+    match &network {
+        Ok(true) if connection == Some("usb") => detail.push("reachable over Wi-Fi as well as USB".into()),
+        Ok(true) => detail.push("usbmuxd Network entry present".into()),
+        Ok(false) => detail.push("no usbmuxd Network entry".into()),
+        Err(e) => detail.push(format!("could not check usbmuxd Network entry: {e}")),
+    }
+    if let Some(state) = state {
+        detail.push(state.detail());
+        c.auto_fixed = !state.changed.is_empty();
+        if state.supported() == Some(false) && network != Ok(true) {
+            return c.status("warn").detail(detail.join("; ")).action(
+                "기기가 SupportsWifi와 SupportsWifiSyncing을 모두 false로 보고했습니다. 자동으로 무선 설정을 바꾸지 않았습니다. USB 연결을 사용하세요.",
+                "The device reports SupportsWifi=false and SupportsWifiSyncing=false. Wireless settings were not changed automatically. Use USB.",
+            );
+        }
+        let disabled = state.disabled();
+        if !disabled.is_empty() {
+            c = c.status("warn");
+            let keys = disabled.join(" / ");
+            return c.detail(detail.join("; ")).action(
+                &format!("기기의 무선 디버깅/Wi-Fi 연결 플래그({keys})가 꺼져 있습니다. USB 연결 상태에서 `iph setup --fix-wifi` 또는 `iph doctor --fix-wifi`를 실행하세요. 직접 설정하려면 Finder의 'Wi-Fi에 있을 때 이 iPhone 보기'(윈도: Apple 기기 앱)와 Xcode의 'Connect via network'를 확인하세요. 자동 설정 실패 원인은 detail에 표시됩니다."),
+                &format!("The device's wireless debugging/Wi-Fi connection flags ({keys}) are off. With USB connected, run `iph setup --fix-wifi` or `iph doctor --fix-wifi`. For manual setup, check Finder's \"Show this iPhone when on Wi-Fi\" (Apple Devices on Windows) and Xcode's \"Connect via network\". Any automatic setup failure is in detail."),
+            );
+        }
+    }
+    if network == Ok(true) || (network.is_ok() && state.is_none() && connection == Some("wifi")) {
+        return c.detail(detail.join("; "));
+    }
+    c = c.status("warn").detail(detail.join("; "));
+    if network.is_err() {
+        return c.action(
+            "usbmuxd에서 무선 연결 목록을 확인하지 못했습니다. 컴퓨터의 Apple 기기 연결 서비스와 USB 연결을 확인하고 `iph doctor`를 다시 실행하세요.",
+            "Could not query wireless connections from usbmuxd. Check the computer's Apple device service and USB connection, then run `iph doctor` again.",
+        );
+    }
+    match state {
+        Some(state) if state.enabled() => c.action(
+            "EnableWifiConnections와 EnableWifiDebugging은 모두 켜져 있지만 usbmuxd에 Network 연결이 없습니다. 폰과 컴퓨터가 같은 Wi-Fi 대역에 있는지, 공유기의 AP/클라이언트 격리가 꺼져 있는지, mDNS/Bonjour(_apple-mobdev2._tcp.local.)가 차단되지 않는지 확인하세요. 설정 직후라면 잠시 뒤 `iph doctor`를 다시 실행하세요.",
+            "EnableWifiConnections and EnableWifiDebugging are both on, but usbmuxd has no Network connection. Check the same Wi-Fi subnet, AP/client isolation, and whether mDNS/Bonjour (_apple-mobdev2._tcp.local.) is blocked. If just enabled, run `iph doctor` again shortly.",
+        ),
+        _ => c.action(
+            "기기의 무선 플래그를 확인하지 못했습니다(원인은 detail 참고). USB로 연결하고 잠금을 풀어 '이 컴퓨터를 신뢰'를 확인한 뒤 `iph doctor`를 다시 실행하세요. 무선 설정은 Finder/Apple 기기 앱과 Xcode의 'Connect via network'에서도 확인할 수 있습니다.",
+            "Could not confirm the device's wireless flags (see detail). Connect by USB, unlock and trust this computer, then run `iph doctor` again. Wireless settings can also be checked in Finder/Apple Devices and Xcode's \"Connect via network\".",
+        ),
+    }
+}
+
+async fn check_wifi(udid: &str, connection: Option<&str>, fix: bool) -> Check {
+    let all = match tokio::time::timeout(Duration::from_secs(3), conn::list_raw()).await {
+        Ok(Ok(all)) => all,
+        Ok(Err(e)) => return wifi_check(connection, None, Err(format!("{e:#}"))),
+        Err(_) => return wifi_check(connection, None, Err("ListDevices timed out".into())),
+    };
+    let mut network = Ok(wifi::has_network(&all, udid));
+    let mut state = None;
+    if let Some(usb) = wifi::usb_device(&all, udid) {
+        let provider = usb.to_provider(UsbmuxdAddr::default(), conn::LABEL);
+        state = Some(wifi::inspect(&provider, fix).await);
+        if fix && network == Ok(false)
+            && state.as_ref().is_some_and(|s| s.enabled() || !s.changed.is_empty()) {
+            network = wifi::discover(udid).await;
+        }
+    }
+    if connection.is_none() && state.is_none() && network == Ok(false) {
+        return Check::new("wifi", false).status("skipped").detail("phone not reachable");
+    }
+    wifi_check(connection, state.as_ref(), network)
+}
+
 pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
     let mut checks: Vec<Check> = Vec::new();
     let skip = |name: &'static str, required: bool, why: &str| {
@@ -312,6 +391,10 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
                 "Plug the phone in, or put it on the computer's Wi-Fi and wake its screen.",
             ),
     });
+
+    // Inspect (and, with --fix-wifi, configure) the USB transport before
+    // developer services: a missing image must not prevent wireless setup.
+    let wifi = check_wifi(&s.udid, connection.as_deref(), args.fix_wifi).await;
 
     // 3. Developer Mode. If it is off, make the switch appear in Settings.
     let facts = match &route {
@@ -425,25 +508,7 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
     }
 
     // 5. Wi-Fi (recommended): works without the cable.
-    checks.push(match connection.as_deref() {
-        Some("wifi") => Check::new("wifi", false),
-        Some(_) => {
-            let also_wifi = conn::list_raw().await.ok().is_some_and(|all| {
-                all.iter().any(|d| {
-                    d.udid == s.udid && matches!(d.connection_type, idevice::usbmuxd::Connection::Network(_))
-                })
-            });
-            if also_wifi {
-                Check::new("wifi", false).detail("reachable over Wi-Fi as well as USB")
-            } else {
-                Check::new("wifi", false).status("warn").action(
-                    "케이블 없이 쓰려면 폰과 컴퓨터를 같은 Wi-Fi에 두세요. (맥은 Finder, 윈도는 Apple 기기 앱에서 폰을 고르고 'Wi-Fi에 있을 때 이 iPhone 보기'를 켜야 할 수 있습니다.)",
-                    "To work without the cable, put the phone and the computer on the same Wi-Fi. (You may need \"Show this iPhone when on Wi-Fi\" in Finder on a Mac, or in the Apple Devices app on Windows.)",
-                )
-            }
-        }
-        None => skip("wifi", false, "phone not reachable"),
-    });
+    checks.push(wifi);
 
     // 6. Unlocked, and Settings comes to the front. Only lockdown's word
     // makes this a lock: a launch that cannot be seen in front can as well
@@ -593,6 +658,67 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wireless(values: [Option<bool>; 4]) -> wifi::Wireless {
+        wifi::Wireless { values, ..Default::default() }
+    }
+
+    #[test]
+    fn disabled_wireless_flags_are_named_instead_of_blame_on_the_wifi() {
+        for values in [[true, false], [false, true], [false, false]] {
+            let state = wireless([Some(true), Some(true), Some(values[0]), Some(values[1])]);
+            let c = wifi_check(Some("usb"), Some(&state), Ok(false));
+            assert_eq!((c.status, c.required, c.auto_fixed), ("warn", false, false));
+            let action = c.user_action.unwrap();
+            for (i, key) in ["EnableWifiConnections", "EnableWifiDebugging"].iter().enumerate() {
+                if !values[i] { assert!(action.contains(key), "{action}"); }
+            }
+            assert!(action.contains("iph setup --fix-wifi") && action.contains("iph doctor --fix-wifi"));
+            assert!(action.contains("Finder") && action.contains("Connect via network"));
+            assert!(!action.contains("AP/") && !action.contains("mDNS"), "{action}");
+        }
+    }
+
+    #[test]
+    fn enabled_flags_without_network_point_to_subnet_isolation_and_mdns() {
+        let state = wireless([Some(true); 4]);
+        let c = wifi_check(Some("usb"), Some(&state), Ok(false));
+        assert_eq!(c.status, "warn");
+        let action = c.user_action.unwrap();
+        assert!(action.contains("EnableWifiConnections") && action.contains("EnableWifiDebugging"));
+        assert!(action.contains("AP/") && action.contains("_apple-mobdev2._tcp.local."));
+        let c = wifi_check(Some("usb"), Some(&state), Err("ListDevices timed out".into()));
+        assert!(c.detail.unwrap().contains("ListDevices timed out"));
+        assert!(!c.user_action.unwrap().contains("AP/"));
+    }
+
+    #[test]
+    fn unknown_or_unsupported_flags_are_not_called_disabled() {
+        let c = wifi_check(Some("usb"), Some(&wireless([None; 4])), Ok(false));
+        assert_eq!(c.status, "warn");
+        assert!(c.detail.unwrap().contains("EnableWifiDebugging=unknown"));
+        let c = wifi_check(Some("usb"), Some(&wireless([Some(false); 4])), Ok(false));
+        assert!(c.user_action.unwrap().contains("SupportsWifi"));
+        assert!(!c.auto_fixed);
+    }
+
+    #[test]
+    fn fixing_flags_does_not_pass_wifi_until_network_is_observed() {
+        let mut state = wireless([Some(true); 4]);
+        state.changed = vec!["EnableWifiDebugging"];
+        let c = wifi_check(Some("usb"), Some(&state), Ok(false));
+        assert_eq!(c.status, "warn");
+        assert!(c.auto_fixed);
+        let c = wifi_check(Some("usb"), Some(&state), Ok(true));
+        assert_eq!(c.status, "ok");
+        assert!(c.auto_fixed);
+        assert!(c.detail.as_ref().unwrap().contains("reachable over Wi-Fi as well as USB"));
+        let output = json!({ "ok": true, "ready": true, "checks": [c] });
+        assert_eq!(output["checks"][0]["auto_fixed"], true);
+        let human = crate::human::render("doctor", &output);
+        assert!(human.contains('✓') && human.contains("EnableWifiDebugging=true"));
+        assert!(human.contains("enabled and read back: EnableWifiDebugging"));
+    }
 
     fn says(checks: &[Check]) -> String {
         checks

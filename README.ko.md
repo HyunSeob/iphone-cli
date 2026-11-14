@@ -77,11 +77,21 @@ cargo install --path .        # ~/.cargo/bin/iph
 | `settings_in_front` | 필수 | 설정 앱이 앞에 나와야 합니다 (다른 창이 가리면 실패). 화면을 읽을 수 없을 때는 이 대신 `accessibility_tree`가 실패합니다 |
 | `accessibility_tree` | 필수 | 화면 요소가 실제로 읽히는지 |
 | `touch_input` | 필수 | 설정 앱 목록을 한 칸 내렸다 올려서 터치가 실제로 먹는지 확인합니다 (`--no-touch-test`로 건너뜀) |
-| `wifi` | 권장 | 케이블 없이 쓰려면 |
+| `wifi` | 권장 | 기기의 무선 lockdown 플래그와 usbmuxd `Network` 연결 확인 (아래 참고) |
 | `auto_lock` | 권장 | 오래 쓸 때는 자동 잠금 '안 함' |
 | `do_not_disturb` | 알림 | `iph dnd on`으로 켠 방해금지 모드가 아직 켜져 있을 때만 나옵니다 |
 
 어느 항목이 실제로 필수였는지, 무엇을 확인하지 못했는지는 [docs/onboarding.md](docs/onboarding.md)에 적었습니다.
+
+### Wi-Fi 준비와 문제 해결
+
+같은 Wi-Fi에 있는 것만으로는 충분하지 않습니다. 지원되는 기기는 lockdown의 `com.apple.mobile.wireless_lockdown` 도메인에서 `EnableWifiConnections`와 `EnableWifiDebugging`이 **모두 `true`**여야 무선으로 발견될 수 있습니다. 하나라도 꺼져 있으면 Bonjour의 `_apple-mobdev2._tcp.local.` 서비스를 광고하지 않아, 같은 대역에서도 usbmuxd에 `Network` 연결이 나타나지 않을 수 있습니다.
+
+- USB로 연결하고 잠금 해제·컴퓨터 신뢰를 확인한 뒤 `iph setup` 또는 `iph doctor`를 실행하면 `SupportsWifi`, `SupportsWifiSyncing`과 두 활성화 플래그를 읽습니다. 두 명령 모두 기본 실행에서는 무선 플래그를 변경하지 않습니다.
+- 무선 활성화를 명시적으로 요청하려면 `iph setup --fix-wifi` 또는 `iph doctor --fix-wifi`를 실행하세요 (MCP `iph_doctor`: `fix_wifi: true`). 지원 플래그 중 하나가 `true`이면, 명시적으로 `false`인 활성화 플래그만 `true`로 설정하고 다시 읽어 확인합니다. 미지원이거나 값을 확인할 수 없으면 변경하지 않습니다. doctor는 사람이 볼 때 `--human`을 붙이세요. setup은 기존의 대화형 안내 출력을 유지합니다.
+- 플래그를 켠 뒤 **같은 폰의** usbmuxd `Network` 연결이 나타나는지 최대 4초 확인합니다. 확인된 플래그 변경은 `checks[].auto_fixed`에 표시하고, 연결이 나타나지 않으면 `wifi`는 경고로 남습니다. Wi-Fi는 권장 항목이므로 USB 준비 완료를 막지 않습니다.
+- 플래그가 꺼져 있으면 doctor가 해당 이름을 알려 줍니다. 직접 설정하려면 Finder → iPhone 선택 → 'Wi-Fi에 있을 때 이 iPhone 보기'(윈도: Apple 기기 앱), Xcode → Devices and Simulators → 'Connect via network'를 확인하세요. 자동 쓰기가 거부되거나 재확인에 실패하면 `detail`에 키와 원인이 나옵니다. 신뢰·잠금 상태를 확인해 다시 시도하거나 위 설정을 사용하세요.
+- 두 플래그가 켜져 있는데 `Network`가 없다면 같은 Wi-Fi 대역인지, AP/클라이언트 격리가 꺼져 있는지, mDNS/Bonjour(`_apple-mobdev2._tcp.local.`)가 차단되는지 확인하세요. 설정 직후에는 잠시 뒤 doctor를 다시 실행하세요. 플래그 읽기 실패나 usbmuxd 조회 실패는 꺼진 플래그·네트워크 문제로 단정하지 않고 따로 표시합니다.
 
 **알림 배너는 화면 위쪽 탭을 가로챕니다.** 배너는 화면 위쪽을 덮고 접근성 트리에는 나오지 않습니다. 그때 화면 위쪽을 누르면 배너가 눌려 다른 앱이 열립니다 (만드는 동안 실제로 한 번 겪었습니다). 오래 맡길 때는 `iph dnd on`으로 방해금지 모드를 켜 두고, 끝나면 `iph dnd off`로 되돌리세요. 자세한 내용은 아래 [방해금지 모드](#방해금지-모드).
 

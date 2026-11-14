@@ -74,11 +74,21 @@ cargo install --path .        # ~/.cargo/bin/iph
 | `settings_in_front` | yes | Settings comes to the front (fails when something covers it). When the screen cannot be read, `accessibility_tree` fails instead |
 | `accessibility_tree` | yes | Screen elements can really be read |
 | `touch_input` | yes | Scrolls the Settings list down one step and back to see that touch lands (`--no-touch-test` skips it) |
-| `wifi` | recommended | For working without the cable |
+| `wifi` | recommended | Wireless lockdown flags and the phone's usbmuxd `Network` entry (see below) |
 | `auto_lock` | recommended | Auto-Lock → Never for long sessions |
 | `do_not_disturb` | info | Shown only while Do Not Disturb from `iph dnd on` is still on |
 
 Which checks proved truly required, and what could not be verified, is in [docs/onboarding.md](docs/onboarding.md) (Korean).
+
+### Wi-Fi setup and troubleshooting
+
+The same Wi-Fi alone is not enough. On supported devices, `EnableWifiConnections` **and** `EnableWifiDebugging` in lockdown's `com.apple.mobile.wireless_lockdown` domain need to be `true` for wireless discovery. With either disabled, the phone may not advertise Bonjour's `_apple-mobdev2._tcp.local.` service, so usbmuxd has no `Network` entry even on the same subnet.
+
+- Connect by USB, unlock and trust the computer, then run `iph setup` or `iph doctor` to read `SupportsWifi`, `SupportsWifiSyncing` and both enable flags. Both commands leave wireless flags unchanged by default.
+- To explicitly enable wireless setup, run `iph setup --fix-wifi` or `iph doctor --fix-wifi` (`iph_doctor` MCP: `fix_wifi: true`). If either support flag is `true`, only enable flags explicitly reported as `false` are set to `true` and read back. Unsupported or unknown values are not changed. Add `--human` to doctor for terminal output; setup keeps its interactive, human-readable output.
+- After enabling the flags, setup briefly checks (up to 4 seconds) for the **same phone's** usbmuxd `Network` entry. `checks[].auto_fixed` records confirmed flag changes; `wifi` remains a warning until the network entry appears. Wi-Fi is optional, so that warning does not prevent USB readiness.
+- If flags are off, doctor names them. Manual alternatives are Finder → select iPhone → “Show this iPhone when on Wi-Fi” (Apple Devices on Windows), and Xcode → Devices and Simulators → “Connect via network”. If an automatic write is rejected or cannot be verified, `detail` contains the key and error; check trust/unlock and retry, or use those controls.
+- If both flags are on but `Network` is absent, check the same Wi-Fi subnet, AP/client isolation and blocked mDNS/Bonjour (`_apple-mobdev2._tcp.local.`). Run doctor again after a short wait. Unreadable flags and failed usbmuxd queries are reported separately rather than assumed to mean disabled flags or a subnet problem.
 
 **Notification banners take taps near the top of the screen.** Banners cover the top of the screen and are not part of the accessibility tree. A tap near the top then lands on the banner and opens another app (this happened once during development). For long unattended work turn Do Not Disturb on with `iph dnd on`, and put it back with `iph dnd off` afterwards. Details: [Do Not Disturb](#do-not-disturb) below.
 

@@ -23,6 +23,16 @@
 - **개발자 모드 메뉴 꺼내기:** 개발자 모드가 꺼져 있으면 `doctor`가 설정에 그 스위치가 보이게 요청합니다 (`auto_fixed: true`). 켜고 재시동하는 것은 사람이 해야 합니다. 시험 폰은 켜져 있어서 이 경로는 돌려 보지 못했습니다. iOS 27.0.1에서 Wi-Fi로 AMFI 서비스에 상태를 물으면 연결이 끊겨서, 상태는 이미지 마운터 서비스(안 되면 lockdown 값)에서 읽습니다.
 - **개발자 디스크 이미지 연결:** 서비스가 안 보이면 `cryptexd`로 Cryptex 이미지를 설치합니다 (`src/ddi.rs`). 이미지는 맥의 Xcode 폴더(`/Library/Developer/DeveloperDiskImages/iOS_DDI/Restore`)에 있으면 그것을, 없으면 공개 저장소 doronz88/DeveloperDiskImage의 고정 커밋에서 받아 SHA-256을 확인해 씁니다. 그래도 안 되면 iOS 17.4 이전용 옛 방식(image mounter, Xcode 이미지만)을 시도합니다. 받아 오기 · 확인 · 불러오기는 맥과 윈도에서 시험했지만, 두 시험 폰 모두 이미지가 이미 연결돼 있어서(윈도 폰은 재시동 뒤에도) **폰에 설치하는 단계는 한 번도 실행되지 않았습니다.**
 
+## 후속 확인: 같은 Wi-Fi인데 무선 기기가 보이지 않음
+
+2026-11-14 사용자 제공 실기기 확인: 맥과 iPhone이 같은 Wi-Fi 대역에 있어도 `com.apple.mobile.wireless_lockdown`의 `EnableWifiConnections` / `EnableWifiDebugging`이 비활성화되어 있으면 Bonjour `_apple-mobdev2._tcp.local.` 광고와 usbmuxd `Network` 엔트리가 없었습니다. USB에서 두 값을 `SetValue(..., true)`로 설정하자 광고와 `Network` 엔트리가 나타났고, doctor의 `wifi` 항목도 통과했습니다. 위 표의 11월 10~11일 검증과 별개의 후속 사례입니다.
+
+현재 `doctor`는 USB 연결에서 `SupportsWifi`, `SupportsWifiSyncing`과 두 활성화 플래그를 읽어, 꺼진 플래그와 네트워크 발견 실패를 구분합니다. `setup`과 `doctor`는 기본 실행에서 무선 플래그를 변경하지 않습니다. `setup --fix-wifi` 또는 `doctor --fix-wifi`로 명시적으로 요청하면, 지원 플래그 중 하나가 `true`인 경우 명시적으로 `false`인 활성화 플래그만 켜고 값을 다시 읽습니다. 알 수 없는 값은 바꾸지 않습니다. 설정 후 같은 UDID의 `Network` 엔트리를 최대 4초 확인하며, `auto_fixed: true`만으로 무선 연결 성공을 표시하지 않습니다. 실패 키와 기기 오류·시간 초과는 `detail`에 남습니다.
+
+직접 설정할 때는 Finder/Apple 기기 앱의 'Wi-Fi에 있을 때 이 iPhone 보기'와 Xcode의 'Connect via network'를 확인하세요. 두 플래그가 모두 켜져 있는데 엔트리가 없으면 같은 Wi-Fi 대역·AP/클라이언트 격리·mDNS 차단을 확인합니다. Wi-Fi는 계속 권장 항목으로, 경고가 있어도 USB는 사용할 수 있습니다.
+
+이번 변경의 실기기 검증(macOS, USB 연결 iPhone 15 Pro Max · iOS 27.0.1)에서는 두 지원 플래그와 `EnableWifiConnections`가 `true`, `EnableWifiDebugging`이 `false`였습니다. 수정한 doctor가 꺼진 키를 안내했고, `doctor --fix-wifi --no-touch-test`가 해당 값을 `true`로 설정·재조회해 `auto_fixed: true`를 반환했습니다. 이 기기의 `Network` 엔트리는 4초 안에 나타나지 않아 무선 성공으로 표시하지 않았습니다. 이어 실행한 릴리스 바이너리의 `setup`은 같은 경고를 유지하면서 터치 확인까지 통과해 USB 준비 완료(종료 코드 0)를 반환했습니다. 두 플래그를 모두 켜는 경로, 쓰기 거부·부분 성공·알 수 없는 값·시간 초과·지연된 Network 등록은 가짜 lockdown 응답과 가상 시간으로 회귀 검증합니다.
+
 ## 겪은 일: 알림 배너
 
 2026-11-10 23:00, 설정 앱에서 '뒤로' 버튼(화면 왼쪽 위)을 누르는 순간 일기 앱의 알림 배너가 떴고, 탭이 배너에 들어가 일기 앱이 열렸습니다. 배너는 앱의 접근성 트리에 없어서 미리 알 수 없었습니다. 그 뒤로 추가한 것:
