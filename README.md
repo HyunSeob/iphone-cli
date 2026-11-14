@@ -303,6 +303,24 @@ iph mcp  ──┼─ unix socket ─ iph daemon ─ lockdown → CoreDeviceProx
                                           └ screencaptureservice            (capture)
 ```
 
+## Reporting a problem
+
+Create an issue attachment with one command, even when no phone is detected:
+
+```sh
+iph diagnose
+iph diagnose -- read --full        # run the failing iph command once and capture its output
+iph diagnose --wifi -- read        # start with USB connected; unplug when prompted
+```
+
+Attach the generated `iph-diagnostics-*.txt` to a [GitHub issue](https://github.com/HyunSeob/iphone-cli/issues/new/choose), along with the reproduction steps and expected/actual behavior. The file contains readable JSON: versions and network state, raw and parsed usbmuxd lists, phone facts and wireless settings, pairing/connection/tunnel errors with timings, Bonjour advertisements and endpoint TCP probes, recent connection events and daemon logs, and related macOS system logs. UDIDs, addresses, command arguments and captured output are retained for debugging. Pairing records and private keys are not collected.
+
+`--wifi` records USB facts first, then observes discovery for 30 seconds while you unplug the cable. `--duration 60` changes that observation window. The phone selected during the USB baseline remains selected after it disappears; use `--udid` when several phones are attached. Bonjour services may belong to other devices, so the report preserves the advertisements without assuming their identity. On Windows, the Bonjour checks use `dns-sd` if it is installed; missing tools and failed checks are recorded and do not prevent the attachment.
+
+Use `-o report.txt` to choose the output path (existing files are preserved). `--command-timeout 180` changes the reproduction timeout. Collection itself does not change phone settings, install a developer image, or operate the screen. A command supplied after `--` performs its normal actions; the collector runs it once and never repeats it. For ordinary command capture, active device probes run afterwards so they do not initialize a session before the failure. `setup`, `mcp`, `daemon` and nested `diagnose` are not accepted as reproduction commands. Ctrl+C saves the collected partial report. Exit code 0 means the report was saved; the reproduced command's exit code and output are inside it.
+
+Connection events are recorded automatically under `~/Library/Application Support/iph/events/` on macOS or `%LOCALAPPDATA%\iph\events\` on Windows, including failures before a phone is selected. Files rotate at 512 KiB, with 32 recent files retained; the report includes tails of the 8 most recently updated files and the selected phone's daemon log. Each captured output is limited to its last 256 KiB, with truncation marked. `USBMUXD_SOCKET_ADDRESS` can select a nondefault usbmuxd socket for both normal commands and diagnosis.
+
 ## Development
 
 ```sh

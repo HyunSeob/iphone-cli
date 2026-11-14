@@ -20,7 +20,7 @@ use crate::{
     actions::parse_args,
     config::Config,
     device::session::Session,
-    doctor, fields, ipc, paths,
+    doctor, events, fields, ipc, paths,
     reply::{Fail, Res, envelope},
     script,
 };
@@ -158,6 +158,7 @@ async fn handle(stream: ipc::Stream, shared: Arc<Shared>) -> Result<()> {
             started,
         ),
         cmd => {
+            events::record("daemon.command", "started", 0, json!({ "udid": shared.udid, "command": cmd }));
             let mut session = shared.session.lock().await;
             let work = Box::pin(dispatch(&mut session, cmd, &req.args));
             let result = match tokio::time::timeout(budget(cmd), work).await {
@@ -178,6 +179,8 @@ async fn handle(stream: ipc::Stream, shared: Arc<Shared>) -> Result<()> {
             if let Err(f) = &result {
                 log(&format!("{cmd} -> {} {}", f.outcome.as_str(), f.code));
             }
+            events::record("daemon.command", if result.is_ok() { "ok" } else { "error" }, started.elapsed().as_millis(),
+                json!({ "udid": shared.udid, "command": cmd, "error": result.as_ref().err().map(|f| f.error_json()) }));
             let reply = envelope(result, started);
             session.close_input_if_unheld().await;
             session.sweep().await;
@@ -196,12 +199,7 @@ async fn handle(stream: ipc::Stream, shared: Arc<Shared>) -> Result<()> {
 /// "not connected". They carry ports and byte counts, never screen contents.
 /// `IPH_LOG` takes a filter such as `iphone_cli::tcp=debug` for more.
 fn keep_library_warnings() {
-    let filter = std::env::var("IPH_LOG").unwrap_or_else(|_| "warn".into());
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
+    events::init_tracing();
 }
 
 pub async fn run(udid: String) -> Result<()> {

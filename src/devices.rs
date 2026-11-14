@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use idevice::{IdeviceService, lockdown::LockdownClient, usbmuxd::UsbmuxdConnection};
+use idevice::{IdeviceService, lockdown::LockdownClient};
 use serde_json::{Value, json};
 
 use crate::{config::Config, device::conn, fields, reply::{Fail, Res}};
@@ -38,7 +38,7 @@ pub async fn cmd_devices(only: Option<String>) -> Res {
     let chosen = only
         .or_else(|| std::env::var("IPH_UDID").ok().filter(|u| !u.is_empty()))
         .or_else(|| Config::load().ok().and_then(|c| c.udid));
-    let mut mux = UsbmuxdConnection::default().await.ok();
+    let mut mux = conn::mux_connect().await.ok();
     let mut out: Vec<Value> = Vec::new();
     for d in &list {
         let contact = chosen.as_ref().is_none_or(|c| *c == d.udid);

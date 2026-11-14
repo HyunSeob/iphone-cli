@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use idevice::{
     IdeviceService, amfi::AmfiClient, lockdown::LockdownClient,
-    mobile_image_mounter::ImageMounter, provider::IdeviceProvider, usbmuxd::UsbmuxdConnection,
+    mobile_image_mounter::ImageMounter, provider::IdeviceProvider,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -286,7 +286,7 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
     };
 
     // 1. Pairing: the Mac holds a pairing record for this phone.
-    let paired = match UsbmuxdConnection::default().await {
+    let paired = match conn::mux_connect().await {
         Ok(mut mux) => with_timeout(mux.get_pair_record(&s.udid)).await.is_some_and(|r| r.is_ok()),
         Err(_) => false,
     };

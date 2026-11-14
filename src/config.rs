@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::paths;
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, Default)]
 #[serde(default)]
 pub struct Config {
     /// Device to use when `--udid` is not given.
@@ -15,7 +15,7 @@ pub struct Config {
 }
 
 /// Limits for `iph script` and `iph run`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct ScriptConfig {
     /// A script is stopped after this many seconds (at most 840).
@@ -31,7 +31,7 @@ impl Default for ScriptConfig {
 }
 
 /// `iph dnd`.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, Default)]
 #[serde(default)]
 pub struct DndConfig {
     /// The Focus to switch to instead of Do Not Disturb, by the name the
@@ -42,7 +42,7 @@ pub struct DndConfig {
     pub control: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct DaemonConfig {
     /// Close the touch-input media session after this many idle seconds.

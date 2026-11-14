@@ -14,7 +14,7 @@ use crate::{
     daemon::{Request, build_stamp},
     device::conn,
     i18n::t,
-    ipc, paths,
+    events, ipc, paths,
     reply::{Fail, envelope},
 };
 
@@ -35,6 +35,8 @@ pub async fn resolve_udid(flag: Option<String>) -> Result<String, Fail> {
     let devices = conn::list()
         .await
         .map_err(|e| Fail::not_sent("usbmuxd_unreachable", format!("{e:#}")))?;
+    events::record("device_selection", if devices.len() == 1 { "ok" } else { "error" }, 0,
+        json!({ "devices": devices, "count": devices.len() }));
     match devices.len() {
         1 => Ok(devices[0].udid.clone()),
         0 => Err(Fail::not_sent("no_device", "no iPhone is connected").hint(t(
@@ -171,6 +173,7 @@ pub async fn stop_daemon(udid: &str) -> Option<Value> {
 /// Send one command and return the result envelope.
 pub async fn request(udid: &str, cmd: &str, args: Value) -> Value {
     let started = Instant::now();
+    events::record("request", "started", 0, json!({ "udid": udid, "command": cmd }));
     let req = Request { build: build_stamp(), cmd: cmd.to_string(), args };
     let line = format!("{}\n", serde_json::to_string(&req).unwrap());
     for _ in 0..3 {
@@ -227,6 +230,8 @@ pub async fn request(udid: &str, cmd: &str, args: Value) -> Value {
             stop(udid).await;
             continue;
         }
+        events::record("request", if value["ok"] == true { "ok" } else { "error" }, started.elapsed().as_millis(),
+            json!({ "udid": udid, "command": cmd, "outcome": value["outcome"], "error": value["error"] }));
         return value;
     }
     envelope(
