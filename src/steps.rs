@@ -1101,7 +1101,7 @@ impl Session {
         match kind {
             "launch" => {
                 let args: LaunchArgs = match body {
-                    Value::String(s) => LaunchArgs { app: s.clone(), restart: false },
+                    Value::String(s) => LaunchArgs { app: s.clone(), ..Default::default() },
                     other => actions::parse_args(other)?,
                 };
                 let app = args.app.clone();

@@ -134,7 +134,7 @@ Apple 기기 연결 서비스가 필요합니다. CLI·MCP·스크립트는 선�
 | `iph type <글> [--clear] [--submit]` | 키보드가 올라온 칸에 붙여넣기로 입력 (한글 · 이모지 가능). 클립보드는 되돌리고, 칸의 값을 확인합니다 |
 | `iph key <키>` | `return`, `esc`, `tab`, `cmd+a` … |
 | `iph button <home\|lock\|volume_up\|volume_down>` | 하드웨어 버튼 |
-| `iph launch <bundle id \| 이름> [--restart]` / `iph apps` | 앱 실행 · 목록 |
+| `iph launch <bundle id \| 이름> [--restart] [--env K=V]… [-- <인자>…]` / `iph apps` | 앱 실행 · 목록. `--env`는 환경 변수를, `--` 뒤는 앱의 실행 인자를 넘깁니다 (`iph launch com.example.app --env TZ=UTC -- -AppleLanguages "(ko)"`). 새 프로세스만 이 값을 받으므로 둘 중 하나라도 있으면 켜져 있던 앱도 껐다 켭니다. 결과의 `restart_implied`로 알 수 있고, 인자와 환경 변수 이름(값은 제외)이 함께 나옵니다 |
 | `iph screenshot [-o 파일]` | PNG 캡처 |
 | `iph batch <파일 \| ->` | JSON 단계 배열을 한 번에 |
 | `iph script <파일 \| -> [--arg k=v]` | 자바스크립트를 바로 실행 (`-`는 표준 입력) |
@@ -258,7 +258,7 @@ iph scripts                            # 저장된 스크립트 목록
 | `swipe(방향 \| {from, to}, {duration_ms, drag})` · `scroll(방향, {until, max})` | 밀기 · 스크롤 |
 | `pinch(방향 \| {scale, rotate, at}, {duration_ms})` | 두 손가락으로 오므리기 · 벌리기 · 돌리기 (`iph pinch`와 같음) |
 | `type(글, {clear, submit})` · `key(이름)` · `button(이름)` | 입력 · 키 · 버튼 |
-| `launch(앱, {restart})` | 실행하고 앞에 나왔는지 확인. `restart`는 껐다 켜서 첫 화면에서 시작 |
+| `launch(앱, {restart, arguments, environment})` | 실행하고 앞에 나왔는지 확인. `restart`는 껐다 켜서 첫 화면에서 시작. `arguments`(글자 배열)와 `environment`(글자 값 객체)는 새 프로세스에 넘기며 `restart`를 함께 켭니다 |
 | `waitFor(selector, {timeout_ms})` | 요소가 나올 때까지 (기본 8초). 시스템 창(Face ID 등)이 앱을 잠깐 덮어도 기다립니다 |
 | `readField({selector, take, regex})` | 값 하나를 글자로. `take`: `value`(기본), `label`, `identifier`, `text` |
 | `readList({row, columns, key, group, stop_below, until, max_scrolls, limit})` | 목록을 스크롤하며 겹치지 않게 모아 `{rows, scrolls, ended}`로 돌려줍니다 |
@@ -282,7 +282,7 @@ iph scripts                            # 저장된 스크립트 목록
 
 | 단계 | 내용 |
 |---|---|
-| `launch: <앱>` 또는 `{app, restart}` | 실행하고 앞에 나왔는지 확인 |
+| `launch: <앱>` 또는 `{app, restart, arguments, environment}` | 실행하고 앞에 나왔는지 확인 |
 | `wait_for: <셀렉터>` 또는 `{selector, timeout_ms}` | 요소가 나올 때까지 (기본 8초) |
 | `tap: <셀렉터>` 또는 `{selector, long_ms, double, timeout_ms}` · `tap: [셀렉터, …]` | 탭 · 이어서 탭 |
 | `type: <글>` 또는 `{text, clear, submit}` · `swipe: <방향>` 또는 `{from, to, duration_ms, drag}` | 입력 · 밀기 |
@@ -309,7 +309,7 @@ ln -s "$PWD/skills/iph" ~/.claude/skills/iph                    # Claude Code
 ln -s "$PWD/skills/iph" ~/.codex/skills/iph                     # Codex
 ```
 
-도구: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`. 인자와 결과는 CLI와 같습니다. `iph_script`는 `code`(자바스크립트)와 `args`를, `iph_run`은 `name`과 `args`를 받습니다. 에이전트용 안내는 [skills/iph/SKILL.md](skills/iph/SKILL.md)에 있습니다.
+도구: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`. 인자와 결과는 CLI와 같고, `iph_launch`는 `arguments`(글자 배열)와 `environment`(글자 값 객체)를 받습니다. `iph_script`는 `code`(자바스크립트)와 `args`를, `iph_run`은 `name`과 `args`를 받습니다. 에이전트용 안내는 [skills/iph/SKILL.md](skills/iph/SKILL.md)에 있습니다.
 
 ## 속도
 

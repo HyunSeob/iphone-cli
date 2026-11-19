@@ -1,7 +1,10 @@
 //! The commands themselves, shared by the CLI, the MCP server, `batch` and
 //! scripts. Each takes JSON arguments and returns the fields of its result.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -282,6 +285,42 @@ pub struct LaunchArgs {
     /// Quit the app first, so it starts from its first screen.
     #[serde(default)]
     pub restart: bool,
+    /// Passed to the app's process, as after `--` in `devicectl device process launch`.
+    #[serde(default)]
+    pub arguments: Vec<String>,
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+}
+
+impl LaunchArgs {
+    pub fn validate(&self) -> Res<()> {
+        for key in self.environment.keys() {
+            if key.is_empty() || key.contains('=') {
+                return Err(Fail::invalid(format!(
+                    "environment names must be non-empty and contain no `=`: \"{key}\""
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Arguments and environment only reach a process that starts now.
+    pub fn has_launch_options(&self) -> bool {
+        !self.arguments.is_empty() || !self.environment.is_empty()
+    }
+
+    pub fn kill_existing(&self) -> bool {
+        self.restart || self.has_launch_options()
+    }
+
+    fn environment_dictionary(&self) -> Option<plist::Dictionary> {
+        (!self.environment.is_empty()).then(|| {
+            self.environment
+                .iter()
+                .map(|(k, v)| (k.clone(), plist::Value::String(v.clone())))
+                .collect()
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1190,13 +1229,23 @@ impl Session {
     }
 
     pub async fn cmd_launch(&mut self, args: LaunchArgs) -> Res {
+        args.validate()?;
         let bundle = self.resolve_bundle(&args.app).await?;
         let mut svc = self.app_service().await?;
+        let arguments: Vec<&str> = args.arguments.iter().map(String::as_str).collect();
         let launch_began = Instant::now();
         // From here the launch request may have reached the phone.
         let launched = tokio::time::timeout(
             Duration::from_secs(30),
-            svc.launch_application(bundle.as_str(), &[], args.restart, false, None, None, None),
+            svc.launch_application(
+                bundle.as_str(),
+                &arguments,
+                args.kill_existing(),
+                false,
+                args.environment_dictionary(),
+                None,
+                None,
+            ),
         )
         .await
         .map_err(|_| "no answer within 30 s".to_string())
@@ -1227,13 +1276,20 @@ impl Session {
                 }
             delay = Duration::from_millis(300);
         }
-        Ok(fields! {
+        let mut out = fields! {
             "sent": true,
             "verified": foreground,
             "foreground": foreground,
             "bundle_id": bundle,
             "pid": pid,
-        })
+            "restart": args.kill_existing(),
+        };
+        if args.has_launch_options() {
+            out.insert("restart_implied".into(), json!(!args.restart));
+            out.insert("arguments".into(), json!(args.arguments));
+            out.insert("environment_keys".into(), json!(args.environment.keys().collect::<Vec<_>>()));
+        }
+        Ok(out)
     }
 
     pub async fn cmd_screenshot(&mut self, args: ScreenshotArgs) -> Res {
@@ -1812,6 +1868,56 @@ mod clipboard_tests {
         // `set_text` writes these three kinds.
         assert!(!app_provided(&kinds(&["public.utf8-plain-text", "public.plain-text", "public.text"])));
         assert!(!app_provided(&kinds(&["public.png"])));
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::LaunchArgs;
+    use crate::actions::parse_args;
+    use serde_json::json;
+
+    fn parse(v: serde_json::Value) -> Result<LaunchArgs, crate::reply::Fail> {
+        parse_args::<LaunchArgs>(&v)
+    }
+
+    #[test]
+    fn a_plain_launch_sends_nothing_extra() {
+        let a = parse(json!({"app": "x"})).unwrap();
+        assert!(!a.kill_existing());
+        assert!(a.environment_dictionary().is_none());
+    }
+
+    #[test]
+    fn arguments_or_environment_imply_a_restart() {
+        let a = parse(json!({"app": "x", "arguments": ["-k", "v"]})).unwrap();
+        assert!(a.kill_existing() && !a.restart);
+        let b = parse(json!({"app": "x", "environment": {"TZ": "UTC"}})).unwrap();
+        assert!(b.kill_existing());
+        let dict = b.environment_dictionary().unwrap();
+        assert_eq!(dict.get("TZ").and_then(|v| v.as_string()), Some("UTC"));
+    }
+
+    #[test]
+    fn environment_values_may_hold_an_equals_sign() {
+        let a = parse(json!({"app": "x", "environment": {"K": "a=b"}})).unwrap();
+        assert!(a.validate().is_ok());
+    }
+
+    #[test]
+    fn environment_names_are_checked() {
+        for name in ["", "A=B"] {
+            let a = parse(json!({"app": "x", "environment": {name: "v"}})).unwrap();
+            assert_eq!(a.validate().unwrap_err().code, "invalid_argument");
+        }
+    }
+
+    #[test]
+    fn a_non_string_value_is_rejected_at_the_boundary() {
+        assert_eq!(parse(json!({"app": "x", "environment": {"A": 1}})).unwrap_err().code, "invalid_argument");
+        assert_eq!(parse(json!({"app": "x", "environment": ["A=1"]})).unwrap_err().code, "invalid_argument");
+        assert_eq!(parse(json!({"app": "x", "arguments": "-a"})).unwrap_err().code, "invalid_argument");
+        assert_eq!(parse(json!({"app": "x", "arguments": [1]})).unwrap_err().code, "invalid_argument");
     }
 }
 
