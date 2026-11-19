@@ -9,7 +9,7 @@
 - **Agent-ready** — CLI + MCP server (`iph mcp`) + safety-first outcomes (`done` / `not_sent` / `unknown`)
 - **Single native binary (macOS & Windows)** — no Python, Node.js, or Appium runtime; install one binary and target a real iPhone on **iOS 27+**
 
-Website: [hyunseob.github.io/iphone-cli](https://hyunseob.github.io/iphone-cli/) · LLM Reference: [llms.txt](https://hyunseob.github.io/iphone-cli/llms.txt) · Crate: [crates.io/crates/iphone-cli](https://crates.io/crates/iphone-cli) · 한국어: [README.ko.md](README.ko.md)
+[Website](https://hyunseob.github.io/iphone-cli/) · [llms.txt](https://hyunseob.github.io/iphone-cli/llms.txt) · [crates.io](https://crates.io/crates/iphone-cli) · [한국어](README.ko.md)
 
 ![iphone-cli demo](docs/demo.gif)
 

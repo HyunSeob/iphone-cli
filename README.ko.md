@@ -9,7 +9,7 @@
 - **에이전트 친화 설계** — CLI + MCP 서버(`iph mcp`)와 재시도 판단이 가능한 결과 상태(`done` / `not_sent` / `unknown`)를 제공합니다
 - **단일 네이티브 바이너리 (macOS · Windows)** — Python · Node.js · Appium 런타임 없이 바로 설치하고, **실제 아이폰(iOS 27 이상)** 에서 동작합니다
 
-웹사이트: [hyunseob.github.io/iphone-cli](https://hyunseob.github.io/iphone-cli/) · LLM 레퍼런스: [llms.txt](https://hyunseob.github.io/iphone-cli/llms.txt) · 크레이트: [crates.io/crates/iphone-cli](https://crates.io/crates/iphone-cli) · English: [README.md](README.md)
+[웹사이트](https://hyunseob.github.io/iphone-cli/) · [llms.txt](https://hyunseob.github.io/iphone-cli/llms.txt) · [crates.io](https://crates.io/crates/iphone-cli) · [English](README.md)
 
 ![iphone-cli 데모](docs/demo.gif)
 
