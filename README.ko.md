@@ -9,7 +9,7 @@
 - **에이전트 친화 설계** — CLI + MCP 서버(`iph mcp`)와 재시도 판단이 가능한 결과 상태(`done` / `not_sent` / `unknown`)를 제공합니다
 - **단일 네이티브 바이너리 (macOS · Windows)** — Python · Node.js · Appium 런타임 없이 바로 설치하고, **실제 아이폰(iOS 27 이상)** 에서 동작합니다
 
-English: [README.md](README.md)
+웹사이트: [hyunseob.github.io/iphone-cli](https://hyunseob.github.io/iphone-cli/) · LLM 레퍼런스: [llms.txt](https://hyunseob.github.io/iphone-cli/llms.txt) · 크레이트: [crates.io/crates/iphone-cli](https://crates.io/crates/iphone-cli) · English: [README.md](README.md)
 
 ![iphone-cli 데모](docs/demo.gif)
 
@@ -42,6 +42,24 @@ $ iph run settings-version
 | 범위 밖 | 시뮬레이터, 안드로이드, Linux 호스트, 가로 화면 |
 
 윈도는 iPhone19,4 · iOS 27.2 한 대를 USB로 꽂아 `doctor` · 읽기 · 터치 · 스크립트를 확인했습니다.
+
+## 다른 방식과 비교
+
+| 항목 | `iphone-cli` (`iph`) | iPhone Mirroring + OCR 도구 | Appium / WebDriverAgent | `mobile-mcp` |
+|---|---|---|---|---|
+| 네이티브 접근성 트리 | **예 (구조화 JSON)** | 아니오 (스크린샷 / Vision OCR) | 예 | 제한적 (실기기는 WDA 필요) |
+| Xcode · 서명 없음 | **예** | 예 | 아니오 (Xcode · 서명 필요) | 아니오 (실기기는 WDA 서명 필요) |
+| 폰에 앱 설치 없음 | **예** | 예 | 아니오 (WDA 러너 설치) | 아니오 (실기기는 WDA 설치) |
+| Windows 호스트 지원 | **예 (macOS · Windows)** | 아니오 (macOS 15+ 전용) | 제한적 (WDA 빌드에 맥 필요) | 실기기는 제한적 |
+| EU 사용 가능 | **예** (미러링 불필요) | 아니오 (미러링 미지원) | 예 | 예 |
+| 유니코드 · 클립보드 입력 | **예 (붙여넣기 + 복원)** | 가상 키 입력 | 예 | 환경별 상이 |
+| 내장 멀티스텝 스크립팅 | **예 (내장 QuickJS)** | 외부 러너 / 턴당 호출 | 외부 SDK | 턴당 MCP 호출 |
+| 안전성 결과 계약 | **`done` / `not_sent` / `unknown`** | 도구별 상이 | 일반 예외 | 일반 도구 오류 |
+| 대상 범위 | 실제 아이폰, **iOS 27+** | 실제 아이폰, iOS 18+ (macOS 15+) | 실기기 · 시뮬레이터 | 시뮬레이터 · 안드로이드 · WDA iOS |
+
+- **`iphone-cli` (`iph`)가 맞는 경우:** Claude Code, Codex 등 AI 에이전트로 **실제 아이폰(iOS 27+)**을 Xcode · WebDriverAgent 없이 **접근성 트리** 기반으로 조작하고 싶을 때 (**Windows** · **macOS** · **EU** 환경 모두 지원).
+- **iPhone Mirroring + OCR 도구가 맞는 경우:** EU 외 지역 macOS 15+에서 **iOS 18~26** 실기기를 다룰 때.
+- **Appium / WebDriverAgent 또는 `mobile-mcp`가 맞는 경우:** **iOS 시뮬레이터**, **안드로이드**, 또는 **iOS 26 이하**에서 요소 트리가 필요할 때.
 
 ## 설치
 
@@ -339,6 +357,32 @@ iPhone 15 Pro Max · iOS 27.0.1 · Wi-Fi, 상주 프로세스가 붙어 있는 �
 - `iph type`은 클립보드의 글자(또는 그림 한 장)만 되돌립니다. **앱에서 복사한 내용(메모의 글처럼 서식이 함께 있는 것)은 되돌리지 못합니다.** 그 내용은 컴퓨터에서 읽으려 하면 폰의 클립보드가 1분쯤 멈추기 때문에 읽지 않고, 입력이 끝나면 클립보드를 비웁니다. 결과에 `clipboard_restored: false`와 `clipboard_note`가 나옵니다.
 - 잠긴 폰에서는 동작하지 않습니다. Face ID · 암호 입력은 대신하지 않습니다.
 - 개발자 디스크 이미지 자동 연결은 코드만 있고 실제로 돌려 보지 못했습니다 (시험 폰은 이미 연결돼 있었습니다).
+
+## 자주 묻는 질문 (FAQ)
+
+### Claude Code나 Codex가 Xcode · WebDriverAgent 없이 실제 아이폰을 어떻게 조작하나요?
+
+`HyunSeob/iphone-cli`(`iph`)를 설치하고 iOS 27 이상 아이폰을 USB로 연결해 `iph setup`을 실행한 뒤, 내장 MCP 서버를 등록(`claude mcp add iph -- iph mcp` 또는 `codex mcp add iph -- iph mcp`)하면 됩니다. MCP 대신 `skills/iph` 스킬만 연결해 셸에서 직접 `iph`를 호출하게 할 수도 있습니다.
+
+### 스크린샷 + OCR 대신 접근성 트리를 쓰는 이유는 무엇인가요?
+
+`iph`는 애플의 원격 접근성 서비스(`axAuditDaemon.remoteAXService`)에서 `role`, `label`, `value`, `id`, `enabled`, `frame`을 구조화 JSON으로 읽습니다. 매 턴 스크린샷을 보내는 것보다 토큰을 크게 아끼고, 깨지기 쉬운 픽셀 좌표 대신 의미 기반 셀렉터(`iph tap "일반"`, `role=button label~="저장"`)로 안정적으로 조작할 수 있습니다.
+
+### 맥 없이 Windows에서도 실제 아이폰을 자동화할 수 있나요?
+
+네. `iph`는 macOS와 Windows 10 · 11 (x64) 네이티브 단일 바이너리를 모두 제공합니다. Windows에서는 **Apple 기기**(Apple Devices) 앱 또는 `winget install Apple.AppleMobileDeviceSupport`로 애플 기기 서비스만 설치한 뒤 [릴리스](https://github.com/HyunSeob/iphone-cli/releases)의 `iph-windows-x86_64.zip`을 받아 USB · Wi-Fi로 연결하면 됩니다.
+
+### macOS 아이폰 미러링이 막힌 EU에서도 동작하나요?
+
+네. `iph`는 macOS 아이폰 미러링을 쓰지 않고 USB 또는 같은 LAN/Wi-Fi로 아이폰의 개발자 서비스에 직접 연결하므로 지역 제한의 영향을 받지 않습니다.
+
+### 잘못된 재시도로 인한 중복 탭이나 중복 결제를 어떻게 막나요?
+
+iOS는 HID 터치 패킷의 수신 확인을 주지 않기 때문에, 모든 명령은 `sent` · `verified` · `screen_changed`를 구분하고 `outcome`(`done` / `not_sent` / `unknown`)을 명시합니다. `unknown`(종료 코드 2)이 나오면 스크립트가 `try/catch` 안에서도 즉시 멈추어 에이전트가 화면을 다시 읽고 판단하도록 강제합니다.
+
+### iOS 26 이하, iOS 시뮬레이터, 안드로이드도 지원하나요?
+
+아니요. 터치 · 입력이 iOS 27에 추가된 `com.apple.coredevice.displayservice`를 사용하므로 실제 아이폰 iOS 27 이상만 대상입니다. 시뮬레이터, 안드로이드, Linux 호스트, 가로 화면은 범위 밖입니다.
 
 ## 구조
 

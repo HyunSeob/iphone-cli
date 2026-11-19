@@ -9,7 +9,7 @@
 - **Agent-ready** — CLI + MCP server (`iph mcp`) + safety-first outcomes (`done` / `not_sent` / `unknown`)
 - **Single native binary (macOS & Windows)** — no Python, Node.js, or Appium runtime; install one binary and target a real iPhone on **iOS 27+**
 
-한국어: [README.ko.md](README.ko.md)
+Website: [hyunseob.github.io/iphone-cli](https://hyunseob.github.io/iphone-cli/) · LLM Reference: [llms.txt](https://hyunseob.github.io/iphone-cli/llms.txt) · Crate: [crates.io/crates/iphone-cli](https://crates.io/crates/iphone-cli) · 한국어: [README.ko.md](README.ko.md)
 
 ![iphone-cli demo](docs/demo.gif)
 
@@ -39,6 +39,24 @@ $ iph tap "General"
 | Out of scope | Simulators, Android, Linux hosts, landscape |
 
 On Windows, `doctor`, reading, touch and scripts were checked with one iPhone19,4 on iOS 27.2 over USB.
+
+## Comparison with alternatives
+
+| Capability | `iphone-cli` (`iph`) | iPhone Mirroring + OCR tools | Appium / WebDriverAgent | `mobile-mcp` |
+|---|---|---|---|---|
+| Native Accessibility Tree | **Yes (structured JSON)** | No (screenshots / Vision OCR) | Yes | Partial (WDA on real iOS) |
+| No Xcode / No code signing | **Yes** | Yes | No (requires Xcode & signing) | No (WDA signing on real iOS) |
+| No app installed on iPhone | **Yes** | Yes | No (installs WDA runner) | No (installs WDA on real iOS) |
+| Windows host support | **Yes (macOS & Windows)** | No (macOS 15+ only) | Limited (needs macOS to build WDA) | Limited on real iOS |
+| Works in the EU | **Yes** (no Mirroring needed) | No (Mirroring unavailable) | Yes | Yes |
+| Unicode / clipboard text input | **Yes (paste + restore)** | Simulated keystrokes | Yes | Varies |
+| Built-in multi-step scripting | **Yes (embedded QuickJS)** | External / per-turn calls | External SDK | Per-turn MCP calls |
+| Safety outcome contract | **`done` / `not_sent` / `unknown`** | Varies | Standard exceptions | Standard tool errors |
+| Target scope | Real iPhone, **iOS 27+** | Real iPhone, iOS 18+ (macOS 15+) | Real iOS & Simulators | Simulators, Android, WDA iOS |
+
+- **Choose `iphone-cli` (`iph`)** when you want Claude Code, Codex, or another AI agent to operate a **real iPhone (iOS 27+)** via the **accessibility tree** without Xcode or WebDriverAgent — including on **Windows** or in the **EU**.
+- **Choose an iPhone Mirroring + OCR tool** if your phone runs **iOS 18–26** on macOS 15+ outside the EU.
+- **Choose Appium / WebDriverAgent or `mobile-mcp`** if you need **iOS Simulators**, **Android**, or **iOS 26 and earlier** with an element tree.
 
 ## Install
 
@@ -336,6 +354,32 @@ A reading takes more than a second because of the phone: after a request it wait
 - `iph type` puts back the clipboard's text (or one image). **Content copied in an app (text from Notes, which comes with formatting) is not put back.** Reading it from the computer stalls the phone's clipboard for about a minute, so it is left unread and the clipboard is emptied after typing. The result says `clipboard_restored: false` with a `clipboard_note`.
 - Nothing works on a locked phone. Face ID and passcode prompts are never answered for you.
 - Mounting the developer disk image automatically is written but untested (the test phone already had it mounted).
+
+## FAQ
+
+### How can Claude Code or Codex control a real iPhone without Xcode or WebDriverAgent?
+
+Install `HyunSeob/iphone-cli` (`iph`), connect an iOS 27+ iPhone over USB, run `iph setup`, and register the built-in MCP server (`claude mcp add iph -- iph mcp` or `codex mcp add iph -- iph mcp`). You can also link `skills/iph` so an agent drives `iph` directly in the shell without registering MCP.
+
+### Why use the accessibility tree instead of screenshots and OCR?
+
+`iph` reads Apple's native remote accessibility service (`axAuditDaemon.remoteAXService`) and returns compact JSON elements with `role`, `label`, `value`, `id`, `enabled`, and `frame`. Agents spend far fewer tokens than sending screenshots every turn and target controls semantically (`iph tap "General"`, `role=button label~="Save"`) rather than relying on fragile pixel coordinates.
+
+### Can I automate a real iPhone from Windows without a Mac?
+
+Yes. `iph` is a single native binary for both macOS and Windows 10/11 (x64). On Windows, install Apple's device service via the **Apple Devices** app or `winget install Apple.AppleMobileDeviceSupport`, download `iph-windows-x86_64.zip` from [releases](https://github.com/HyunSeob/iphone-cli/releases), and connect over USB or Wi-Fi.
+
+### Does `iphone-cli` work in the EU without macOS iPhone Mirroring?
+
+Yes. `iph` communicates directly with Apple's developer services over USB or LAN/Wi-Fi and does not use macOS iPhone Mirroring, so it is unaffected by regional iPhone Mirroring restrictions.
+
+### How does `iphone-cli` prevent accidental double taps or duplicate orders?
+
+Because iOS never confirms HID touch packets, every command separates `sent`, `verified`, and `screen_changed` and returns an explicit `outcome` (`done`, `not_sent`, or `unknown`). When an outcome is `unknown` (exit code 2), scripts stop immediately—even inside `try/catch`—so the agent reads the screen before deciding whether to act again.
+
+### Does `iphone-cli` support iOS 26 or earlier, iOS Simulators, or Android?
+
+No. Touch and text input rely on `com.apple.coredevice.displayservice`, introduced in iOS 27. Simulators, Android, Linux hosts, and landscape orientation are out of scope.
 
 ## How it is put together
 
