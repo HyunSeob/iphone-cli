@@ -16,7 +16,7 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 
 const SCRIPT_DOC: &str = "Run JavaScript that drives the phone, in one call: loops, conditions and several steps without a round trip each. \
 The commands are functions that return what the tool of the same name returns: read(opts), find(selector), tap(target, opts), swipe(direction | {from, to}, opts), \
-scroll(direction, {until, max}), type(text, {clear, submit}), key(name), button(name), launch(app, {restart}), apps(). Also waitFor(selector, {timeout_ms}), \
+scroll(direction, {until, max}), type(text, {clear, submit}), key(name), button(name), launch(app, {restart, arguments, environment}), apps(). Also waitFor(selector, {timeout_ms}), \
 readField({selector, take, regex}) → text, readList({row, columns, group, stop_below, max_scrolls}) → {rows, scrolls, ended}, sleep(ms), log(…), output(key, value). \
 tap(target) waits up to 5 s for a selector to appear and hold still; tap([a, b, c]) presses a keypad without re-reading. \
 A call that fails throws an Error with .code, .outcome, .hint and .result (the full result object); uncaught, it ends the script and the result says which call and line. \
@@ -135,6 +135,14 @@ fn tools() -> Vec<Value> {
             json!({
                 "app": { "type": "string" },
                 "restart": { "type": "boolean", "description": "Quit the app first so it starts from its first screen." },
+                "arguments": {
+                    "type": "array", "items": { "type": "string" },
+                    "description": "Launch arguments for the app, e.g. [\"-AppleLanguages\", \"(ko)\"]. The app is restarted, since a running process takes none.",
+                },
+                "environment": {
+                    "type": "object", "additionalProperties": { "type": "string" },
+                    "description": "Environment variables for the app's process, e.g. {\"TZ\": \"UTC\"}. The app is restarted.",
+                },
             }),
             &["app"],
         ),
@@ -337,6 +345,14 @@ pub async fn serve(udid: String, only: Vec<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_offers_arguments_and_environment() {
+        let launch = tools().into_iter().find(|t| t["name"] == "iph_launch").unwrap();
+        let props = &launch["inputSchema"]["properties"];
+        assert_eq!(props["arguments"]["items"]["type"], "string");
+        assert_eq!(props["environment"]["additionalProperties"]["type"], "string");
+    }
 
     #[test]
     fn tool_list_covers_the_spec() {

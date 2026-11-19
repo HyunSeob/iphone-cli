@@ -866,6 +866,18 @@ mod tests {
     }
 
     #[test]
+    fn launch_passes_arguments_and_environment_on() {
+        let mut fake = Fake::default();
+        let code = r#"launch("a.b", {arguments: ["-AppleLanguages", "(ko)"], environment: {TZ: "UTC"}});"#;
+        let (res, _) = go(&mut fake, code, json!({}), limits());
+        res.unwrap();
+        assert_eq!(
+            fake.asked[0],
+            ("launch".to_string(), json!({"arguments": ["-AppleLanguages", "(ko)"], "environment": {"TZ": "UTC"}, "app": "a.b"}))
+        );
+    }
+
+    #[test]
     fn a_failed_call_throws_and_stops_the_script_unless_caught() {
         let not_found = json!({"ok": false, "outcome": "not_sent",
             "error": {"code": "not_found", "message": "no element matches", "hint": "scroll"},
