@@ -18,6 +18,7 @@ const SCRIPT_DOC: &str = "Run JavaScript that drives the phone, in one call: loo
 The commands are functions that return what the tool of the same name returns: read(opts), find(selector), tap(target, opts), swipe(direction | {from, to}, opts), \
 pinch(direction | {scale, rotate, at}, opts), scroll(direction, {until, max}), type(text, {clear, submit}), key(name), button(name), launch(app, {restart, arguments, environment}), apps(). Also waitFor(selector, {timeout_ms}), \
 readField({selector, take, regex}) → text, readList({row, columns, group, stop_below, max_scrolls}) → {rows, scrolls, ended}, sleep(ms), log(…), output(key, value). \
+syslog(\"start\" | \"stop\" | \"status\", {process, pid, level, grep, max}) captures the phone's log as iph_syslog does; a script cannot choose the file. \
 tap(target) waits up to 5 s for a selector to appear and hold still; tap([a, b, c]) presses a keypad without re-reading. \
 A call that fails throws an Error with .code, .outcome, .hint and .result (the full result object); uncaught, it ends the script and the result says which call and line. \
 After a call whose outcome is \"unknown\" the script is stopped and cannot go on. \
@@ -169,6 +170,23 @@ fn tools() -> Vec<Value> {
             &["action"],
         ),
         tool(
+            "iph_syslog",
+            "Capture the phone's log to a JSON Lines file while other calls run, to check what an app logged after a tap. \
+             \"start\" (one capture at a time), \"stop\" (ends it; with grep or max it returns the latest matching entries), \"status\". \
+             Filter with process (executable names such as Preferences; survives app restarts) or pid; unfiltered over Wi-Fi it is a lot of data.",
+            json!({
+                "action": { "type": "string", "enum": ["start", "stop", "status"] },
+                "process": { "type": "array", "items": { "type": "string" }, "description": "start: keep only these executables." },
+                "pid": { "type": "integer", "description": "start: keep only this pid (filtered on the phone)." },
+                "level": { "type": "string", "enum": ["debug", "info", "notice", "error", "fault"], "description": "start: lowest level kept." },
+                "output": { "type": "string", "description": "start: absolute path of the file (default: in iph's state directory)." },
+                "max_mb": { "type": "integer", "description": "start: move the file to <file>.1 at this size (default 64)." },
+                "grep": { "type": "string", "description": "stop: regular expression matched against each message." },
+                "max": { "type": "integer", "description": "stop: most entries returned, the latest (default 50, at most 1000)." },
+            }),
+            &["action"],
+        ),
+        tool(
             "iph_screenshot",
             "Save a PNG screenshot to a file on this computer. Use iph_read for content; this is for looks.",
             json!({ "path": { "type": "string", "description": "Absolute path of the PNG to write." } }),
@@ -223,13 +241,16 @@ async fn call(udid: &str, name: &str, args: Value) -> Value {
             Err(e) => envelope(Err(Fail::invalid(e.to_string())), started),
         },
         "iph_scripts" => envelope(script::cmd_scripts(), started),
+        "iph_syslog" if args.get("output").and_then(|o| o.as_str()).is_some_and(|o| !std::path::Path::new(o).is_absolute()) => {
+            envelope(Err(Fail::invalid("`output` must be an absolute path")), started)
+        }
         "iph_script" | "iph_run" => match script_request(name, &args) {
             Ok(request) => client::request(udid, "script", request).await,
             Err(f) => envelope(Err(f), started),
         },
         "iph_read" | "iph_find" | "iph_tap" | "iph_swipe" | "iph_pinch" | "iph_scroll" | "iph_type" | "iph_key"
         | "iph_button" | "iph_launch" | "iph_apps" | "iph_screenshot" | "iph_batch" | "iph_doctor"
-        | "iph_dnd" => {
+        | "iph_dnd" | "iph_syslog" => {
             let cmd = name.trim_start_matches("iph_");
             let args = if cmd == "apps" { Value::Null } else { args };
             client::request(udid, cmd, args).await

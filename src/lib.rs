@@ -25,6 +25,7 @@ pub mod mcp;
 pub mod paths;
 pub mod script;
 pub mod steps;
+pub mod syslog;
 pub mod tcp;
 pub mod reply;
 pub mod selector;

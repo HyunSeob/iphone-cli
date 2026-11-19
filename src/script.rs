@@ -145,6 +145,7 @@ const PRELUDE: &str = r#"
   g.waitFor = (selector, o) => call("wait_for", { ...opts(o), selector });
   g.readField = (spec) => call("read_field", opts(spec)).value;
   g.readList = (spec) => call("read_list", opts(spec));
+  g.syslog = (action, o) => call("syslog", { ...opts(o), action });
   g.sleep = (ms) => { __sleep(Number(ms) || 0); };
   g.log = (...xs) => { __emit("log", "", xs.map(text).join(" ")); };
   g.output = (key, value) => { __emit("output", String(key), JSON.stringify(value === undefined ? null : value)); };
@@ -459,6 +460,10 @@ impl RunState {
         let Value::Object(mut map) = args else {
             return Err(Fail::invalid(format!("`{cmd}` takes an object of arguments")));
         };
+        if cmd == "syslog" && map.get("output").is_some_and(|v| !v.is_null()) {
+            // Saved scripts come from anywhere; the file stays where iph keeps its own.
+            return Err(Fail::invalid("a script cannot choose the file; the capture goes to iph's state directory"));
+        }
         let hint = map.remove("hint").and_then(|v| v.as_str().map(String::from));
         Ok(Prepared { args: Value::Object(map), hint })
     }
@@ -667,8 +672,9 @@ impl PhoneHost<'_> {
                 let (_, value) = Box::pin(self.session.read_field(&args)).await?;
                 Ok(fields! { "value": value })
             }
+            "syslog" => Box::pin(self.session.cmd_syslog(&args)).await,
             other => Err(Fail::invalid(format!(
-                "a script has no `{other}` (read, find, tap, swipe, pinch, scroll, type, key, button, launch, apps, waitFor, readField, readList)"
+                "a script has no `{other}` (read, find, tap, swipe, pinch, scroll, type, key, button, launch, apps, waitFor, readField, readList, syslog)"
             ))),
         }
     }
@@ -880,6 +886,34 @@ mod tests {
             fake.asked[0],
             ("launch".to_string(), json!({"arguments": ["-AppleLanguages", "(ko)"], "environment": {"TZ": "UTC"}, "app": "a.b"}))
         );
+    }
+
+    #[test]
+    fn syslog_is_not_an_input_and_cannot_choose_its_file() {
+        let mut fake = Fake::default();
+        let code = r#"
+            syslog("start", {process: ["Preferences"], level: "info"});
+            tap("일반"); tap("정보");
+            const done = syslog("stop", {grep: "row", max: 5});
+            let refused = null;
+            try { syslog("start", {output: "/tmp/elsewhere.jsonl"}); } catch (e) { refused = e.code; }
+            return { refused };
+        "#;
+        let (res, _) = go(&mut fake, code, json!({}), limits());
+        let out = res.unwrap();
+        let asked: Vec<(&str, &Value)> = fake.asked.iter().map(|(c, a)| (c.as_str(), a)).collect();
+        assert_eq!(asked[0], ("syslog", &json!({"process": ["Preferences"], "level": "info", "action": "start"})));
+        assert_eq!(asked[3], ("syslog", &json!({"grep": "row", "max": 5, "action": "stop"})));
+        assert_eq!(asked.len(), 4, "the refused start never reached the phone");
+        assert_eq!(out["outputs"]["refused"], "invalid_argument");
+        assert_eq!(out["inputs_sent"], 2);
+    }
+
+    #[test]
+    fn a_script_may_pass_a_null_output() {
+        let mut run = RunState::default();
+        assert!(run.prepare("syslog", json!({"action": "start", "output": null})).is_ok());
+        assert!(run.prepare("syslog", json!({"action": "start", "output": "/tmp/x.jsonl"})).is_err());
     }
 
     #[test]

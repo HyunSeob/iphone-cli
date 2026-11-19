@@ -9,7 +9,7 @@ pub fn now_utc() -> String {
     format_utc(secs)
 }
 
-fn format_utc(secs: i64) -> String {
+pub fn format_utc(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     // Civil date from a day count (Howard Hinnant's algorithm).

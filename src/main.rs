@@ -188,6 +188,31 @@ enum Cmd {
     },
     /// Do Not Disturb on the phone: on, off (back to the Focus that was on), status.
     Dnd { action: String },
+    /// Write the phone's log to a JSON Lines file while a test runs: start, stop, status.
+    Syslog {
+        action: String,
+        /// start: keep only this process, by executable name (Settings is Preferences). Repeatable.
+        #[arg(long)]
+        process: Vec<String>,
+        /// start: keep only this pid (the phone filters it).
+        #[arg(long)]
+        pid: Option<u32>,
+        /// start: lowest level kept: debug, info, notice, error, fault.
+        #[arg(long)]
+        level: Option<String>,
+        /// start: the file to write (default: <udid>.syslog.jsonl in the state directory).
+        #[arg(short, long)]
+        output: Option<String>,
+        /// start: move the file to <file>.1 when it reaches this size (default 64).
+        #[arg(long)]
+        max_mb: Option<u64>,
+        /// stop: return the entries whose message matches this regular expression.
+        #[arg(long)]
+        grep: Option<String>,
+        /// stop: most entries to return, the latest ones (default 50, at most 1000).
+        #[arg(long)]
+        max: Option<u64>,
+    },
     /// Stop the background daemon for this phone.
     Stop,
     /// Internal: the resident process.
@@ -395,6 +420,15 @@ async fn run(cli: Cli) -> i32 {
         Cmd::Key { key } => ("key", json!({ "key": key })),
         Cmd::Button { button } => ("button", json!({ "button": button })),
         Cmd::Dnd { action } => ("dnd", json!({ "action": action })),
+        Cmd::Syslog { action, process, pid, level, output, max_mb, grep, max } => {
+            // The daemon writes the file, so the path must not depend on its cwd.
+            let output = output.map(|o| std::path::absolute(&o).map(|p| p.display().to_string()).unwrap_or(o));
+            let process = (!process.is_empty()).then_some(process);
+            ("syslog", json!({
+                "action": action, "process": process, "pid": pid, "level": level, "output": output,
+                "max_mb": max_mb, "grep": grep, "max": max,
+            }))
+        }
         Cmd::Launch { app, restart, env, arguments } => match launch_args(&app, restart, &env, &arguments) {
             Ok(v) => ("launch", v),
             Err(f) => {

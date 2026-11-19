@@ -12,6 +12,7 @@ use idevice::{
         AppListEntry, AppServiceClient, ImageFormat, PasteboardServiceClient,
         ScreenCaptureServiceClient,
     },
+    os_trace_relay::{OsTraceRelayClient, OsTraceRelayReceiver},
 };
 
 use crate::{
@@ -27,6 +28,7 @@ use crate::{
     },
     i18n::t,
     reply::{Fail, Res},
+    tcp::handle::Reset,
 };
 
 const APP_SERVICE: &str = "com.apple.coredevice.appservice";
@@ -143,6 +145,8 @@ pub struct Session {
     system_in_front: bool,
     /// Do Not Disturb: whether it is on for this session and what to put back.
     pub dnd: crate::dnd::State,
+    /// `iph syslog`: the log capture, running or ended and not yet stopped.
+    pub capture: Option<crate::syslog::Capture>,
 }
 
 /// A file URL or path as a plain path without a trailing slash.
@@ -223,6 +227,7 @@ impl Session {
             ax_restart_unhelpful: false,
             system_in_front: false,
             dnd,
+            capture: None,
         }
     }
 
@@ -262,6 +267,8 @@ impl Session {
 
     /// Drop every connection. The next request builds them again.
     pub fn reset(&mut self) {
+        // Its stream runs on the tunnel being dropped.
+        self.end_capture("the connection to the phone was reset");
         let tunnel = self.tunnel.take();
         if let Some(input) = self.input.take() {
             self.input_closed_at = Some(Instant::now());
@@ -769,6 +776,34 @@ impl Session {
 
     pub async fn app_service(&mut self) -> Res<AppServiceClient<Box<dyn ReadWrite>>> {
         self.rsd_client().await
+    }
+
+    /// The phone's log stream, filtered to one process when `pid` is given,
+    /// and its reset. Dropped on any path, here or later, the stream resets
+    /// its connection rather than closing it, which would hold the relay for
+    /// the next capture.
+    pub async fn os_trace(&mut self, pid: Option<u32>) -> Res<(OsTraceRelayReceiver, Reset)> {
+        let name = OsTraceRelayClient::rsd_service_name();
+        let unavailable = |e: String| Fail::not_sent("service_unavailable", format!("{name}: {e}"));
+        // As `rsd_client`: a tunnel that died under the session is rebuilt once.
+        let mut attempt = 0;
+        let mut stream = loop {
+            let (mut adapter, port) = self.service_port(&name).await?;
+            match bounded("connect", 12, adapter.connect(port)).await {
+                Ok(stream) => break stream,
+                Err(e) if attempt == 0 && is_transport_error(&e) => {
+                    attempt += 1;
+                    self.reset();
+                }
+                Err(e) => return Err(unavailable(e)),
+            }
+        };
+        let reset = stream.reset_on_drop();
+        let started = match OsTraceRelayClient::from_stream(Box::new(stream)).await {
+            Ok(client) => bounded("start_trace", 12, client.start_trace(pid)).await,
+            Err(e) => Err(format!("{e:?}")),
+        };
+        started.map(|receiver| (receiver, reset)).map_err(unavailable)
     }
 
     pub async fn pasteboard(&mut self) -> Res<PasteboardServiceClient<Box<dyn ReadWrite>>> {

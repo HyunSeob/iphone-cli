@@ -33,6 +33,7 @@ idevice = { version = "=0.1.68", features = [
   "cryptexd",
   "tss",
   "heartbeat",
+  "syslog_relay",
 ] }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
