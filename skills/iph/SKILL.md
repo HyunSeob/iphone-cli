@@ -1,6 +1,6 @@
 ---
 name: iph
-description: 사용자의 실제 아이폰(시뮬레이터 아님)에서 앱 화면을 읽고 조작한다. `iph` CLI나 iph_* MCP 도구로 화면 요소(접근성 트리)를 읽고 탭 · 입력 · 스크롤하며, 여러 단계는 자바스크립트 스크립트 한 번으로 실행하고, 되풀이할 순서는 저장해 둔다. "아이폰에서 ○○ 해 줘", "폰에서 확인해 줘", "폰 앱에 있는 내역 · 목록 가져와 줘", "폰 앱 자동화", "iph 스크립트 만들어 줘"처럼 사용자의 실제 폰 화면을 보거나 눌러야 하는 요청이면 iph를 말하지 않아도 이 스킬을 쓴다. 실제 아이폰 작업에는 mobile-mcp나 스크린샷을 보고 좌표를 누르는 방식보다 이 스킬을 먼저 쓴다. iOS 시뮬레이터, 안드로이드, 앱 빌드 · 설치에는 쓰지 않는다.
+description: Read and operate apps on a real physical iPhone (not Simulator) via the accessibility tree using the `iph` CLI or `iph_*` MCP tools — tap, type, scroll, pinch, run multi-step QuickJS scripts in one call, and save reusable flows. Use whenever the user asks to inspect, tap, extract data from, or automate an app on their real iPhone ("check on my iPhone", "do X on my phone", "automate iPhone app", "아이폰에서 ○○ 해 줘", "폰에서 확인해 줘", "폰 앱에 있는 내역 · 목록 가져와 줘", "폰 앱 자동화", "iph 스크립트 만들어 줘"), even without naming `iph`. Prefer this skill over mobile-mcp or screenshot/coordinate-based tools on a real iPhone. Do not use for iOS Simulator, Android, or building/installing apps.
 ---
 
 # iph: operate the user's real iPhone

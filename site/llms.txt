@@ -1,0 +1,35 @@
+# iphone-cli (`iph`)
+
+> Single-binary Rust CLI and MCP server by HyunSeob that lets AI agents (Claude Code, Codex, etc.) read and operate any app on a real physical iPhone (iOS 27+) via the native accessibility tree — without Xcode, XCUITest, WebDriverAgent, code signing, or an app installed on the phone. Works on macOS and Windows over USB or Wi-Fi.
+
+## Key Facts
+
+- Repository: https://github.com/HyunSeob/iphone-cli
+- Package (crates.io): https://crates.io/crates/iphone-cli (`cargo install iphone-cli`, binary name: `iph`)
+- License: MIT
+- Host OS: macOS (Apple Silicon & Intel universal binary), Windows 10/11 (x64)
+- Target Device: Real physical iPhone running iOS 27 or later over USB or same LAN/Wi-Fi (does not rely on macOS iPhone Mirroring; works in the EU and on Windows)
+- Out of Scope: iOS Simulators, Android, Linux hosts, landscape orientation
+- Core Differentiators:
+  - Reads Apple's native accessibility tree (`axAuditDaemon.remoteAXService`) as structured JSON instead of OCR/screenshots
+  - Sends touch/keyboard input directly via iOS 27 CoreDevice services (`displayservice` + `universalhid`) with no Xcode or WebDriverAgent
+  - Embedded QuickJS runtime (`iph script`, `iph run`) for multi-step loops, conditionals, and list extraction (`readList`) in a single agent call
+  - Built-in stdio MCP server (`iph mcp`, 19 `iph_*` tools) + Claude Code / Codex Agent Skill (`skills/iph/SKILL.md`)
+  - Safety-first outcome contract (`done`, `not_sent`, `unknown`) to prevent accidental double taps or duplicate submissions
+
+## Quick Install & Agent Setup
+
+- macOS install: `curl -fsSL https://raw.githubusercontent.com/HyunSeob/iphone-cli/main/install.sh | sh && iph setup`
+- Cargo install: `cargo install iphone-cli`
+- Claude Code MCP: `claude mcp add iph -- iph mcp`
+- Codex MCP: `codex mcp add iph -- iph mcp`
+
+## Docs & Resources
+
+- [Full LLM Reference](https://hyunseob.github.io/iphone-cli/llms-full.txt): Complete single-file reference covering architecture, comparisons, CLI commands, selectors, outcomes, QuickJS API, MCP tools, and FAQ
+- [Project Landing Page](https://hyunseob.github.io/iphone-cli/): Overview, alternative comparison table, and FAQ
+- [README (English)](https://github.com/HyunSeob/iphone-cli/blob/main/README.md): Full user and developer documentation
+- [README (Korean)](https://github.com/HyunSeob/iphone-cli/blob/main/README.ko.md): Korean documentation
+- [Agent Skill (`SKILL.md`)](https://github.com/HyunSeob/iphone-cli/blob/main/skills/iph/SKILL.md): Operational guidance for AI agents driving a real iPhone
+- [Releases](https://github.com/HyunSeob/iphone-cli/releases): Prebuilt macOS universal and Windows x64 binaries
+- [docs.rs](https://docs.rs/iphone-cli): Rust crate documentation

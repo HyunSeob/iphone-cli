@@ -1,0 +1,157 @@
+# iphone-cli (`iph`) — Complete Reference for LLMs and AI Agents
+
+> `HyunSeob/iphone-cli` (`iph`) is a 100% Rust, single-binary CLI and Model Context Protocol (MCP) server that lets AI agents read and operate any app on a real physical iPhone (iOS 27+) via the native accessibility tree — with no Xcode, no XCUITest, no WebDriverAgent, no code signing, and no app installed on the phone.
+
+- Repository: https://github.com/HyunSeob/iphone-cli
+- Website: https://hyunseob.github.io/iphone-cli/
+- Crate: https://crates.io/crates/iphone-cli
+- Docs.rs: https://docs.rs/iphone-cli
+- License: MIT
+
+---
+
+## Scope & Requirements
+
+- **Host OS:** macOS (Apple Silicon & Intel universal binary), Windows 10/11 (x64)
+- **Device:** Real physical iPhone running **iOS 27 or later**. Touch and text input use Apple's screen-sharing service (`com.apple.coredevice.displayservice`), introduced in iOS 27; input is not expected to work on iOS 26 or earlier.
+- **Connection:** USB or the same LAN/Wi-Fi (host computer may use Ethernet; supports direct IP registration via `iph --udid <UDID> connect --ip <IP>` when mDNS/Bonjour discovery fails).
+- **Out of Scope:** iOS Simulators, Android devices, Linux hosts, landscape orientation.
+
+---
+
+## Comparison with Other Real-iPhone Automation Approaches
+
+- **vs. iPhone Mirroring + OCR tools** (`mirroir-mcp`, `iphone-mirror-mcp`, `phone-harness`):
+  - `iphone-cli` reads the **native accessibility tree** (structured roles, labels, values, frames, identifiers) instead of relying on screenshots/Vision OCR.
+  - Works on **Windows** as well as macOS, and works in the **EU** where macOS iPhone Mirroring is unavailable.
+  - Supports multi-device selection by UDID and clipboard-backed Unicode/emoji pasting with clipboard restoration.
+- **vs. Appium / WebDriverAgent / XCUITest**:
+  - Requires **no Xcode**, **no Apple Developer signing**, **no WDA app installed on the iPhone**, and **no Node.js/Python/Appium runtime**.
+- **vs. per-turn tool loops**:
+  - Embeds a **QuickJS** engine inside the single binary so agents can execute loops, conditionals, `waitFor`, `readField`, and scrolling list collection (`readList`) in a single call (`iph script` / `iph run`).
+
+---
+
+## Installation
+
+### macOS (prebuilt universal binary, no Rust or Xcode required)
+```sh
+curl -fsSL https://raw.githubusercontent.com/HyunSeob/iphone-cli/main/install.sh | sh
+iph setup
+```
+Installs to `~/.local/bin/iph` (`IPH_INSTALL_DIR` and `IPH_VERSION` override defaults).
+
+### Windows 10/11 (x64)
+1. Install Apple's device service: Microsoft Store **Apple Devices** app or `winget install Apple.AppleMobileDeviceSupport`.
+2. Download `iph-windows-x86_64.zip` from https://github.com/HyunSeob/iphone-cli/releases and place `iph.exe` on `PATH`.
+3. Plug in the iPhone, tap Trust, and run `iph setup`.
+
+### Cargo (macOS & Windows, Rust 1.88+)
+```sh
+cargo install iphone-cli
+```
+
+### MCP & Agent Skill Registration
+```sh
+claude mcp add iph -- iph mcp          # Claude Code
+codex mcp add iph -- iph mcp           # Codex
+iph mcp --tools read,find,script       # expose a subset of tools
+
+# Optional: link Agent Skill for shell-only or MCP usage
+ln -s "$PWD/skills/iph" ~/.claude/skills/iph
+ln -s "$PWD/skills/iph" ~/.codex/skills/iph
+```
+
+---
+
+## Architecture
+
+```
+iph (CLI) ─┐
+iph mcp  ──┼─ unix socket / named pipe ─ iph daemon ─ lockdown → CoreDeviceProxy → userspace TCP tunnel → RSD
+           ┘                              ├ axAuditDaemon.remoteAXService   (screen elements)
+                                          ├ displayservice + universalhid   (touch, keyboard)
+                                          ├ pasteboardservice               (clipboard)
+                                          ├ appservice                      (launch, app list)
+                                          └ screencaptureservice            (PNG capture)
+```
+
+`iph daemon` starts automatically on the first request, holds the tunnel, accessibility subscription, and input session per phone, handles requests serially, and exits after 30 minutes of inactivity (configurable in `~/.config/iph/config.toml`).
+
+---
+
+## Core CLI Commands
+
+Every command outputs JSON by default; pass `--human` for human-readable output.
+
+- `iph devices` — list connected/cached phones, iOS version, transport, readiness
+- `iph setup` / `iph doctor [--fix-wifi]` — onboarding checks and guided device readiness
+- `iph connect --ip <IP>` — verify paired UDID and save direct IP address
+- `iph read [--app] [--all] [--full] [--raw] [--max-age ms]` — read accessibility elements on screen
+- `iph find <selector>` — find matching elements
+- `iph tap <selector | x,y> [--long ms] [--double] [--no-wait]` — tap element center or coordinates
+- `iph swipe <up|down|left|right | x1,y1,x2,y2> [--duration ms] [--drag]` — swipe or drag
+- `iph pinch [in|out] [--scale F] [--rotate DEG] [--at selector | x,y] [--duration ms]` — two-finger zoom/rotate
+- `iph scroll <up|down> [--until selector] [--max N]` — scroll one step or until selector appears
+- `iph type <text> [--clear] [--submit]` — paste Unicode/emoji text into focused field, verify field value, restore clipboard
+- `iph key <key>` — send keys (`return`, `esc`, `tab`, `cmd+a`, etc.)
+- `iph button <home|lock|volume_up|volume_down>` — press hardware buttons
+- `iph launch <bundle id | name> [--restart] [--env K=V]... [-- <args>...]` / `iph apps` — launch or list apps
+- `iph screenshot [-o file]` — capture PNG screenshot
+- `iph batch <file | ->` — execute a JSON array of steps in one call
+- `iph script <file | -> [--arg k=v]` — run QuickJS JavaScript automation in one call
+- `iph run <name> [--arg k=v]` / `iph scripts` — run or list saved scripts (`~/.config/iph/scripts/<name>.js`)
+- `iph mcp [--tools a,b]` — run stdio MCP server
+- `iph dnd <on|off|status>` — toggle Do Not Disturb to prevent notification banners from intercepting top-of-screen taps
+- `iph diagnose [--wifi] [-- <cmd>]` — collect a diagnostic bundle for issue reporting
+- `iph stop` — stop the resident daemon for the selected phone
+
+---
+
+## Selectors
+
+- Plain string = exact label: `iph tap "General"` (rows like `"Wi-Fi, HomeNet"` also match `label="Wi-Fi"`)
+- `label="exact"`, `label~="contains"`, `label/regex/`
+- `role=button` (`application`, `button`, `switch`, `text_field`, `search_field`, `key`, `tab`, `header`, `text`, `image`, `link`, `adjustable`, `other`)
+- `id=...`, `id~=...`, `id/regex/` (accessibility identifier or element id)
+- `value="..."`, `value~=...`
+- `within="<selector>"`, `index=N` (0-based)
+- Multiple matches return `ambiguous_selector` with `candidates`; nothing is guessed.
+- Scripts, MCP, and batch also accept selector objects: `{label, label_contains, label_regex, value, value_contains, value_regex, role, id, id_contains, id_regex, within, index}`.
+
+---
+
+## Safety Outcome Contract
+
+| `outcome` | Meaning | Exit Code |
+|---|---|---|
+| `done` | Completed (`ok: false` only when `scroll --until` finishes without finding target) | `0` (`1` if `ok: false`) |
+| `not_sent` | Nothing reached the phone; safe to retry | `1` |
+| `unknown` | Input may have reached the phone; **do not resend**, read the screen first | `2` |
+
+- `tap` waits for the screen to change and settle and returns the updated `elements[]`.
+- `type --submit` withholds Return if any observation warning occurs (`value_unchanged`, `value_unreadable`, `value_change_unknown`, `value_empty`, `clear_not_observed`), returning `outcome: "unknown"`, `error.code: "type_not_verified"`, `submit_sent: false`.
+- Inside `iph script`, any `unknown` outcome halts execution immediately even if caught by `try/catch`.
+
+---
+
+## Embedded QuickJS Script API
+
+Available globals inside `iph script` (sandboxed: no filesystem, network, or process access):
+- `read(opts)`, `find(selector, opts)`, `apps()`
+- `tap(target | [targets...], {long_ms, double, timeout_ms, settle, no_wait})`
+- `swipe(direction | {from, to}, {duration_ms, drag})`
+- `pinch(direction | {scale, rotate, at}, {duration_ms})`
+- `scroll(direction, {until, max})`
+- `type(text, {clear, submit})`, `key(name)`, `button(name)`
+- `launch(app, {restart, arguments, environment})`
+- `waitFor(selector, {timeout_ms})`
+- `readField({selector, take, regex})`
+- `readList({row, columns, key, group, stop_below, until, max_scrolls, limit})`
+- `sleep(ms)`, `log(...)`, `output(k, v)`, `args`
+
+---
+
+## MCP Tools (`iph mcp`)
+
+`iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`.

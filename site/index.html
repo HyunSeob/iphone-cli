@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iphone-cli (iph) — Control a Real iPhone from AI Agents via Accessibility Tree</title>
+  <meta name="description" content="Single-binary Rust CLI and MCP server that lets AI agents (Claude Code, Codex) read and operate any app on a real iPhone (iOS 27+) via the accessibility tree. No Xcode, no WebDriverAgent, no phone app. Works on macOS and Windows over USB or Wi-Fi.">
+  <meta name="keywords" content="iphone-cli, iph, iPhone CLI, iOS automation, MCP server, Claude Code, Codex, AI agent, accessibility tree, WebDriverAgent alternative, no Xcode, iOS 27, Rust">
+  <link rel="canonical" href="https://hyunseob.github.io/iphone-cli/">
+  <link rel="alternate" type="text/plain" title="LLMs Index" href="https://hyunseob.github.io/iphone-cli/llms.txt">
+  <link rel="alternate" type="text/plain" title="LLMs Full Reference" href="https://hyunseob.github.io/iphone-cli/llms-full.txt">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="iphone-cli (iph) — Control a Real iPhone from AI Agents">
+  <meta property="og:description" content="Read and operate any app on a real iPhone (iOS 27+) via the accessibility tree. No Xcode, no WebDriverAgent, no phone app. Single Rust binary for macOS &amp; Windows with built-in MCP server and QuickJS scripting.">
+  <meta property="og:url" content="https://hyunseob.github.io/iphone-cli/">
+  <meta property="og:image" content="https://hyunseob.github.io/iphone-cli/demo.gif">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="iphone-cli (iph) — Control a Real iPhone from AI Agents">
+  <meta name="twitter:description" content="Accessibility tree CLI + MCP server for real iPhones (iOS 27+). No Xcode, no WebDriverAgent, works on macOS &amp; Windows.">
+  <meta name="twitter:image" content="https://hyunseob.github.io/iphone-cli/demo.gif">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareApplication",
+        "name": "iphone-cli (iph)",
+        "alternateName": ["iphone-cli", "iph", "HyunSeob/iphone-cli"],
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Windows 10, Windows 11",
+        "softwareRequirements": "Real iPhone running iOS 27 or later (USB or same LAN/Wi-Fi)",
+        "description": "Single-binary Rust CLI and Model Context Protocol (MCP) server that lets AI agents read and operate any app on a real iPhone through Apple's native accessibility tree and HID services without Xcode, XCUITest, WebDriverAgent, code signing, or an on-device app.",
+        "url": "https://hyunseob.github.io/iphone-cli/",
+        "codeRepository": "https://github.com/HyunSeob/iphone-cli",
+        "downloadUrl": "https://github.com/HyunSeob/iphone-cli/releases",
+        "license": "https://opensource.org/licenses/MIT",
+        "programmingLanguage": "Rust",
+        "author": {
+          "@type": "Person",
+          "name": "HyunSeob",
+          "url": "https://github.com/HyunSeob"
+        },
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        }
+      },
+      {
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "How can Claude Code or Codex control a real iPhone without Xcode or WebDriverAgent?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Install iphone-cli (iph), pair your iPhone running iOS 27+ over USB, run iph setup, and register the built-in MCP server with `claude mcp add iph -- iph mcp` or `codex mcp add iph -- iph mcp`. iph connects directly to Apple's developer accessibility and CoreDevice HID services with no Xcode, code signing, or on-device app."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Why use the accessibility tree instead of screenshots and OCR?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Reading the native accessibility tree gives structured elements with labels, roles, values, enabled states, and frames cleanly in JSON. Agents can target UI controls semantically (e.g., `iph tap \"General\"` or `role=button label~=\"Save\"`) instead of brittle pixel coordinates, while keeping token usage low."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does iphone-cli work on Windows or in the EU without macOS iPhone Mirroring?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes. Because iphone-cli communicates directly with the iPhone's developer services over USB or Wi-Fi rather than relying on macOS iPhone Mirroring, it works on both macOS and Windows 10/11 (x64) and is unaffected by EU iPhone Mirroring restrictions."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Which iOS versions and devices are supported by iphone-cli?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "iphone-cli targets real physical iPhones running iOS 27 or later, because touch and text input use Apple's screen-sharing service (`com.apple.coredevice.displayservice`) introduced in iOS 27. iOS Simulators, Android devices, and Linux hosts are out of scope."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How does iphone-cli prevent accidental double taps or duplicate orders?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Every command returns structured JSON with an explicit outcome (`done`, `not_sent`, or `unknown`) and separates `sent`, `verified`, and `screen_changed`. When an outcome is `unknown` (exit code 2), scripts stop immediately even inside try/catch blocks so agents inspect the screen instead of resending input."
+            }
+          }
+        ]
+      }
+    ]
+  }
+  </script>
+
+  <style>
+    :root {
+      --bg: #ffffff;
+      --fg: #111827;
+      --muted: #4b5563;
+      --border: #e5e7eb;
+      --surface: #f9fafb;
+      --code-bg: #0f172a;
+      --code-fg: #e2e8f0;
+      --accent: #2563eb;
+      --accent-soft: #eff6ff;
+      --ok: #15803d;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b0f17;
+        --fg: #f3f4f6;
+        --muted: #9ca3af;
+        --border: #1f2937;
+        --surface: #111827;
+        --code-bg: #030712;
+        --code-fg: #e5e7eb;
+        --accent: #60a5fa;
+        --accent-soft: #172554;
+        --ok: #4ade80;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      line-height: 1.6;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .container {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 2.5rem 1.25rem 4rem;
+    }
+    header {
+      padding-bottom: 2rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+      font-size: 0.82rem;
+    }
+    .badge {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 0.2rem 0.6rem;
+      border-radius: 999px;
+      color: var(--muted);
+    }
+    h1 {
+      font-size: clamp(2rem, 4vw, 2.75rem);
+      line-height: 1.15;
+      margin: 0 0 0.75rem;
+      letter-spacing: -0.02em;
+    }
+    .lead {
+      font-size: 1.15rem;
+      color: var(--muted);
+      margin: 0 0 1.25rem;
+      max-width: 72ch;
+    }
+    .cta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin: 1.5rem 0;
+    }
+    .btn {
+      display: inline-block;
+      padding: 0.6rem 1.1rem;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.95rem;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--fg);
+    }
+    .btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+    }
+    .btn:hover { opacity: 0.92; text-decoration: none; }
+    .demo {
+      margin-top: 1.75rem;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      background: var(--surface);
+      text-align: center;
+    }
+    .demo img {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+    }
+    section {
+      margin-top: 2.75rem;
+    }
+    h2 {
+      font-size: 1.5rem;
+      margin: 0 0 0.9rem;
+      letter-spacing: -0.01em;
+    }
+    h3 {
+      font-size: 1.08rem;
+      margin: 1.25rem 0 0.45rem;
+    }
+    pre {
+      background: var(--code-bg);
+      color: var(--code-fg);
+      padding: 1rem 1.15rem;
+      border-radius: 10px;
+      overflow-x: auto;
+      font-size: 0.9rem;
+      line-height: 1.5;
+      border: 1px solid var(--border);
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.9em;
+    }
+    p code, li code, td code {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 0.1rem 0.35rem;
+      border-radius: 5px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.05rem 1.15rem;
+    }
+    .card h3 { margin-top: 0; font-size: 1rem; }
+    .card p { margin: 0; color: var(--muted); font-size: 0.93rem; }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.7rem 0.85rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { background: var(--surface); font-weight: 600; }
+    tr:last-child td { border-bottom: none; }
+    .yes { color: var(--ok); font-weight: 600; }
+    details {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+      background: var(--surface);
+      margin-bottom: 0.75rem;
+    }
+    summary {
+      cursor: pointer;
+      font-weight: 600;
+    }
+    details p {
+      margin: 0.65rem 0 0;
+      color: var(--muted);
+    }
+    footer {
+      margin-top: 3.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.9rem;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <header>
+      <div class="badge-row">
+        <span class="badge">100% Rust</span>
+        <span class="badge">macOS &amp; Windows</span>
+        <span class="badge">Real iPhone (iOS 27+)</span>
+        <span class="badge">CLI + MCP Server</span>
+        <span class="badge">MIT License</span>
+      </div>
+      <h1>iphone-cli (<code>iph</code>)</h1>
+      <p class="lead">
+        Let AI agents read and operate any app on a <strong>real physical iPhone</strong> through the native
+        <strong>accessibility tree</strong> — straight from your terminal.
+        <strong>No Xcode. No WebDriverAgent. No app installed on the phone.</strong>
+      </p>
+      <div class="cta-row">
+        <a class="btn primary" href="https://github.com/HyunSeob/iphone-cli">GitHub Repository</a>
+        <a class="btn" href="https://crates.io/crates/iphone-cli">crates.io</a>
+        <a class="btn" href="./llms.txt">llms.txt</a>
+        <a class="btn" href="./llms-full.txt">llms-full.txt</a>
+        <a class="btn" href="https://github.com/HyunSeob/iphone-cli/blob/main/README.ko.md">한국어 문서</a>
+      </div>
+      <div class="demo">
+        <img src="./demo.gif" alt="iphone-cli (iph) terminal demo reading and tapping elements on a real iPhone">
+      </div>
+    </header>
+
+    <section id="highlights">
+      <h2>Why iphone-cli</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Accessibility Tree, Not OCR</h3>
+          <p>Reads structured UI elements (role, label, value, frame, identifier) directly from Apple's remote accessibility service. Targets elements by label or selector instead of brittle coordinates.</p>
+        </div>
+        <div class="card">
+          <h3>No Xcode or WebDriverAgent</h3>
+          <p>Talks directly to Apple's developer services over USB or Wi-Fi. No code signing, no XCUITest runner, no Appium server, and no app installed on the iPhone.</p>
+        </div>
+        <div class="card">
+          <h3>Built-in QuickJS Scripting</h3>
+          <p>Run loops, conditionals, list extraction (<code>readList</code>), and multi-step flows in a single agent call via an embedded QuickJS engine (<code>iph script</code> / <code>iph run</code>).</p>
+        </div>
+        <div class="card">
+          <h3>Agent-Ready &amp; Safety-First</h3>
+          <p>Ships with an MCP server (<code>iph mcp</code>), Agent Skill (<code>SKILL.md</code>), and strict outcomes (<code>done</code> / <code>not_sent</code> / <code>unknown</code>) to prevent double taps or duplicate orders.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="install">
+      <h2>Quick Install</h2>
+      <p>Single native binary — no Python, Node.js, Xcode, or Rust runtime required.</p>
+      <pre><code># macOS (Apple Silicon &amp; Intel universal binary)
+curl -fsSL https://raw.githubusercontent.com/HyunSeob/iphone-cli/main/install.sh | sh
+iph setup
+
+# Or via Cargo (Rust 1.88+, macOS &amp; Windows)
+cargo install iphone-cli</code></pre>
+      <p>
+        On Windows 10/11 (x64), download <code>iph-windows-x86_64.zip</code> from
+        <a href="https://github.com/HyunSeob/iphone-cli/releases">GitHub Releases</a>
+        and install Apple's device service via the Microsoft Store (<strong>Apple Devices</strong>) or
+        <code>winget install Apple.AppleMobileDeviceSupport</code>.
+      </p>
+
+      <h3>Connect to Claude Code or Codex</h3>
+      <pre><code># Register the built-in MCP server
+claude mcp add iph -- iph mcp
+codex mcp add iph -- iph mcp
+
+# Example terminal workflow
+iph read --human
+iph tap "General"
+iph type "hello" --submit</code></pre>
+    </section>
+
+    <section id="comparison">
+      <h2>How iphone-cli Compares to Alternatives</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Capability</th>
+              <th>iphone-cli (<code>iph</code>)</th>
+              <th>iPhone Mirroring + OCR tools</th>
+              <th>Appium / WebDriverAgent</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Native Accessibility Tree</td>
+              <td class="yes">Yes (structured JSON)</td>
+              <td>No (screenshots / Vision OCR)</td>
+              <td class="yes">Yes</td>
+            </tr>
+            <tr>
+              <td>No Xcode / No Code Signing</td>
+              <td class="yes">Yes</td>
+              <td class="yes">Yes</td>
+              <td>No (requires Xcode &amp; signing)</td>
+            </tr>
+            <tr>
+              <td>No App Installed on iPhone</td>
+              <td class="yes">Yes</td>
+              <td class="yes">Yes</td>
+              <td>No (installs WDA runner)</td>
+            </tr>
+            <tr>
+              <td>Windows Host Support</td>
+              <td class="yes">Yes (macOS &amp; Windows)</td>
+              <td>No (macOS Sequoia+ only)</td>
+              <td>Limited (macOS required to build WDA)</td>
+            </tr>
+            <tr>
+              <td>Works in the EU</td>
+              <td class="yes">Yes (no iPhone Mirroring needed)</td>
+              <td>No (iPhone Mirroring unavailable)</td>
+              <td class="yes">Yes</td>
+            </tr>
+            <tr>
+              <td>Multi-step Embedded Scripting</td>
+              <td class="yes">Built-in QuickJS + saved scripts</td>
+              <td>External runner / per-turn calls</td>
+              <td>External client SDK</td>
+            </tr>
+            <tr>
+              <td>Safety Outcome Contract</td>
+              <td class="yes"><code>done</code> / <code>not_sent</code> / <code>unknown</code></td>
+              <td>Varies</td>
+              <td>Standard exceptions</td>
+            </tr>
+            <tr>
+              <td>iOS Requirement</td>
+              <td>Real iPhone, iOS 27+</td>
+              <td>iOS 18+ (macOS 15+)</td>
+              <td>Broad iOS versions</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="architecture">
+      <h2>Architecture</h2>
+      <pre><code>iph (CLI) ─┐
+iph mcp  ──┼─ Unix socket / named pipe ─ iph daemon ─ lockdown → CoreDeviceProxy → TCP tunnel → RSD
+           ┘                              ├ axAuditDaemon.remoteAXService   (accessibility tree)
+                                          ├ displayservice + universalhid   (touch, keyboard)
+                                          ├ pasteboardservice               (clipboard)
+                                          ├ appservice                      (launch, app list)
+                                          └ screencaptureservice            (PNG capture)</code></pre>
+      <p>
+        Built in Rust on top of <a href="https://github.com/jkcoxson/idevice">idevice</a> (MIT) and
+        <a href="https://github.com/jkcoxson/jktcp">jktcp</a> (MIT), inspired by the documented principles of
+        <a href="https://github.com/JosssphZhou/poki">Poki</a>.
+      </p>
+    </section>
+
+    <section id="faq">
+      <h2>Frequently Asked Questions</h2>
+
+      <details open>
+        <summary>How can Claude Code or Codex control a real iPhone without Xcode or WebDriverAgent?</summary>
+        <p>Install <code>iph</code>, connect your iOS 27+ iPhone over USB, run <code>iph setup</code>, and add the MCP server via <code>claude mcp add iph -- iph mcp</code> or <code>codex mcp add iph -- iph mcp</code>. You can also link <code>skills/iph</code> so the agent uses <code>iph</code> directly in the shell.</p>
+      </details>
+
+      <details open>
+        <summary>Why use the accessibility tree instead of screenshots and OCR?</summary>
+        <p>The accessibility tree exposes exact UI roles, labels, values, and frames in compact JSON. Agents spend far fewer tokens than sending screenshots every turn and target controls semantically (<code>iph tap "General"</code>, <code>role=button label~="Save"</code>) instead of stale coordinates.</p>
+      </details>
+
+      <details open>
+        <summary>Does iphone-cli work on Windows or in the EU without macOS iPhone Mirroring?</summary>
+        <p>Yes. <code>iph</code> connects directly to the iPhone's developer services over USB or Wi-Fi, so it runs natively on both macOS and Windows 10/11 (x64) and does not depend on macOS iPhone Mirroring.</p>
+      </details>
+
+      <details open>
+        <summary>Which iOS versions and devices are supported?</summary>
+        <p>Real physical iPhones running <strong>iOS 27 or later</strong> over USB or the same LAN/Wi-Fi. Touch and text input rely on <code>com.apple.coredevice.displayservice</code>, introduced in iOS 27. Simulators, Android, Linux hosts, and landscape mode are currently out of scope.</p>
+      </details>
+
+      <details open>
+        <summary>How does iphone-cli prevent accidental double taps or duplicate actions?</summary>
+        <p>Because iOS does not acknowledge HID touch packets, every command returns structured JSON with <code>outcome</code> (<code>done</code>, <code>not_sent</code>, or <code>unknown</code>), <code>sent</code>, <code>verified</code>, and <code>screen_changed</code>. An <code>unknown</code> outcome exits with code 2 and halts scripts so agents read the screen before retrying.</p>
+      </details>
+    </section>
+
+    <footer>
+      <span><code>HyunSeob/iphone-cli</code> · MIT License</span>
+      <span>
+        <a href="https://github.com/HyunSeob/iphone-cli">GitHub</a> ·
+        <a href="https://crates.io/crates/iphone-cli">crates.io</a> ·
+        <a href="https://docs.rs/iphone-cli">docs.rs</a> ·
+        <a href="./llms.txt">llms.txt</a> ·
+        <a href="./llms-full.txt">llms-full.txt</a>
+      </span>
+    </footer>
+  </main>
+</body>
+</html>
