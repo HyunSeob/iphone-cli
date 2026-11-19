@@ -150,7 +150,7 @@ pub struct Session {
 }
 
 /// A file URL or path as a plain path without a trailing slash.
-fn plain_path(s: &str) -> String {
+pub(crate) fn plain_path(s: &str) -> String {
     let s = s.strip_prefix("file://").unwrap_or(s);
     let raw = s.as_bytes();
     let mut bytes = Vec::with_capacity(raw.len());

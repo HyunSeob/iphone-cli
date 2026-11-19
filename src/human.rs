@@ -116,6 +116,9 @@ fn syslog_status(v: &Value, out: &mut Vec<String>) {
     buffer.push_str(&format!(", {} evicted", s(&b["evicted"])));
     out.push(buffer);
     let mut only = Vec::new();
+    if let Some(a) = v["app"].as_array() {
+        only.push(format!("app {}", a.iter().map(s).collect::<Vec<_>>().join(", ")));
+    }
     if let Some(p) = v["process"].as_array() {
         only.push(format!("process {}", p.iter().map(s).collect::<Vec<_>>().join(", ")));
     }
@@ -373,13 +376,13 @@ mod tests {
             "ok": true, "state": "running", "seen": 5000, "kept": 1234, "unparsed": 0,
             "buffer": {"entries": 1234, "bytes": 700_000, "max_entries": 100_000, "max_bytes": 67_108_864,
                        "oldest_seq": 1, "newest_seq": 1234, "evicted": 0},
-            "started_at": "2026-11-19T01:00:00Z", "process": ["Papago", "Preferences"], "level": "info",
+            "started_at": "2026-11-19T01:00:00Z", "app": ["com.naver.papago"], "process": ["Preferences"], "level": "info",
             "path": "/tmp/cap.jsonl", "rotations": 2,
         });
         let text = render("syslog", &status);
         assert!(text.contains("syslog running  seen 5000  kept 1234  unparsed 0"));
         assert!(text.contains("buffer 1234/100000 entries, 683 KiB of 64.0 MiB, seq 1 to 1234, 0 evicted"));
-        assert!(text.contains("only process Papago, Preferences  level info and up"));
+        assert!(text.contains("only app com.naver.papago  process Preferences  level info and up"));
         assert!(text.contains("file /tmp/cap.jsonl  2 rotations"));
         assert!(render("syslog", &json!({"ok": true, "state": "none"})).contains("no capture"));
 

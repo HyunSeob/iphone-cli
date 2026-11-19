@@ -18,7 +18,7 @@ const SCRIPT_DOC: &str = "Run JavaScript that drives the phone, in one call: loo
 The commands are functions that return what the tool of the same name returns: read(opts), find(selector), tap(target, opts), swipe(direction | {from, to}, opts), \
 pinch(direction | {scale, rotate, at}, opts), scroll(direction, {until, max}), type(text, {clear, submit}), key(name), button(name), launch(app, {restart, arguments, environment}), apps(). Also waitFor(selector, {timeout_ms}), \
 readField({selector, take, regex}) → text, readList({row, columns, group, stop_below, max_scrolls}) → {rows, scrolls, ended}, sleep(ms), log(…), output(key, value). \
-syslog(\"start\" | \"read\" | \"stop\" | \"status\", {process, pid, level, after, grep, max}) captures the phone's log as iph_syslog does and returns what it returns; a script cannot write a file. \
+syslog(\"start\" | \"read\" | \"stop\" | \"status\", {app, process, pid, level, after, grep, max}) captures the phone's log as iph_syslog does and returns what it returns; a script cannot write a file. \
 tap(target) waits up to 5 s for a selector to appear and hold still; tap([a, b, c]) presses a keypad without re-reading. \
 A call that fails throws an Error with .code, .outcome, .hint and .result (the full result object); uncaught, it ends the script and the result says which call and line. \
 After a call whose outcome is \"unknown\" the script is stopped and cannot go on. \
@@ -175,11 +175,13 @@ fn tools() -> Vec<Value> {
              \"start\" (one capture at a time; stop an ended one before starting again) keeps the entries in a buffer in memory, newest last, each with a seq; \
              \"read\" returns the entries newer than `after` (the `cursor` of the previous read) without stopping the capture, \
              so the loop is start, tap, read, tap, read, stop; \"stop\" ends it (with grep or max it returns the latest matching entries); \"status\". \
-             Filter with process (executable names such as Preferences; survives app restarts) or pid; unfiltered over Wi-Fi it is thousands of entries a second, \
-             and the buffer keeps the last 100,000. A read says how many entries were `dropped` before it could get them.",
+             Filter with app (bundle id or name, as iph_launch takes it; matched by where the app is installed, so it survives restarts and includes its extensions), \
+             process (executable names such as Preferences; survives app restarts) or pid; an entry is kept if it is from any listed app or process; unfiltered over Wi-Fi it is thousands of entries a second, \
+             and the buffer keeps the last 100,000 entries by default. A read says how many entries were `dropped` before it could get them.",
             json!({
                 "action": { "type": "string", "enum": ["start", "read", "stop", "status"] },
-                "process": { "type": "array", "items": { "type": "string" }, "description": "start: keep only these executables." },
+                "app": { "type": "array", "items": { "type": "string" }, "description": "start: keep only these apps' entries, each a bundle id or an app name; an unknown app fails before anything starts." },
+                "process": { "type": "array", "items": { "type": "string" }, "description": "start: keep only these executables. With app, an entry is kept if it matches either." },
                 "pid": { "type": "integer", "description": "start: keep only this pid (filtered on the phone)." },
                 "level": { "type": "string", "enum": ["debug", "info", "notice", "error", "fault"], "description": "start: lowest level kept." },
                 "buffer_entries": { "type": "integer", "description": "start: most entries the buffer holds, 1 to 1000000 (default 100000); the oldest are dropped." },
@@ -400,9 +402,10 @@ mod tests {
         let tool = tools().into_iter().find(|t| t["name"] == "iph_syslog").unwrap();
         let props = tool["inputSchema"]["properties"].as_object().unwrap();
         assert_eq!(props["action"]["enum"], json!(["start", "read", "stop", "status"]));
-        for key in ["after", "grep", "max", "output", "max_mb", "buffer_entries", "buffer_mb", "process", "pid", "level"] {
+        for key in ["after", "grep", "max", "output", "max_mb", "buffer_entries", "buffer_mb", "app", "process", "pid", "level"] {
             assert!(props.contains_key(key), "missing {key}");
         }
+        assert_eq!(props["app"]["items"]["type"], "string");
         assert_eq!(tool["inputSchema"]["required"], json!(["action"]));
     }
 

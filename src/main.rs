@@ -194,6 +194,9 @@ enum Cmd {
         /// start: keep only this process, by executable name (Settings is Preferences). Repeatable.
         #[arg(long)]
         process: Vec<String>,
+        /// start: keep only this app's entries, by bundle id or name as `iph launch` takes it. Repeatable; with --process an entry passes if it matches any.
+        #[arg(long)]
+        app: Vec<String>,
         /// start: keep only this pid (the phone filters it).
         #[arg(long)]
         pid: Option<u32>,
@@ -429,12 +432,13 @@ async fn run(cli: Cli) -> i32 {
         Cmd::Key { key } => ("key", json!({ "key": key })),
         Cmd::Button { button } => ("button", json!({ "button": button })),
         Cmd::Dnd { action } => ("dnd", json!({ "action": action })),
-        Cmd::Syslog { action, process, pid, level, output, max_mb, buffer_entries, buffer_mb, after, grep, max } => {
+        Cmd::Syslog { action, process, app, pid, level, output, max_mb, buffer_entries, buffer_mb, after, grep, max } => {
             // The daemon writes the file, so the path must not depend on its cwd.
             let output = output.map(|o| std::path::absolute(&o).map(|p| p.display().to_string()).unwrap_or(o));
             let process = (!process.is_empty()).then_some(process);
+            let app = (!app.is_empty()).then_some(app);
             ("syslog", json!({
-                "action": action, "process": process, "pid": pid, "level": level, "output": output,
+                "action": action, "process": process, "app": app, "pid": pid, "level": level, "output": output,
                 "max_mb": max_mb, "buffer_entries": buffer_entries, "buffer_mb": buffer_mb,
                 "after": after, "grep": grep, "max": max,
             }))
@@ -549,15 +553,16 @@ mod tests {
             panic!("syslog read")
         };
         assert_eq!((action.as_str(), after, grep.as_deref(), max), ("read", Some(120), Some("row"), Some(5)));
-        let Cmd::Syslog { process, output, max_mb, buffer_entries, buffer_mb, .. } = parse(&[
-            "syslog", "start", "--process", "A", "--process", "B", "-o", "cap.jsonl", "--max-mb", "8",
-            "--buffer-entries", "500", "--buffer-mb", "2",
+        let Cmd::Syslog { process, app, output, max_mb, buffer_entries, buffer_mb, .. } = parse(&[
+            "syslog", "start", "--process", "A", "--process", "B", "--app", "com.naver.papago", "--app", "설정",
+            "-o", "cap.jsonl", "--max-mb", "8", "--buffer-entries", "500", "--buffer-mb", "2",
         ])
         .command
         else {
             panic!("syslog start")
         };
-        assert_eq!((process, output.as_deref(), max_mb, buffer_entries, buffer_mb), (strings(&["A", "B"]), Some("cap.jsonl"), Some(8), Some(500), Some(2)));
+        assert_eq!((process, app), (strings(&["A", "B"]), strings(&["com.naver.papago", "설정"])));
+        assert_eq!((output.as_deref(), max_mb, buffer_entries, buffer_mb), (Some("cap.jsonl"), Some(8), Some(500), Some(2)));
     }
 
     #[test]

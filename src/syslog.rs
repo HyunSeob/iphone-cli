@@ -22,6 +22,7 @@ use std::{
 
 use idevice::{
     IdeviceError,
+    core_device::AppListEntry,
     os_trace_relay::{LogLevel, OsTraceLog, OsTraceRelayReceiver},
 };
 use regex::Regex;
@@ -29,7 +30,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     clock,
-    device::session::Session,
+    device::session::{Session, plain_path},
     fields, paths,
     reply::{Fail, Res},
     tcp::handle::Reset,
@@ -132,21 +133,28 @@ fn file_name(path: &str) -> &str {
 
 impl From<OsTraceLog> for Entry {
     fn from(log: OsTraceLog) -> Self {
-        let (subsystem, category) = match log.label {
-            Some(l) => (Some(l.subsystem), Some(l.category)),
-            None => (None, None),
-        };
-        Self {
-            time: utc_micros(log.timestamp.and_utc().timestamp(), log.timestamp.and_utc().timestamp_subsec_nanos()),
-            pid: log.pid,
-            process: file_name(&log.filename).to_string(),
-            sender: file_name(&log.image_name).to_string(),
-            level: log.level.into(),
-            subsystem,
-            category,
-            message: log.message,
-        }
+        entry_and_executable(log).0
     }
+}
+
+/// The entry, and the path of the executable that logged it, which is only
+/// for the filter: the buffer keeps the file name alone.
+fn entry_and_executable(log: OsTraceLog) -> (Entry, String) {
+    let (subsystem, category) = match log.label {
+        Some(l) => (Some(l.subsystem), Some(l.category)),
+        None => (None, None),
+    };
+    let entry = Entry {
+        time: utc_micros(log.timestamp.and_utc().timestamp(), log.timestamp.and_utc().timestamp_subsec_nanos()),
+        pid: log.pid,
+        process: file_name(&log.filename).to_string(),
+        sender: file_name(&log.image_name).to_string(),
+        level: log.level.into(),
+        subsystem,
+        category,
+        message: log.message,
+    };
+    (entry, log.filename)
 }
 
 impl Entry {
@@ -197,17 +205,56 @@ impl Entry {
     }
 }
 
+/// An installed app, by where it lives on the phone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppBundle {
+    pub bundle_id: String,
+    /// The bundle directory (`.../Papago.app`), as `plain_path` spells it.
+    pub path: String,
+}
+
+impl AppBundle {
+    /// `None` when the phone gave no absolute path to match against.
+    pub fn new(bundle_id: &str, path: &str) -> Option<Self> {
+        let path = plain_path(path);
+        path.starts_with('/').then(|| Self { bundle_id: bundle_id.to_string(), path })
+    }
+
+    /// Whether `executable` (already `plain_path`ed) lies in the bundle: the
+    /// app's own executable and its extensions, not a path that only starts
+    /// with the same letters.
+    fn contains(&self, executable: &str) -> bool {
+        executable.strip_prefix(self.path.as_str()).is_some_and(|rest| rest.starts_with('/'))
+    }
+}
+
+/// The app in `apps` with this bundle id.
+fn find_bundle(apps: &[AppListEntry], bundle_id: &str) -> Option<AppBundle> {
+    apps.iter().find(|a| a.bundle_identifier == bundle_id).and_then(|a| AppBundle::new(bundle_id, &a.path))
+}
+
 /// What is kept on this side. A pid is filtered by the phone instead.
+///
+/// With neither `processes` nor `apps` every entry passes. With either, an
+/// entry passes when it is from any listed process or any listed app;
+/// `min_level` then applies on top of that.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Filter {
     pub processes: Vec<String>,
+    pub apps: Vec<AppBundle>,
     pub min_level: Option<Level>,
 }
 
 impl Filter {
-    pub fn keeps(&self, e: &Entry) -> bool {
-        (self.processes.is_empty() || self.processes.contains(&e.process))
-            && self.min_level.is_none_or(|min| e.level >= min)
+    /// `executable` is the logging process's path as the phone gave it.
+    pub fn keeps(&self, e: &Entry, executable: &str) -> bool {
+        let selected = (self.processes.is_empty() && self.apps.is_empty())
+            || self.processes.contains(&e.process)
+            || (!self.apps.is_empty() && {
+                let executable = plain_path(executable);
+                self.apps.iter().any(|app| app.contains(&executable))
+            });
+        selected && self.min_level.is_none_or(|min| e.level >= min)
     }
 }
 
@@ -225,7 +272,10 @@ pub struct FileSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spec {
-    pub filter: Filter,
+    pub processes: Vec<String>,
+    /// As given: a bundle id or a name, resolved when the capture starts.
+    pub apps: Vec<String>,
+    pub min_level: Option<Level>,
     pub pid: Option<u32>,
     pub limits: Limits,
     /// Only when `output` is given: nothing is written to disk otherwise.
@@ -261,7 +311,7 @@ pub fn parse(args: &Value) -> Res<Request> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| Fail::invalid("syslog needs an action: start, read, stop or status"))?;
     let allowed: &[&str] = match action {
-        "start" => &["action", "process", "pid", "level", "output", "max_mb", "buffer_entries", "buffer_mb"],
+        "start" => &["action", "process", "app", "pid", "level", "output", "max_mb", "buffer_entries", "buffer_mb"],
         "read" => &["action", "after", "grep", "max"],
         "stop" => &["action", "grep", "max"],
         "status" => &["action"],
@@ -284,6 +334,18 @@ pub fn parse(args: &Value) -> Res<Request> {
             Err(Fail::invalid(format!("`{key}` takes a whole number from 1 to {most}")))
         }
     };
+    let names = |key: &str| -> Res<Vec<String>> {
+        match given.get(key) {
+            None => Ok(Vec::new()),
+            Some(Value::String(s)) => Ok(vec![s.clone()]),
+            Some(Value::Array(a)) => a
+                .iter()
+                .map(|v| v.as_str().map(String::from))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| Fail::invalid(format!("`{key}` takes names"))),
+            Some(_) => Err(Fail::invalid(format!("`{key}` takes a name or a list of names"))),
+        }
+    };
     let grep = || -> Res<Option<Regex>> {
         match given.get("grep") {
             None => Ok(None),
@@ -295,18 +357,13 @@ pub fn parse(args: &Value) -> Res<Request> {
     };
     match action {
         "start" => {
-            let processes = match given.get("process") {
-                None => Vec::new(),
-                Some(Value::String(s)) => vec![s.clone()],
-                Some(Value::Array(a)) => a
-                    .iter()
-                    .map(|v| v.as_str().map(String::from))
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(|| Fail::invalid("`process` takes names"))?,
-                Some(_) => return Err(Fail::invalid("`process` takes a name or a list of names")),
-            };
+            let processes = names("process")?;
             if processes.iter().any(|p| p.is_empty() || p.contains('/')) {
                 return Err(Fail::invalid("`process` takes executable names such as Preferences, not paths"));
+            }
+            let apps = names("app")?;
+            if apps.iter().any(|a| a.trim().is_empty()) {
+                return Err(Fail::invalid("`app` takes a bundle id or an app's name, as `iph launch` does"));
             }
             let min_level = match given.get("level") {
                 None => None,
@@ -342,7 +399,7 @@ pub fn parse(args: &Value) -> Res<Request> {
                     Some(FileSpec { path, max_bytes })
                 }
             };
-            Ok(Request::Start(Spec { filter: Filter { processes, min_level }, pid, limits, file }))
+            Ok(Request::Start(Spec { processes, apps, min_level, pid, limits, file }))
         }
         "read" => {
             let max = number("max")?.unwrap_or(DEFAULT_MATCHES);
@@ -613,12 +670,12 @@ impl Live {
         Self { ring, sink, filter, seen: 0, kept: 0, unparsed: 0, ended: None }
     }
 
-    pub fn take(&mut self, entry: Entry) -> std::io::Result<()> {
+    pub fn take(&mut self, entry: Entry, executable: &str) -> std::io::Result<()> {
         if self.ended.is_some() {
             return Ok(());
         }
         self.seen += 1;
-        if !self.filter.keeps(&entry) {
+        if !self.filter.keeps(&entry, executable) {
             return Ok(());
         }
         let line = self.sink.is_some().then(|| entry.line(self.ring.next_seq));
@@ -728,10 +785,13 @@ async fn pump(mut stream: OsTraceRelayReceiver, live: Arc<Mutex<Live>>) {
         // Never under a timeout: an entry is several reads, and giving up
         // between them would leave the stream mid-entry.
         let reason = match stream.next().await {
-            Ok(log) => match live.lock().unwrap().take(Entry::from(log)) {
-                Ok(()) => continue,
-                Err(e) => format!("cannot write the file: {e}"),
-            },
+            Ok(log) => {
+                let (entry, executable) = entry_and_executable(log);
+                match live.lock().unwrap().take(entry, &executable) {
+                    Ok(()) => continue,
+                    Err(e) => format!("cannot write the file: {e}"),
+                }
+            }
             Err(e) if skippable(&e) => {
                 live.lock().unwrap().unparsed += 1;
                 continue;
@@ -745,6 +805,8 @@ async fn pump(mut stream: OsTraceRelayReceiver, live: Arc<Mutex<Live>>) {
 
 pub struct Capture {
     spec: Spec,
+    /// `spec`'s apps resolved to where they live.
+    filter: Filter,
     started_at: String,
     started: std::time::Instant,
     live: Arc<Mutex<Live>>,
@@ -815,13 +877,16 @@ impl Capture {
         let live = self.live.lock().unwrap();
         let mut out = live.counts();
         out.insert("started_at".into(), json!(self.started_at));
-        if !self.spec.filter.processes.is_empty() {
-            out.insert("process".into(), json!(self.spec.filter.processes));
+        if !self.filter.processes.is_empty() {
+            out.insert("process".into(), json!(self.filter.processes));
+        }
+        if !self.filter.apps.is_empty() {
+            out.insert("app".into(), json!(self.filter.apps.iter().map(|a| &a.bundle_id).collect::<Vec<_>>()));
         }
         if let Some(pid) = self.spec.pid {
             out.insert("pid".into(), json!(pid));
         }
-        if let Some(level) = self.spec.filter.min_level {
+        if let Some(level) = self.filter.min_level {
             out.insert("level".into(), json!(level.name()));
         }
         if let Some(file) = &self.spec.file {
@@ -865,6 +930,9 @@ impl Session {
                         ),
                     ));
                 }
+                // Before anything is created or opened: an unknown app is an error.
+                let apps = self.app_bundles(&spec.apps).await?;
+                let filter = Filter { processes: spec.processes.clone(), apps, min_level: spec.min_level };
                 // The file is opened only once the relay runs: a start that
                 // fails leaves an earlier capture's file as it was.
                 let (stream, reset) = self.os_trace(spec.pid).await?;
@@ -875,15 +943,16 @@ impl Session {
                         Sink::create(&f.path, f.max_bytes).map_err(|e| Fail::invalid(format!("{}: {e}", f.path.display())))
                     })
                     .transpose()?;
-                let mut live = Live::new(Ring::new(spec.limits), sink, spec.filter.clone());
+                let mut live = Live::new(Ring::new(spec.limits), sink, filter.clone());
                 let started_at = clock::now_utc();
                 let start = json!({
                     "event": "start",
                     "time": started_at,
                     "udid": udid,
-                    "process": spec.filter.processes,
+                    "process": filter.processes,
+                    "app": filter.apps.iter().map(|a| &a.bundle_id).collect::<Vec<_>>(),
                     "pid": spec.pid,
-                    "level": spec.filter.min_level.map(Level::name),
+                    "level": filter.min_level.map(Level::name),
                     "max_mb": spec.file.as_ref().map(|f| f.max_bytes / (1024 * 1024)),
                 });
                 if let Err(e) = live.note(&start) {
@@ -894,7 +963,7 @@ impl Session {
                 let task = tokio::task::spawn_local(pump(stream, live.clone()));
                 let flusher = spec.file.is_some().then(|| tokio::task::spawn_local(flusher(Arc::downgrade(&live))));
                 let started = std::time::Instant::now();
-                let capture = Capture { spec, started_at, started, live, task, flusher, reset };
+                let capture = Capture { spec, filter, started_at, started, live, task, flusher, reset };
                 let report = capture.report();
                 self.capture = Some(capture);
                 Ok(report)
@@ -914,6 +983,30 @@ impl Session {
                 Ok(out)
             }
         }
+    }
+
+    /// Each app, named as `iph launch` takes it, with where it is installed.
+    async fn app_bundles(&mut self, apps: &[String]) -> Res<Vec<AppBundle>> {
+        let mut found: Vec<AppBundle> = Vec::new();
+        for app in apps {
+            let bundle_id = self.resolve_bundle(app).await?;
+            if found.iter().any(|b| b.bundle_id == bundle_id) {
+                continue;
+            }
+            // The list is cached; an app installed since is not in it.
+            let mut bundle = find_bundle(&self.list_apps(false).await?, &bundle_id);
+            if bundle.is_none() {
+                bundle = find_bundle(&self.list_apps(true).await?, &bundle_id);
+            }
+            found.push(bundle.ok_or_else(|| {
+                Fail::not_sent("app_not_found", format!("no installed app has the bundle id {bundle_id}, or the phone gave no path for it"))
+                    .hint(crate::i18n::t(
+                        "`iph apps`로 이름과 bundle id를 확인하세요.",
+                        "See names and bundle ids with `iph apps`.",
+                    ))
+            })?);
+        }
+        Ok(found)
     }
 
     /// End the capture, keeping it for `status`, `read` and `stop`.
@@ -975,6 +1068,12 @@ mod tests {
 
     fn note(message: &str) -> Entry {
         entry("Papago", Level::Info, message)
+    }
+
+    /// Where an entry's process lives, as far as tests without apps care.
+    fn feed(live: &mut Live, e: Entry) {
+        let executable = format!("/usr/libexec/{}", e.process);
+        live.take(e, &executable).unwrap();
     }
 
     fn roomy() -> Limits {
@@ -1050,14 +1149,96 @@ mod tests {
     #[test]
     fn the_filter_keeps_named_processes_at_or_above_a_level() {
         let any = Filter::default();
-        assert!(any.keeps(&entry("SpringBoard", Level::Debug, "")));
-        let f = Filter { processes: vec!["Preferences".into(), "Papago".into()], min_level: Some(Level::Notice) };
-        assert!(f.keeps(&entry("Preferences", Level::Notice, "")));
-        assert!(f.keeps(&entry("Papago", Level::Fault, "")));
-        assert!(!f.keeps(&entry("Preferences", Level::Info, "")));
-        assert!(!f.keeps(&entry("SpringBoard", Level::Error, "")));
+        assert!(any.keeps(&entry("SpringBoard", Level::Debug, ""), "/usr/libexec/SpringBoard"));
+        let f = Filter { processes: vec!["Preferences".into(), "Papago".into()], min_level: Some(Level::Notice), ..Filter::default() };
+        let keeps = |e: Entry| f.keeps(&e, "/somewhere/else");
+        assert!(keeps(entry("Preferences", Level::Notice, "")));
+        assert!(keeps(entry("Papago", Level::Fault, "")));
+        assert!(!keeps(entry("Preferences", Level::Info, "")));
+        assert!(!keeps(entry("SpringBoard", Level::Error, "")));
         // Exact names only: a prefix is another process.
-        assert!(!f.keeps(&entry("PreferencesExtension", Level::Error, "")));
+        assert!(!keeps(entry("PreferencesExtension", Level::Error, "")));
+    }
+
+    fn papago() -> AppBundle {
+        AppBundle::new("com.naver.papago", "file:///private/var/containers/Bundle/Application/AAAA-1111/Papago.app/").unwrap()
+    }
+
+    #[test]
+    fn an_app_is_matched_by_where_it_is_installed_whichever_way_the_prefix_is_spelled() {
+        let app = papago();
+        assert_eq!(app.path, "/var/containers/Bundle/Application/AAAA-1111/Papago.app");
+        let f = Filter { apps: vec![app], ..Filter::default() };
+        let from = |executable: &str| f.keeps(&note(""), executable);
+        assert!(from("/private/var/containers/Bundle/Application/AAAA-1111/Papago.app/Papago"));
+        assert!(from("/var/containers/Bundle/Application/AAAA-1111/Papago.app/Papago"), "without /private");
+        assert!(from("/private/var/containers/Bundle/Application/AAAA-1111/Papago.app/PlugIns/Share.appex/Share"), "an extension of the app");
+        assert!(!from("/private/var/containers/Bundle/Application/BBBB-2222/Papago.app/Papago"), "the same name from another install");
+        assert!(!from("/private/var/containers/Bundle/Application/AAAA-1111/Papago.appex/Papago"), "a directory that only starts like the bundle");
+        assert!(!from("/private/var/containers/Bundle/Application/AAAA-1111/Papago.app"), "the bundle directory itself is not an executable in it");
+        assert!(!from("/usr/libexec/backboardd"));
+        assert!(!from(""));
+        // The same bundle given with a /var path, a URL, a trailing slash.
+        for spelling in [
+            "/var/containers/Bundle/Application/AAAA-1111/Papago.app",
+            "/private/var/containers/Bundle/Application/AAAA-1111/Papago.app/",
+            "file:///var/containers/Bundle/Application/AAAA-1111/Papago.app/",
+        ] {
+            assert_eq!(AppBundle::new("com.naver.papago", spelling).unwrap(), papago(), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn an_app_filter_follows_the_app_across_a_restart_and_matches_non_ascii_paths() {
+        let f = Filter { apps: vec![papago()], ..Filter::default() };
+        let executable = "/private/var/containers/Bundle/Application/AAAA-1111/Papago.app/Papago";
+        for pid in [412, 977] {
+            let mut e = note("");
+            e.pid = pid;
+            assert!(f.keeps(&e, executable), "pid {pid}");
+        }
+        let notes = AppBundle::new("com.apple.mobilenotes", "file:///Applications/%EB%A9%94%EB%AA%A8.app/").unwrap();
+        assert_eq!(notes.path, "/Applications/메모.app");
+        let f = Filter { apps: vec![notes], ..Filter::default() };
+        assert!(f.keeps(&note(""), "/Applications/메모.app/메모"));
+    }
+
+    #[test]
+    fn a_process_and_an_app_each_select_and_the_level_narrows_both() {
+        let f = Filter { processes: vec!["SpringBoard".into()], apps: vec![papago()], min_level: Some(Level::Notice) };
+        let papago_exe = "/private/var/containers/Bundle/Application/AAAA-1111/Papago.app/Papago";
+        assert!(f.keeps(&entry("SpringBoard", Level::Notice, ""), "/usr/libexec/SpringBoard"), "a listed process");
+        assert!(f.keeps(&entry("Papago", Level::Error, ""), papago_exe), "a listed app");
+        assert!(!f.keeps(&entry("Papago", Level::Info, ""), papago_exe), "the level applies to the app");
+        assert!(!f.keeps(&entry("SpringBoard", Level::Debug, ""), "/usr/libexec/SpringBoard"), "and to the process");
+        assert!(!f.keeps(&entry("backboardd", Level::Fault, ""), "/usr/libexec/backboardd"), "neither listed");
+        // A process named like the app's executable is its own selector.
+        let only_process = Filter { processes: vec!["Papago".into()], ..Filter::default() };
+        assert!(only_process.keeps(&entry("Papago", Level::Debug, ""), "/elsewhere/Papago"));
+        // An app listed alone does not let other processes through.
+        let only_app = Filter { apps: vec![papago()], ..Filter::default() };
+        assert!(!only_app.keeps(&entry("Papago", Level::Debug, ""), "/elsewhere/Papago"));
+    }
+
+    fn listed(bundle_id: &str, name: &str, path: &str) -> AppListEntry {
+        serde_json::from_value(json!({
+            "isRemovable": true, "name": name, "isFirstParty": false, "path": path, "bundleIdentifier": bundle_id,
+            "isDeveloperApp": false, "isInternal": false, "isHidden": false, "isAppClip": false,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_app_is_found_by_bundle_id_in_the_phones_list_and_needs_a_usable_path() {
+        let apps = vec![
+            listed("com.apple.Preferences", "설정", "file:///Applications/Preferences.app/"),
+            listed("com.naver.papago", "Papago", "file:///private/var/containers/Bundle/Application/AAAA-1111/Papago.app/"),
+            listed("com.example.nopath", "No path", ""),
+        ];
+        assert_eq!(find_bundle(&apps, "com.naver.papago"), Some(papago()));
+        assert_eq!(find_bundle(&apps, "com.apple.Preferences").unwrap().path, "/Applications/Preferences.app");
+        assert_eq!(find_bundle(&apps, "com.example.missing"), None);
+        assert_eq!(find_bundle(&apps, "com.example.nopath"), None, "an empty path would match nothing useful");
     }
 
     #[test]
@@ -1255,6 +1436,37 @@ mod tests {
     }
 
     #[test]
+    fn paging_while_entries_are_evicted_returns_or_reports_every_seq_exactly_once() {
+        for (capacity, page_size, burst) in [(6, 3, 4), (5, 1, 2), (10, 4, 9), (3, 2, 5), (50, 7, 1)] {
+            let mut ring = Ring::new(Limits { entries: capacity, bytes: 1 << 20 });
+            let (mut pushed, mut cursor, mut returned, mut dropped) = (0u64, 0u64, Vec::new(), 0u64);
+            for round in 0..40 {
+                for _ in 0..burst {
+                    pushed += 1;
+                    ring.push(note(&format!("m{pushed}")));
+                }
+                // Read at an uneven pace: some rounds skip, so evictions pile up.
+                if round % 3 == 2 {
+                    continue;
+                }
+                loop {
+                    let page = ring.read(cursor, None, page_size);
+                    dropped += page.dropped;
+                    returned.extend(seqs(&page));
+                    assert!(page.cursor >= cursor, "the cursor never goes back");
+                    cursor = page.cursor;
+                    if !page.more {
+                        break;
+                    }
+                }
+                assert_eq!(cursor, pushed, "a page that is not cut short has looked at everything");
+            }
+            assert!(returned.windows(2).all(|w| w[0] < w[1]), "oldest first, never twice ({capacity}, {page_size}, {burst})");
+            assert_eq!(returned.len() as u64 + dropped, pushed, "every seq was returned or counted as dropped ({capacity}, {page_size}, {burst})");
+        }
+    }
+
+    #[test]
     fn latest_returns_the_most_recent_matches_oldest_first_with_the_total() {
         let mut ring = Ring::new(roomy());
         for i in 0..3 {
@@ -1345,7 +1557,7 @@ mod tests {
         let path = dir.join("cap.jsonl");
         let sink = Sink::create(&path, 1 << 20).unwrap();
         let live = Arc::new(Mutex::new(Live::new(Ring::new(roomy()), Some(sink), Filter::default())));
-        live.lock().unwrap().take(note("quiet")).unwrap();
+        feed(&mut live.lock().unwrap(), note("quiet"));
         let runtime = tokio::runtime::Builder::new_current_thread().enable_time().start_paused(true).build().unwrap();
         runtime.block_on(async {
             let task = tokio::spawn(flusher(Arc::downgrade(&live)));
@@ -1361,13 +1573,13 @@ mod tests {
     fn a_capture_ends_with_one_end_line_and_keeps_nothing_after_it() {
         let dir = temp_dir("end");
         let path = dir.join("cap.jsonl");
-        let filter = Filter { processes: vec!["Papago".into()], min_level: None };
+        let filter = Filter { processes: vec!["Papago".into()], ..Filter::default() };
         let mut live = Live::new(Ring::new(roomy()), Some(Sink::create(&path, 1 << 20).unwrap()), filter);
-        live.take(note("one")).unwrap();
-        live.take(entry("SpringBoard", Level::Info, "other")).unwrap();
+        feed(&mut live, note("one"));
+        feed(&mut live, entry("SpringBoard", Level::Info, "other"));
         live.end("the log stream ended: socket closed");
         live.end("stopped");
-        live.take(note("late")).unwrap();
+        feed(&mut live, note("late"));
         let got = lines(&path);
         assert_eq!(got.len(), 2, "the end line is flushed without anyone asking");
         assert_eq!((got[0]["seq"].as_u64(), got[0]["message"].as_str()), (Some(1), Some("one")));
@@ -1382,7 +1594,7 @@ mod tests {
     fn without_a_file_nothing_is_written_and_the_ring_alone_serves_reads() {
         let dir = temp_dir("memory");
         let mut live = Live::new(Ring::new(roomy()), None, Filter::default());
-        live.take(note("one")).unwrap();
+        feed(&mut live, note("one"));
         live.note(&json!({ "event": "start" })).unwrap();
         live.end("stopped");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
@@ -1398,7 +1610,7 @@ mod tests {
         let path = dir.join("cap.jsonl");
         let mut live = Live::new(Ring::new(roomy()), Some(Sink::create(&path, 1 << 20).unwrap()), Filter::default());
         for m in ["a", "b", "c"] {
-            live.take(note(m)).unwrap();
+            feed(&mut live, note(m));
         }
         live.end("stopped");
         let in_file: Vec<(u64, String)> = lines(&path)
@@ -1415,11 +1627,11 @@ mod tests {
 
     #[test]
     fn only_kept_entries_are_numbered_and_a_read_keeps_working_after_the_capture_ended() {
-        let filter = Filter { processes: vec!["Papago".into()], min_level: None };
+        let filter = Filter { processes: vec!["Papago".into()], ..Filter::default() };
         let mut live = Live::new(Ring::new(roomy()), None, filter);
-        live.take(note("one")).unwrap();
-        live.take(entry("SpringBoard", Level::Info, "skipped")).unwrap();
-        live.take(note("two")).unwrap();
+        feed(&mut live, note("one"));
+        feed(&mut live, entry("SpringBoard", Level::Info, "skipped"));
+        feed(&mut live, note("two"));
         let q = Query { grep: None, max: 10 };
         let running = live.read(0, &q);
         assert_eq!((running["state"].as_str(), running["cursor"].as_u64(), running["dropped"].as_u64()), (Some("running"), Some(2), Some(0)));
@@ -1448,15 +1660,15 @@ mod tests {
         let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "process": "Preferences", "level": "default", "pid": null })) else {
             panic!("start")
         };
-        assert_eq!(spec.filter.processes, ["Preferences"]);
-        assert_eq!(spec.filter.min_level, Some(Level::Notice));
-        assert_eq!(spec.file, None);
+        assert_eq!(spec.processes, ["Preferences"]);
+        assert_eq!(spec.min_level, Some(Level::Notice));
+        assert_eq!((spec.apps.len(), spec.file), (0, None));
         assert_eq!(spec.limits, Limits { entries: 100_000, bytes: 64 * 1024 * 1024 });
         let out = absolute("x.jsonl");
         let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "process": ["A", "B"], "pid": 7, "output": out, "max_mb": 2 })) else {
             panic!("start with a file")
         };
-        assert_eq!((spec.filter.processes.len(), spec.pid), (2, Some(7)));
+        assert_eq!((spec.processes.len(), spec.pid), (2, Some(7)));
         assert_eq!(spec.file, Some(FileSpec { path: out.clone(), max_bytes: 2 * 1024 * 1024 }));
         let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "output": out })) else { panic!("default size") };
         assert_eq!(spec.file.unwrap().max_bytes, DEFAULT_MAX_MB * 1024 * 1024);
@@ -1468,6 +1680,32 @@ mod tests {
             panic!("buffer limits")
         };
         assert_eq!(spec.limits, Limits { entries: 500, bytes: 2 * 1024 * 1024 });
+    }
+
+    #[test]
+    fn an_app_is_a_name_or_a_list_of_names_for_start_only() {
+        let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "app": "Papago", "process": "Preferences" })) else {
+            panic!("one app")
+        };
+        assert_eq!((spec.apps, spec.processes), (strings(&["Papago"]), strings(&["Preferences"])));
+        let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "app": ["com.naver.papago", "설정"] })) else {
+            panic!("two apps")
+        };
+        assert_eq!(spec.apps, strings(&["com.naver.papago", "설정"]));
+        for bad in [
+            json!({ "action": "start", "app": "" }),
+            json!({ "action": "start", "app": ["a", " "] }),
+            json!({ "action": "start", "app": 7 }),
+            json!({ "action": "start", "app": [1] }),
+            json!({ "action": "read", "app": "Papago" }),
+            json!({ "action": "stop", "app": "Papago" }),
+        ] {
+            assert_eq!(parsed(bad.clone()).expect_err(&bad.to_string()).code, "invalid_argument", "{bad}");
+        }
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]

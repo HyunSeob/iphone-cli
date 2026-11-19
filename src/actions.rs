@@ -1198,7 +1198,7 @@ impl Session {
         Ok(fields! { "count": list.len(), "apps": list })
     }
 
-    async fn resolve_bundle(&mut self, app: &str) -> Res<String> {
+    pub(crate) async fn resolve_bundle(&mut self, app: &str) -> Res<String> {
         // Something with a dot and no spaces is a bundle id; anything else is
         // looked up by name.
         if app.contains('.') && !app.contains(' ') {
