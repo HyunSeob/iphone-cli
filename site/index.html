@@ -115,17 +115,20 @@
       --fg-dim: #687082;
       --amber: #ff9f0a;
       --amber-soft: rgba(255, 159, 10, 0.12);
-      --amber-border: rgba(255, 159, 10, 0.34);
+      --amber-border: rgba(255, 159, 10, 0.36);
       --green: #30d158;
       --green-soft: rgba(48, 209, 88, 0.12);
+      --green-border: rgba(48, 209, 88, 0.36);
       --red: #ff453a;
       --red-soft: rgba(255, 69, 58, 0.12);
+      --red-border: rgba(255, 69, 58, 0.38);
       --blue: #64d2ff;
       --code-bg: #0d0f17;
       --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
       --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
       --radius: 14px;
       --max-w: 1080px;
+      --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
     }
 
     * { box-sizing: border-box; }
@@ -157,6 +160,48 @@
     }
 
     a { color: inherit; text-decoration: none; }
+    .nowrap { white-space: nowrap; }
+
+    /* Keyframes */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(16px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes pulseDot {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(48, 209, 88, 0.55), 0 0 10px var(--green); }
+      55% { box-shadow: 0 0 0 6px rgba(48, 209, 88, 0), 0 0 10px var(--green); }
+    }
+    @keyframes packetFlow {
+      0% { transform: translateX(-18px); opacity: 0; }
+      20% { opacity: 1; }
+      80% { opacity: 1; }
+      100% { transform: translateX(42px); opacity: 0; }
+    }
+    @keyframes termSwap {
+      from { opacity: 0; transform: translateY(5px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .hero-anim {
+      opacity: 0;
+      animation: fadeUp 0.7s var(--ease-out) forwards;
+    }
+    .hero-anim.d1 { animation-delay: 0.05s; }
+    .hero-anim.d2 { animation-delay: 0.14s; }
+    .hero-anim.d3 { animation-delay: 0.22s; }
+    .hero-anim.d4 { animation-delay: 0.30s; }
+    .hero-anim.d5 { animation-delay: 0.38s; }
+
+    /* Scroll reveal */
+    .reveal {
+      opacity: 0;
+      transform: translateY(18px);
+      transition: opacity 0.65s var(--ease-out), transform 0.65s var(--ease-out);
+    }
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
 
     /* Navbar */
     .nav-wrap {
@@ -165,7 +210,7 @@
       z-index: 50;
       backdrop-filter: blur(16px);
       -webkit-backdrop-filter: blur(16px);
-      background: rgba(9, 10, 15, 0.72);
+      background: rgba(9, 10, 15, 0.74);
       border-bottom: 1px solid var(--border);
     }
     .nav {
@@ -179,26 +224,17 @@
     }
     .brand {
       display: inline-flex;
-      align-items: center;
-      gap: 0.6rem;
+      align-items: baseline;
+      gap: 0.5rem;
       font-weight: 600;
       letter-spacing: -0.02em;
-      font-size: 0.98rem;
+      font-size: 1rem;
     }
-    .brand-mark {
-      width: 26px;
-      height: 26px;
-      border-radius: 7px;
-      background: linear-gradient(145deg, #252836, #13151e);
-      border: 1px solid var(--border-strong);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,0.12);
-      display: grid;
-      place-items: center;
-      color: var(--amber);
-      font-family: var(--font-mono);
-      font-size: 0.72rem;
-      font-weight: 600;
+    .brand-name {
+      color: var(--fg);
+      transition: color 0.15s;
     }
+    .brand:hover .brand-name { color: #ffffff; }
     .brand-sub {
       font-family: var(--font-mono);
       font-size: 0.76rem;
@@ -212,7 +248,26 @@
       font-size: 0.88rem;
       color: var(--fg-muted);
     }
-    .nav-links a:hover { color: var(--fg); }
+    .nav-links a {
+      position: relative;
+      padding: 0.2rem 0;
+      transition: color 0.18s;
+    }
+    .nav-links a::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -4px;
+      height: 1.5px;
+      background: var(--amber);
+      transform: scaleX(0);
+      transform-origin: center;
+      transition: transform 0.22s var(--ease-out);
+    }
+    .nav-links a:hover,
+    .nav-links a.active { color: var(--fg); }
+    .nav-links a.active::after { transform: scaleX(1); }
     .nav-actions {
       display: flex;
       align-items: center;
@@ -243,9 +298,13 @@
       border-radius: 8px;
       background: #f3f4f6;
       color: #090a0f;
-      transition: transform 0.15s, background 0.15s;
+      transition: transform 0.15s, background 0.15s, box-shadow 0.15s;
     }
-    .nav-gh:hover { background: #ffffff; transform: translateY(-1px); }
+    .nav-gh:hover {
+      background: #ffffff;
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(255, 255, 255, 0.12);
+    }
 
     /* Container */
     .container {
@@ -256,7 +315,7 @@
 
     /* Hero */
     .hero {
-      padding: 4.5rem 0 3.5rem;
+      padding: 4.5rem 0 3.75rem;
       text-align: center;
     }
     .eyebrow {
@@ -278,7 +337,7 @@
       height: 7px;
       border-radius: 50%;
       background: var(--green);
-      box-shadow: 0 0 10px var(--green);
+      animation: pulseDot 2.4s ease-in-out infinite;
     }
     .hero h1 {
       font-size: clamp(2.4rem, 5.6vw, 4.15rem);
@@ -287,6 +346,7 @@
       letter-spacing: -0.04em;
       margin: 0 auto 1.25rem;
       max-width: 17ch;
+      text-wrap: balance;
       background: linear-gradient(180deg, #ffffff 30%, #aeb5c4 100%);
       -webkit-background-clip: text;
       background-clip: text;
@@ -299,15 +359,23 @@
       color: transparent;
     }
     .hero-sub {
-      font-size: clamp(1.02rem, 1.8vw, 1.2rem);
+      font-size: clamp(1rem, 1.65vw, 1.16rem);
       color: var(--fg-muted);
-      max-width: 60ch;
+      max-width: 64ch;
       margin: 0 auto 2rem;
-      line-height: 1.65;
+      line-height: 1.68;
+      text-wrap: balance;
     }
     .hero-sub strong {
       color: var(--fg);
       font-weight: 500;
+    }
+    .hero-sub .hero-proof {
+      display: block;
+      margin-top: 0.35rem;
+      color: var(--fg);
+      font-weight: 500;
+      text-wrap: balance;
     }
 
     /* Install Command Dock */
@@ -320,11 +388,16 @@
       box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.07);
       overflow: hidden;
       text-align: left;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .install-dock:hover {
+      border-color: rgba(255, 159, 10, 0.28);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(255, 159, 10, 0.08);
     }
     .install-tabs {
       display: flex;
       align-items: center;
-      gap: 0.2rem;
+      gap: 0.25rem;
       padding: 0.45rem 0.6rem;
       border-bottom: 1px solid var(--border);
       background: rgba(255, 255, 255, 0.02);
@@ -337,11 +410,11 @@
       color: var(--fg-muted);
       font-family: var(--font-mono);
       font-size: 0.76rem;
-      padding: 0.34rem 0.68rem;
+      padding: 0.34rem 0.7rem;
       border-radius: 7px;
       cursor: pointer;
       white-space: nowrap;
-      transition: all 0.15s;
+      transition: all 0.16s var(--ease-out);
     }
     .tab-btn:hover { color: var(--fg); background: rgba(255,255,255,0.04); }
     .tab-btn.active {
@@ -366,6 +439,7 @@
     }
     .install-cmd::-webkit-scrollbar { display: none; }
     .install-cmd .prompt { color: var(--green); margin-right: 0.5rem; user-select: none; }
+    .cmd-swap { animation: termSwap 0.22s var(--ease-out); display: inline-block; }
     .copy-btn {
       flex-shrink: 0;
       display: inline-flex;
@@ -377,12 +451,13 @@
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 0.4rem 0.7rem;
+      padding: 0.4rem 0.72rem;
       cursor: pointer;
       transition: all 0.15s;
     }
     .copy-btn:hover { color: var(--fg); border-color: var(--border-strong); background: rgba(255,255,255,0.09); }
-    .copy-btn.copied { color: var(--green); border-color: rgba(48, 209, 88, 0.4); background: var(--green-soft); }
+    .copy-btn:active { transform: scale(0.96); }
+    .copy-btn.copied { color: var(--green); border-color: var(--green-border); background: var(--green-soft); }
 
     .hero-links {
       display: flex;
@@ -416,7 +491,9 @@
       background: linear-gradient(135deg, rgba(255, 159, 10, 0.35), rgba(255, 255, 255, 0.08) 40%, rgba(100, 210, 255, 0.18));
       filter: blur(0.5px);
       z-index: 0;
+      transition: opacity 0.3s;
     }
+    .stage-wrap:hover .stage-glow { opacity: 1; }
     .stage {
       position: relative;
       z-index: 1;
@@ -447,11 +524,12 @@
 
     /* Section chrome */
     section {
-      padding: 4.5rem 0;
+      padding: 4.75rem 0;
       border-top: 1px solid var(--border);
+      scroll-margin-top: 4rem;
     }
     .section-head {
-      max-width: 660px;
+      max-width: 760px;
       margin-bottom: 2.5rem;
     }
     .section-kicker {
@@ -464,19 +542,22 @@
       display: block;
     }
     .section-head h2 {
-      font-size: clamp(1.65rem, 3.2vw, 2.35rem);
+      font-size: clamp(1.65rem, 3.1vw, 2.3rem);
       font-weight: 700;
       letter-spacing: -0.03em;
-      line-height: 1.15;
+      line-height: 1.16;
       margin: 0 0 0.75rem;
+      text-wrap: balance;
     }
     .section-head p {
       margin: 0;
       color: var(--fg-muted);
-      font-size: 1.02rem;
+      font-size: 1rem;
+      max-width: 62ch;
+      text-wrap: pretty;
     }
 
-    /* Split Terminal + Outcomes */
+    /* Interactive Split Terminal + Outcomes */
     .split {
       display: grid;
       grid-template-columns: 1.2fr 0.8fr;
@@ -491,12 +572,16 @@
       display: flex;
       flex-direction: column;
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+      transition: border-color 0.25s;
     }
+    .terminal-card[data-state="done"] { border-color: rgba(48, 209, 88, 0.28); }
+    .terminal-card[data-state="not_sent"] { border-color: rgba(255, 159, 10, 0.32); }
+    .terminal-card[data-state="unknown"] { border-color: rgba(255, 69, 58, 0.34); }
     .terminal-bar {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 0.65rem 1rem;
+      padding: 0.68rem 1rem;
       border-bottom: 1px solid var(--border);
       background: rgba(255, 255, 255, 0.025);
     }
@@ -515,15 +600,29 @@
       font-size: 0.75rem;
       color: var(--fg-dim);
     }
+    .terminal-status {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      padding: 0.14rem 0.5rem;
+      border-radius: 999px;
+      transition: all 0.2s;
+    }
+    .terminal-status.done { color: var(--green); background: var(--green-soft); }
+    .terminal-status.not_sent { color: var(--amber); background: var(--amber-soft); }
+    .terminal-status.unknown { color: var(--red); background: var(--red-soft); }
     .terminal-code {
       margin: 0;
-      padding: 1.15rem 1.25rem;
+      padding: 1.2rem 1.25rem;
       font-family: var(--font-mono);
-      font-size: 0.82rem;
-      line-height: 1.65;
+      font-size: 0.81rem;
+      line-height: 1.66;
       overflow-x: auto;
       color: #d6dce8;
       flex: 1;
+      min-height: 315px;
+    }
+    .terminal-code.swapping {
+      animation: termSwap 0.24s var(--ease-out);
     }
     .t-prompt { color: var(--green); }
     .t-cmd { color: #ffffff; font-weight: 500; }
@@ -532,28 +631,68 @@
     .t-str { color: #ffd080; }
     .t-key { color: #7dcfff; }
     .t-bool { color: var(--green); }
+    .t-false { color: var(--red); }
     .t-num { color: #ff9f0a; }
 
     .outcome-stack {
       display: flex;
       flex-direction: column;
-      gap: 0.85rem;
+      gap: 0.8rem;
+    }
+    .outcome-hint {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--fg-dim);
+      margin: -0.2rem 0 0.1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
     }
     .outcome-card {
+      appearance: none;
+      width: 100%;
+      text-align: left;
+      font: inherit;
+      color: inherit;
       background: var(--bg-surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 1.1rem 1.2rem;
+      padding: 1.05rem 1.2rem;
       flex: 1;
       display: flex;
       flex-direction: column;
       justify-content: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s, transform 0.18s var(--ease-out), box-shadow 0.2s;
+    }
+    .outcome-card:hover {
+      background: var(--bg-surface-hover);
+      border-color: var(--border-strong);
+      transform: translateX(3px);
+    }
+    .outcome-card.active[data-outcome="done"] {
+      border-color: var(--green-border);
+      background: rgba(48, 209, 88, 0.06);
+      box-shadow: 0 8px 28px rgba(48, 209, 88, 0.08);
+      transform: translateX(3px);
+    }
+    .outcome-card.active[data-outcome="not_sent"] {
+      border-color: var(--amber-border);
+      background: rgba(255, 159, 10, 0.065);
+      box-shadow: 0 8px 28px rgba(255, 159, 10, 0.08);
+      transform: translateX(3px);
+    }
+    .outcome-card.active[data-outcome="unknown"] {
+      border-color: var(--red-border);
+      background: rgba(255, 69, 58, 0.065);
+      box-shadow: 0 8px 28px rgba(255, 69, 58, 0.09);
+      transform: translateX(3px);
     }
     .outcome-top {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 0.4rem;
+      margin-bottom: 0.42rem;
     }
     .outcome-badge {
       font-family: var(--font-mono);
@@ -572,12 +711,12 @@
     }
     .outcome-card p {
       margin: 0;
-      font-size: 0.88rem;
+      font-size: 0.87rem;
       color: var(--fg-muted);
-      line-height: 1.5;
+      line-height: 1.52;
     }
 
-    /* Bento Grid */
+    /* Bento Grid with Mouse Spotlight */
     .bento {
       display: grid;
       grid-template-columns: repeat(6, 1fr);
@@ -588,17 +727,29 @@
       background: var(--bg-surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 1.4rem;
-      transition: border-color 0.2s, background 0.2s, transform 0.2s;
+      padding: 1.45rem;
+      transition: border-color 0.22s, transform 0.22s var(--ease-out);
       position: relative;
       overflow: hidden;
+      --mx: 50%;
+      --my: 50%;
+    }
+    .bento-card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(380px circle at var(--mx) var(--my), rgba(255, 159, 10, 0.10), transparent 55%);
+      opacity: 0;
+      transition: opacity 0.25s;
+      pointer-events: none;
     }
     .bento-card.wide { grid-column: span 3; }
     .bento-card:hover {
       border-color: var(--border-strong);
-      background: var(--bg-surface-hover);
       transform: translateY(-2px);
     }
+    .bento-card:hover::before { opacity: 1; }
+    .bento-card > * { position: relative; z-index: 1; }
     .icon-box {
       width: 36px;
       height: 36px;
@@ -609,6 +760,11 @@
       place-items: center;
       color: var(--amber);
       margin-bottom: 1rem;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .bento-card:hover .icon-box {
+      border-color: var(--amber-border);
+      background: var(--amber-soft);
     }
     .bento-card h3 {
       font-size: 1.04rem;
@@ -633,13 +789,13 @@
     }
     .mini-code {
       margin: 0.9rem 0 0;
-      padding: 0.75rem 0.9rem;
+      padding: 0.78rem 0.95rem;
       border-radius: 9px;
       background: var(--code-bg);
       border: 1px solid var(--border);
       font-family: var(--font-mono);
       font-size: 0.78rem;
-      line-height: 1.55;
+      line-height: 1.56;
       color: #cfd6e6;
       overflow-x: auto;
     }
@@ -671,6 +827,8 @@
       background: rgba(255, 159, 10, 0.08);
       border-bottom-color: var(--amber-border);
     }
+    tbody tr { transition: background 0.15s; }
+    tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
     tbody td {
       padding: 0.9rem 1.1rem;
       border-bottom: 1px solid var(--border);
@@ -690,20 +848,18 @@
       color: var(--green);
       font-weight: 500;
     }
-    .status-no {
-      color: var(--fg-dim);
-    }
+    .status-no { color: var(--fg-dim); }
 
-    /* Architecture Pipeline */
+    /* Interactive Architecture Pipeline */
     .arch-flow {
       display: grid;
       grid-template-columns: 1fr auto 1.1fr auto 1.45fr;
-      gap: 0.75rem;
+      gap: 0.8rem;
       align-items: center;
       background: var(--bg-elevated);
       border: 1px solid var(--border-strong);
       border-radius: var(--radius);
-      padding: 1.5rem;
+      padding: 1.55rem;
     }
     .arch-col {
       display: flex;
@@ -714,11 +870,18 @@
       background: var(--bg-surface);
       border: 1px solid var(--border);
       border-radius: 10px;
-      padding: 0.75rem 0.95rem;
+      padding: 0.78rem 0.95rem;
+      transition: border-color 0.2s, background 0.2s, transform 0.2s var(--ease-out);
+    }
+    .arch-node:hover {
+      border-color: var(--amber-border);
+      background: rgba(255, 159, 10, 0.07);
+      transform: translateY(-1px);
     }
     .arch-node.highlight {
       border-color: var(--amber-border);
       background: var(--amber-soft);
+      box-shadow: 0 0 28px rgba(255, 159, 10, 0.08);
     }
     .arch-node strong {
       display: block;
@@ -730,22 +893,39 @@
       display: block;
       font-size: 0.78rem;
       color: var(--fg-muted);
-      margin-top: 0.15rem;
+      margin-top: 0.16rem;
     }
     .arch-arrow {
       font-family: var(--font-mono);
-      font-size: 0.75rem;
+      font-size: 0.73rem;
       color: var(--fg-dim);
       text-align: center;
       padding: 0 0.25rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.35rem;
     }
-    .arch-arrow .line {
-      display: block;
-      color: var(--amber);
-      font-size: 1rem;
-      line-height: 1;
-      margin-bottom: 0.2rem;
+    .arch-track {
+      position: relative;
+      width: 56px;
+      height: 2px;
+      background: rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      overflow: hidden;
     }
+    .arch-track::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 18px;
+      height: 2px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, transparent, var(--amber), #ffd080);
+      animation: packetFlow 1.9s linear infinite;
+    }
+    .arch-track.delay::after { animation-delay: 0.75s; }
     .arch-foot {
       margin-top: 1rem;
       font-size: 0.88rem;
@@ -765,6 +945,7 @@
       border-radius: var(--radius);
       transition: border-color 0.18s, background 0.18s;
     }
+    details:hover { border-color: var(--border-strong); }
     details[open] {
       border-color: var(--border-strong);
       background: rgba(255, 255, 255, 0.04);
@@ -784,7 +965,7 @@
     summary .chev {
       flex-shrink: 0;
       color: var(--fg-dim);
-      transition: transform 0.2s, color 0.2s;
+      transition: transform 0.22s var(--ease-out), color 0.2s;
     }
     details[open] summary .chev {
       transform: rotate(180deg);
@@ -823,7 +1004,17 @@
       .split { grid-template-columns: 1fr; }
       .bento-card, .bento-card.wide { grid-column: span 6; }
       .arch-flow { grid-template-columns: 1fr; }
-      .arch-arrow .line { transform: rotate(90deg); display: inline-block; }
+      .arch-track { width: 2px; height: 28px; }
+      .arch-track::after { width: 2px; height: 12px; animation: none; background: var(--amber); opacity: 0.7; }
+      .nowrap { white-space: normal; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+      }
+      .hero-anim, .reveal { opacity: 1 !important; transform: none !important; }
     }
   </style>
 </head>
@@ -831,15 +1022,15 @@
   <div class="nav-wrap">
     <nav class="nav" aria-label="Primary">
       <a class="brand" href="./">
-        <span class="brand-mark">iph</span>
-        <span>iphone-cli</span>
+        <span class="brand-name">iphone-cli</span>
         <span class="brand-sub">by HyunSeob</span>
       </a>
       <div class="nav-links">
-        <a href="#why">Features</a>
-        <a href="#compare">Compare</a>
-        <a href="#architecture">Architecture</a>
-        <a href="#faq">FAQ</a>
+        <a href="#model" data-nav="model">Outcomes</a>
+        <a href="#why" data-nav="why">Features</a>
+        <a href="#compare" data-nav="compare">Compare</a>
+        <a href="#architecture" data-nav="architecture">Architecture</a>
+        <a href="#faq" data-nav="faq">FAQ</a>
       </div>
       <div class="nav-actions">
         <a class="pill-link" href="./llms.txt">llms.txt</a>
@@ -854,17 +1045,17 @@
   <main>
     <div class="container">
       <header class="hero">
-        <div class="eyebrow">
+        <div class="eyebrow hero-anim d1">
           <span class="dot" aria-hidden="true"></span>
           100% Rust · macOS &amp; Windows · Real iPhone (iOS 27+)
         </div>
-        <h1>Control a <span class="accent">real iPhone</span> from any AI agent.</h1>
-        <p class="hero-sub">
+        <h1 class="hero-anim d2">Control a <span class="accent">real iPhone</span> from any AI agent.</h1>
+        <p class="hero-sub hero-anim d3">
           A single native CLI &amp; MCP binary that reads Apple's <strong>accessibility tree</strong> and drives any app over USB or Wi-Fi.
-          <strong>No Xcode. No WebDriverAgent. No app installed on the phone.</strong>
+          <span class="hero-proof">No Xcode. No WebDriverAgent. <span class="nowrap">No app installed on the phone.</span></span>
         </p>
 
-        <div class="install-dock" role="region" aria-label="Quick install commands">
+        <div class="install-dock hero-anim d4" role="region" aria-label="Quick install commands">
           <div class="install-tabs" role="tablist">
             <button class="tab-btn active" role="tab" aria-selected="true" data-cmd="curl -fsSL https://raw.githubusercontent.com/HyunSeob/iphone-cli/main/install.sh | sh && iph setup">macOS</button>
             <button class="tab-btn" role="tab" aria-selected="false" data-cmd="claude mcp add iph -- iph mcp">Claude Code</button>
@@ -881,7 +1072,7 @@
           </div>
         </div>
 
-        <div class="hero-links">
+        <div class="hero-links hero-anim d4">
           <a href="https://github.com/HyunSeob/iphone-cli/releases">Releases (macOS &amp; Windows)</a>
           <span class="sep">·</span>
           <a href="https://crates.io/crates/iphone-cli">crates.io</a>
@@ -891,7 +1082,7 @@
           <a href="https://github.com/HyunSeob/iphone-cli/blob/main/README.ko.md">한국어 문서</a>
         </div>
 
-        <div class="stage-wrap">
+        <div class="stage-wrap hero-anim d5">
           <div class="stage-glow" aria-hidden="true"></div>
           <div class="stage">
             <img src="./demo.gif" width="1047" height="560" alt="iphone-cli (iph) terminal driving a real iPhone Calculator app directly without Xcode or WebDriverAgent">
@@ -903,21 +1094,21 @@
         </div>
       </header>
 
-      <section id="model">
+      <section id="model" class="reveal">
         <div class="section-head">
           <span class="section-kicker">Structured UI + Safety Contract</span>
-          <h2>Accessibility tree in. Verified outcomes out.</h2>
+          <h2><span class="nowrap">Accessibility tree in.</span> <span class="nowrap">Verified outcomes out.</span></h2>
           <p>Every command outputs compact JSON. Selectors target labels, roles, values, and identifiers — and never silently retry an ambiguous touch.</p>
         </div>
 
         <div class="split">
-          <div class="terminal-card">
+          <div class="terminal-card" id="outcome-terminal" data-state="done">
             <div class="terminal-bar">
               <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
-              <span class="terminal-title">zsh — iph</span>
-              <span class="terminal-title">JSON / --human</span>
+              <span class="terminal-title" id="term-title">iph read · iph tap</span>
+              <span class="terminal-status done" id="term-status">exit 0 · done</span>
             </div>
-            <pre class="terminal-code"><span class="t-prompt">$</span> <span class="t-cmd">iph read --human</span>
+            <pre class="terminal-code" id="term-code"><span class="t-prompt">$</span> <span class="t-cmd">iph read --human</span>
 <span class="t-dim">Settings  430x932  15 elements</span>
 <span class="t-role">application</span>  <span class="t-str">"Settings"</span>             <span class="t-dim">@0,0 430x932</span>
   <span class="t-role">header</span>     <span class="t-str">"Settings"</span>             <span class="t-dim">@20,119.3 53.7x37</span>
@@ -936,37 +1127,38 @@
 }</pre>
           </div>
 
-          <div class="outcome-stack">
-            <div class="outcome-card">
+          <div class="outcome-stack" role="tablist" aria-label="Inspect command outcomes">
+            <div class="outcome-hint">Click an outcome to inspect its JSON contract ↓</div>
+            <button type="button" class="outcome-card active" role="tab" aria-selected="true" data-outcome="done">
               <div class="outcome-top">
                 <span class="outcome-badge done">outcome: "done"</span>
                 <span class="exit-code">exit 0</span>
               </div>
               <p>Command finished and re-read the settled screen. <code class="inline-code">tap</code> returns the next screen's elements so agents skip an extra <code class="inline-code">read</code> turn.</p>
-            </div>
-            <div class="outcome-card">
+            </button>
+            <button type="button" class="outcome-card" role="tab" aria-selected="false" data-outcome="not_sent">
               <div class="outcome-top">
                 <span class="outcome-badge not-sent">outcome: "not_sent"</span>
                 <span class="exit-code">exit 1</span>
               </div>
-              <p>Nothing reached the phone (missing selector, ambiguous match, covered target). Safe to adjust and retry immediately.</p>
-            </div>
-            <div class="outcome-card">
+              <p>Nothing reached the phone (missing selector, ambiguous match, covered target). Safe to narrow and retry immediately.</p>
+            </button>
+            <button type="button" class="outcome-card" role="tab" aria-selected="false" data-outcome="unknown">
               <div class="outcome-top">
                 <span class="outcome-badge unknown">outcome: "unknown"</span>
                 <span class="exit-code">exit 2</span>
               </div>
               <p>Input may have landed. Scripts halt immediately — even inside <code class="inline-code">try/catch</code> — preventing double payments or duplicate messages.</p>
-            </div>
+            </button>
           </div>
         </div>
       </section>
 
-      <section id="why">
+      <section id="why" class="reveal">
         <div class="section-head">
           <span class="section-kicker">Engineered for Agents</span>
           <h2>Built to replace fragile OCR hacks and heavy WDA stacks.</h2>
-          <p>Everything ships inside a single static Rust binary with zero Node.js, Python, Appium, or Xcode dependency.</p>
+          <p>Everything ships inside a single native Rust binary with zero Node.js, Python, Appium, or Xcode dependency.</p>
         </div>
 
         <div class="bento">
@@ -1020,7 +1212,7 @@ iph mcp --tools read,find,script</pre>
         </div>
       </section>
 
-      <section id="compare">
+      <section id="compare" class="reveal">
         <div class="section-head">
           <span class="section-kicker">Tradeoffs &amp; Positioning</span>
           <h2>How iphone-cli compares to alternatives</h2>
@@ -1097,7 +1289,7 @@ iph mcp --tools read,find,script</pre>
         </div>
       </section>
 
-      <section id="architecture">
+      <section id="architecture" class="reveal">
         <div class="section-head">
           <span class="section-kicker">Under the Hood</span>
           <h2>Direct Apple developer services over a userspace tunnel.</h2>
@@ -1117,8 +1309,8 @@ iph mcp --tools read,find,script</pre>
           </div>
 
           <div class="arch-arrow" aria-hidden="true">
-            <span class="line">→</span>
-            Unix socket /<br>named pipe
+            <span class="arch-track"></span>
+            <span>Unix socket /<br>named pipe</span>
           </div>
 
           <div class="arch-col">
@@ -1129,8 +1321,8 @@ iph mcp --tools read,find,script</pre>
           </div>
 
           <div class="arch-arrow" aria-hidden="true">
-            <span class="line">→</span>
-            USB or<br>LAN / Wi-Fi
+            <span class="arch-track delay"></span>
+            <span>USB or<br>LAN / Wi-Fi</span>
           </div>
 
           <div class="arch-col">
@@ -1156,7 +1348,7 @@ iph mcp --tools read,find,script</pre>
         </p>
       </section>
 
-      <section id="faq">
+      <section id="faq" class="reveal">
         <div class="section-head">
           <span class="section-kicker">FAQ</span>
           <h2>Common questions</h2>
@@ -1233,12 +1425,13 @@ iph mcp --tools read,find,script</pre>
 
   <script>
     (function () {
+      // 1. Install dock tabs & clipboard
       const tabs = document.querySelectorAll(".tab-btn");
       const cmdText = document.getElementById("cmd-text");
       const copyBtn = document.getElementById("copy-btn");
       const copyLabel = document.getElementById("copy-label");
-      let current = tabs[0].dataset.cmd;
-      let timer;
+      let currentCmd = tabs[0].dataset.cmd;
+      let copyTimer;
 
       tabs.forEach((btn) => {
         btn.addEventListener("click", () => {
@@ -1248,8 +1441,11 @@ iph mcp --tools read,find,script</pre>
           });
           btn.classList.add("active");
           btn.setAttribute("aria-selected", "true");
-          current = btn.dataset.cmd;
-          cmdText.textContent = current;
+          currentCmd = btn.dataset.cmd;
+          cmdText.classList.remove("cmd-swap");
+          void cmdText.offsetWidth;
+          cmdText.textContent = currentCmd;
+          cmdText.classList.add("cmd-swap");
           copyBtn.classList.remove("copied");
           copyLabel.textContent = "Copy";
         });
@@ -1257,16 +1453,143 @@ iph mcp --tools read,find,script</pre>
 
       copyBtn.addEventListener("click", async () => {
         try {
-          await navigator.clipboard.writeText(current);
+          await navigator.clipboard.writeText(currentCmd);
           copyBtn.classList.add("copied");
           copyLabel.textContent = "Copied";
-          clearTimeout(timer);
-          timer = setTimeout(() => {
+          clearTimeout(copyTimer);
+          copyTimer = setTimeout(() => {
             copyBtn.classList.remove("copied");
             copyLabel.textContent = "Copy";
           }, 1800);
         } catch (_) {}
       });
+
+      // 2. Interactive Outcome Simulator
+      const termCard = document.getElementById("outcome-terminal");
+      const termTitle = document.getElementById("term-title");
+      const termStatus = document.getElementById("term-status");
+      const termCode = document.getElementById("term-code");
+      const outcomeCards = document.querySelectorAll(".outcome-card");
+
+      const scenarios = {
+        done: {
+          title: "iph read · iph tap",
+          badge: "exit 0 · done",
+          html: `<span class="t-prompt">$</span> <span class="t-cmd">iph read --human</span>
+<span class="t-dim">Settings  430x932  15 elements</span>
+<span class="t-role">application</span>  <span class="t-str">"Settings"</span>             <span class="t-dim">@0,0 430x932</span>
+  <span class="t-role">header</span>     <span class="t-str">"Settings"</span>             <span class="t-dim">@20,119.3 53.7x37</span>
+  <span class="t-role">switch</span>     <span class="t-str">"Airplane Mode"</span> = <span class="t-str">"0"</span>  <span class="t-dim">@20,489.3 390x49.3</span>
+  <span class="t-role">button</span>     <span class="t-str">"Wi-Fi, HomeNet"</span>       <span class="t-dim">@20,538.7 390x49.3</span>
+  <span class="t-role">button</span>     <span class="t-str">"General"</span>              <span class="t-dim">@20,700 390x49.3</span>
+
+<span class="t-prompt">$</span> <span class="t-cmd">iph tap "General"</span>
+{
+  <span class="t-key">"ok"</span>: <span class="t-bool">true</span>,
+  <span class="t-key">"outcome"</span>: <span class="t-str">"done"</span>,
+  <span class="t-key">"elapsed_ms"</span>: <span class="t-num">1752</span>,
+  <span class="t-key">"sent"</span>: <span class="t-bool">true</span>,
+  <span class="t-key">"verified"</span>: <span class="t-bool">true</span>,
+  <span class="t-key">"screen_changed"</span>: <span class="t-bool">true</span>
+}`
+        },
+        not_sent: {
+          title: "iph tap (ambiguous match)",
+          badge: "exit 1 · not_sent",
+          html: `<span class="t-prompt">$</span> <span class="t-cmd">iph tap "Delete"</span>
+{
+  <span class="t-key">"ok"</span>: <span class="t-false">false</span>,
+  <span class="t-key">"outcome"</span>: <span class="t-str">"not_sent"</span>,
+  <span class="t-key">"sent"</span>: <span class="t-false">false</span>,
+  <span class="t-key">"error"</span>: {
+    <span class="t-key">"code"</span>: <span class="t-str">"ambiguous_selector"</span>,
+    <span class="t-key">"message"</span>: <span class="t-str">"2 elements matched 'Delete'; nothing was tapped"</span>,
+    <span class="t-key">"hint"</span>: <span class="t-str">"Narrow with role=, within=, or index=N and retry safely"</span>
+  },
+  <span class="t-key">"candidates"</span>: [
+    { <span class="t-key">"index"</span>: <span class="t-num">0</span>, <span class="t-key">"role"</span>: <span class="t-str">"button"</span>, <span class="t-key">"label"</span>: <span class="t-str">"Delete"</span> },
+    { <span class="t-key">"index"</span>: <span class="t-num">1</span>, <span class="t-key">"role"</span>: <span class="t-str">"button"</span>, <span class="t-key">"label"</span>: <span class="t-str">"Delete"</span> }
+  ]
+}`
+        },
+        unknown: {
+          title: "iph type --submit (withheld)",
+          badge: "exit 2 · unknown",
+          html: `<span class="t-prompt">$</span> <span class="t-cmd">iph type "30000" --submit</span>
+{
+  <span class="t-key">"ok"</span>: <span class="t-false">false</span>,
+  <span class="t-key">"outcome"</span>: <span class="t-str">"unknown"</span>,
+  <span class="t-key">"sent"</span>: <span class="t-bool">true</span>,
+  <span class="t-key">"submit_sent"</span>: <span class="t-false">false</span>,
+  <span class="t-key">"value_changed"</span>: <span class="t-false">false</span>,
+  <span class="t-key">"error"</span>: {
+    <span class="t-key">"code"</span>: <span class="t-str">"type_not_verified"</span>,
+    <span class="t-key">"message"</span>: <span class="t-str">"Return withheld after warning: value_unchanged"</span>,
+    <span class="t-key">"hint"</span>: <span class="t-str">"Do not retype automatically. Run 'iph read' to inspect first."</span>
+  }
+}`
+        }
+      };
+
+      outcomeCards.forEach((card) => {
+        card.addEventListener("click", () => {
+          const key = card.dataset.outcome;
+          const sc = scenarios[key];
+          if (!sc) return;
+          outcomeCards.forEach((c) => {
+            c.classList.remove("active");
+            c.setAttribute("aria-selected", "false");
+          });
+          card.classList.add("active");
+          card.setAttribute("aria-selected", "true");
+          termCard.dataset.state = key;
+          termTitle.textContent = sc.title;
+          termStatus.textContent = sc.badge;
+          termStatus.className = "terminal-status " + key;
+          termCode.classList.remove("swapping");
+          void termCode.offsetWidth;
+          termCode.innerHTML = sc.html;
+          termCode.classList.add("swapping");
+        });
+      });
+
+      // 3. Bento card mouse spotlight
+      document.querySelectorAll(".bento-card").forEach((card) => {
+        card.addEventListener("mousemove", (e) => {
+          const rect = card.getBoundingClientRect();
+          card.style.setProperty("--mx", (e.clientX - rect.left) + "px");
+          card.style.setProperty("--my", (e.clientY - rect.top) + "px");
+        });
+      });
+
+      // 4. Scroll reveal + Navbar scroll-spy
+      const reveals = document.querySelectorAll(".reveal");
+      if ("IntersectionObserver" in window) {
+        const revealObs = new IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              entry.target.classList.add("visible");
+              revealObs.unobserve(entry.target);
+            }
+          });
+        }, { threshold: 0.12 });
+        reveals.forEach((el) => revealObs.observe(el));
+
+        const navLinks = document.querySelectorAll(".nav-links a[data-nav]");
+        const sections = document.querySelectorAll("section[id]");
+        const spyObs = new IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              navLinks.forEach((a) => {
+                a.classList.toggle("active", a.dataset.nav === entry.target.id);
+              });
+            }
+          });
+        }, { rootMargin: "-35% 0px -55% 0px" });
+        sections.forEach((sec) => spyObs.observe(sec));
+      } else {
+        reveals.forEach((el) => el.classList.add("visible"));
+      }
     })();
   </script>
 </body>
