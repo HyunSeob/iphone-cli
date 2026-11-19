@@ -79,6 +79,7 @@ A script is the body of a function, so `return` ends it. The commands are functi
 - `readList({row, columns, key, group, stop_below, max_scrolls})` scrolls a list and returns `{rows, scrolls, ended}` with each row once. `columns: {name: {take, regex}}`, or `{name: {value: "…"}}` for a constant. `group: {selector, regex, as}` gives each row the heading it stands under (a date line), and `stop_below: N` stops once a heading's number falls below N. `key: "column"` names the column that identifies a row; use it when rows change while the list is read (a clock, time left).
 - `args` holds the `--arg k=v` values as text (`Number(args.n)` for a number). Return an object, or call `output(key, value)`, and it comes back as `outputs`. `log(…)` lines come back as `logs`. `sleep(ms)` waits.
 - Any call takes `hint: "…"`: what to tell the person if the script stops there. A screen that waits for Face ID: `waitFor(sel, { timeout_ms: 40000, hint: "폰을 봐 주세요" })`.
+- `syslog(action, {process, pid, level, grep, max})` captures the phone's log, as `iph syslog` does below.
 - There are no files, no network and no timers. `Date`, `JSON`, `RegExp` and the rest of the language work.
 
 ### When a call fails
@@ -117,9 +118,13 @@ After `launch`, that app must stay in front; if another one comes up, the script
 
 `iph type "글"` pastes into the field that has the keyboard, so tap the field first. `--clear` replaces the content, `--submit` presses Return. The result has `value` (what the field shows now) and `clipboard_restored`. iph does not judge `value`: apps format, mask and correct what is pasted (`30000` shows as `₩ 30,000`), so you decide whether it is right. A `value` that is still what the field held before means the paste did not happen; before `--submit` sends something that matters, type without it, look at `value`, then `iph key return`. When the user had copied something in an app, it cannot be put back (`clipboard_restored: false`, `clipboard_note`); tell the user. The on-screen keyboard disappears for a moment while typing; that is expected.
 
+## What the app logged
+
+To check what an app logged after a tap, wrap the steps in a capture: `iph syslog start --process <executable>`, the steps, then `iph syslog stop --grep <regex> --max 20` (MCP: `iph_syslog` with `action`). The executable name is not the app's display name (Settings is `Preferences`); when you do not know it, start without `--process`, stop after a second, and look at the `process` field of the entries for the app's pid. Unfiltered over Wi-Fi the phone sends thousands of entries a second, so filter for anything longer. If `stop` says `seen: 0`, nothing arrived: after a dropped connection the phone sends nothing for about 30 s, and `status` gives a `hint` while it waits. Values the app marked private arrive as `<private>`; that is the app's choice, not a failure. The entries are the user's data: quote only what the task needs.
+
 ## Commands at a glance
 
-`read`, `find`, `tap`, `swipe`, `pinch`, `scroll`, `type`, `key`, `button`, `launch`, `apps` (bundle ids), `screenshot`, `script`, `run`, `scripts`, `batch`, `dnd`, `doctor`, `connect --ip <IP>`, `devices`, `stop`. `iph <command> --help` has the flags; add `--human` to read a result yourself.
+`read`, `find`, `tap`, `swipe`, `pinch`, `scroll`, `type`, `key`, `button`, `launch`, `apps` (bundle ids), `screenshot`, `script`, `run`, `scripts`, `batch`, `dnd`, `syslog`, `doctor`, `connect --ip <IP>`, `devices`, `stop`. `iph <command> --help` has the flags; add `--human` to read a result yourself.
 
 ## When something is off
 

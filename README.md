@@ -156,6 +156,7 @@ Every command prints JSON; add `--human` for people. The device is chosen by `--
 | `iph run <name> [--arg k=v]` / `iph scripts` | Run a saved script, list saved scripts |
 | `iph mcp [--tools a,b]` | MCP server on stdio |
 | `iph dnd <on\|off\|status>` | Turn Do Not Disturb on, put the earlier Focus back, or show the current state |
+| `iph syslog <start\|stop\|status> [--process name] [--pid N] [--level L] [-o file] [--max-mb N] [--grep RE] [--max N]` | Write the phone's log to a file while other commands run; `stop` can return the latest matching entries. See [Phone log](#phone-log) |
 | `iph stop` | Stop the resident process for this phone |
 
 ### Selectors
@@ -236,6 +237,27 @@ iph does not judge what it presses. Pay, send and order buttons are pressed like
 - **Needs:** the Focus control on Control Center's first page, and Control Center opening while an app is in front. For a phone in a language other than Korean or English, put the names the phone shows in `control` and `focus` under `[dnd]`.
 - **Not covered:** whatever comes through Do Not Disturb (alarms and timers, emergency alerts, people and apps allowed in the Do Not Disturb settings) and system pop-ups. Whether banners really stay away while Do Not Disturb is on was not tested separately (it relies on how iOS behaves).
 
+### Phone log
+
+`iph syslog start` writes what the phone logs to a JSON Lines file while taps, reads and scripts go on as usual. `iph syslog stop` ends it, so a test or an agent can check what an app logged after a tap. No `sudo log collect` on the Mac is needed.
+
+```sh
+iph syslog start --process Preferences        # Settings' executable name
+iph launch com.apple.Preferences --restart
+iph tap "Battery"
+iph syslog stop --grep "battery" --max 20     # the 20 latest entries whose message matches
+```
+
+- **The file:** `~/Library/Application Support/iph/<udid>.syslog.jsonl` (readable by you only), or `-o <file>`. Each entry is one line: `time` (UTC), `pid`, `process`, `sender`, `level`, `subsystem`, `category`, `message`. A capture begins with a `{"event": "start", …}` line and finishes with `{"event": "end", "reason": …}`. A file without an `end` line was cut off by a killed resident process. Starting again empties the file once the phone has started sending; a `start` that fails leaves it as it was.
+- **Filters:** `--process` keeps entries by executable name, exactly (repeatable). It keeps matching across app restarts. Settings is `Preferences`; for another app, start without a filter and look at the `process` field. `--level` drops anything below debug, info, notice, error or fault. `--pid` makes the phone send only that process's entries.
+- **Volume:** unfiltered over Wi-Fi it is a lot. In one 60 s idle run the phone sent about 4,800 entries/s, 1.4 MB/s. At `--max-mb` MiB (64 by default) the file moves to `<file>.1`, replacing the previous one (the `start` line goes with it), so an unfiltered capture keeps roughly the last minute or two. Filter with `--process` for anything longer.
+- **Cost to other commands:** with an unfiltered capture running, the median tap and the median read each took under 10% longer (10 taps and 5 reads each way, one run).
+- **`stop`:** returns `seen` (entries the phone sent), `kept` (written), `rotations` and why it ended. With `--grep` (a regular expression on the message) or `--max`, it also returns up to `--max` of the latest matching entries (50 by default, at most 1000), each message cut to 500 characters, and `matched`, the number that matched in all.
+- **What ends a capture:** `stop`, a dropped connection, iph rebuilding its connections (after a command times out or the phone stops answering), `iph stop`, a newer build of iph replacing the resident process, or the resident process exiting after its idle time (a capture does not keep it alive). The `end` line and `status` say which. A capture is not restarted by itself, so a gap in the log is never hidden. One capture runs at a time; a second `start` fails with `capture_running`.
+- **After a dropped connection** the phone sends nothing to the next capture for about 20 to 30 s. `status` says so in a `hint` while nothing has arrived.
+- **Private values:** values an app marks private in its log calls arrive as `<private>`, as in Console. In one app's launch, about a fifth of its entries carried one.
+- Also in scripts as `syslog(action, opts)` and over MCP as `iph_syslog`. A script cannot choose the file. Not in `batch`: a capture outlives the call that started it.
+
 ## Scripts
 
 A sequence you run often is written in JavaScript and runs in one call. The commands (`read`, `tap`, `scroll` …) are functions; loops, conditions and variables are the language's own. The engine (QuickJS) is inside `iph`, so there is nothing else to install.
@@ -278,6 +300,7 @@ iph scripts                            # list saved scripts
 | `readField({selector, take, regex})` | One value, as text. `take`: `value` (default), `label`, `identifier`, `text` |
 | `readList({row, columns, key, group, stop_below, until, max_scrolls, limit})` | Collect a list while scrolling, each row once; returns `{rows, scrolls, ended}` |
 | `sleep(ms)` · `log(…)` · `output(k, v)` | Wait, note, add a value to the result |
+| `syslog(action, {process, pid, level, grep, max})` | `iph syslog` without `-o`: the file stays in iph's state directory. Not counted in `inputs_sent` |
 
 - A function returns the JSON object the CLI command of the same name prints (`tap("일반").screen_changed`, `read().elements`). Selectors can be strings or objects.
 - **A failure is an exception.** A call that fails throws an `Error` carrying `e.code`, `e.outcome`, `e.hint` and `e.result` (the whole result object). Uncaught, it ends the script, and the result has `failed_call: {cmd, line, outcome}`, `reason: {code, message}` and `screen_summary`. Nothing is guessed. Use `try { … } catch (e) { … }` only around something that may legitimately be missing.
@@ -324,7 +347,7 @@ ln -s "$PWD/skills/iph" ~/.claude/skills/iph                    # Claude Code
 ln -s "$PWD/skills/iph" ~/.codex/skills/iph                     # Codex
 ```
 
-Tools: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`. Arguments and results are the same as the CLI's; `iph_launch` takes `arguments` (array of strings) and `environment` (object of strings). `iph_script` takes `code` (JavaScript) and `args`; `iph_run` takes `name` and `args`. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
+Tools: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`, `iph_syslog`. Arguments and results are the same as the CLI's; `iph_launch` takes `arguments` (array of strings) and `environment` (object of strings). `iph_script` takes `code` (JavaScript) and `args`; `iph_run` takes `name` and `args`. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
 
 ## Speed
 
@@ -425,4 +448,4 @@ IPH_PCAP=<dir> iph … # writes the tunnel's packets out for Wireshark; they hol
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The media-session bring-up is adapted from an idevice example tool ([LICENSE.idevice](LICENSE.idevice)). `src/tcp` is the tunnel's TCP stack, taken from jktcp 0.1.8 (MIT), with two constants changed so that it waits longer before giving a connection up, and the microseconds of its packet capture fixed ([LICENSE.jktcp](LICENSE.jktcp)).
+MIT, see [LICENSE](LICENSE). The media-session bring-up is adapted from an idevice example tool ([LICENSE.idevice](LICENSE.idevice)). `src/tcp` is the tunnel's TCP stack, taken from jktcp 0.1.8 (MIT), with two constants changed so that it waits longer before giving a connection up, the microseconds of its packet capture fixed, and a way to reset one connection (RST) added for `iph syslog` ([LICENSE.jktcp](LICENSE.jktcp)).
