@@ -18,6 +18,7 @@ const SCRIPT_DOC: &str = "Run JavaScript that drives the phone, in one call: loo
 The commands are functions that return what the tool of the same name returns: read(opts), find(selector), tap(target, opts), swipe(direction | {from, to}, opts), \
 pinch(direction | {scale, rotate, at}, opts), scroll(direction, {until, max}), type(text, {clear, submit}), key(name), button(name), launch(app, {restart, arguments, environment}), apps(). Also waitFor(selector, {timeout_ms}), \
 readField({selector, take, regex}) → text, readList({row, columns, group, stop_below, max_scrolls}) → {rows, scrolls, ended}, sleep(ms), log(…), output(key, value). \
+syslog(\"start\" | \"read\" | \"stop\" | \"status\", {app, process, pid, level, after, grep, max}) captures the phone's log as iph_syslog does and returns what it returns; a script cannot write a file. \
 tap(target) waits up to 5 s for a selector to appear and hold still; tap([a, b, c]) presses a keypad without re-reading. \
 A call that fails throws an Error with .code, .outcome, .hint and .result (the full result object); uncaught, it ends the script and the result says which call and line. \
 After a call whose outcome is \"unknown\" the script is stopped and cannot go on. \
@@ -169,6 +170,31 @@ fn tools() -> Vec<Value> {
             &["action"],
         ),
         tool(
+            "iph_syslog",
+            "Capture the phone's log in the background while other calls run, to check what an app logged after a tap. \
+             \"start\" (one capture at a time; stop an ended one before starting again) keeps the entries in a buffer in memory, newest last, each with a seq; \
+             \"read\" returns the entries newer than `after` (the `cursor` of the previous read) without stopping the capture, \
+             so the loop is start, tap, read, tap, read, stop; \"stop\" ends it (with grep or max it returns the latest matching entries); \"status\". \
+             Filter with app (bundle id or name, as iph_launch takes it; matched by where the app is installed, so it survives restarts and includes its extensions), \
+             process (executable names such as Preferences; survives app restarts) or pid; an entry is kept if it is from any listed app or process; unfiltered over Wi-Fi it is thousands of entries a second, \
+             and the buffer keeps the last 100,000 entries by default. A read says how many entries were `dropped` before it could get them.",
+            json!({
+                "action": { "type": "string", "enum": ["start", "read", "stop", "status"] },
+                "app": { "type": "array", "items": { "type": "string" }, "description": "start: keep only these apps' entries, each a bundle id or an app name; an unknown app fails before anything starts." },
+                "process": { "type": "array", "items": { "type": "string" }, "description": "start: keep only these executables. With app, an entry is kept if it matches either." },
+                "pid": { "type": "integer", "description": "start: keep only this pid (filtered on the phone)." },
+                "level": { "type": "string", "enum": ["debug", "info", "notice", "error", "fault"], "description": "start: lowest level kept." },
+                "buffer_entries": { "type": "integer", "description": "start: most entries the buffer holds, 1 to 1000000 (default 100000); the oldest are dropped." },
+                "buffer_mb": { "type": "integer", "description": "start: most memory the buffer takes in MiB, 1 to 1024 (default 64)." },
+                "output": { "type": "string", "description": "start: absolute path of a JSON Lines file that also gets every kept entry (whole messages). Without it nothing is written to disk." },
+                "max_mb": { "type": "integer", "description": "start, with output: move the file to <file>.1 at this size in MiB, 1 to 4096 (default 64)." },
+                "after": { "type": "integer", "description": "read: only entries after this seq; pass the previous read's cursor. Omit for the oldest the buffer holds." },
+                "grep": { "type": "string", "description": "read, stop: regular expression matched against each message." },
+                "max": { "type": "integer", "description": "read: most entries returned, the oldest first. stop: most entries returned, the latest. Default 50, at most 1000." },
+            }),
+            &["action"],
+        ),
+        tool(
             "iph_screenshot",
             "Save a PNG screenshot to a file on this computer. Use iph_read for content; this is for looks.",
             json!({ "path": { "type": "string", "description": "Absolute path of the PNG to write." } }),
@@ -223,13 +249,16 @@ async fn call(udid: &str, name: &str, args: Value) -> Value {
             Err(e) => envelope(Err(Fail::invalid(e.to_string())), started),
         },
         "iph_scripts" => envelope(script::cmd_scripts(), started),
+        "iph_syslog" if args.get("output").and_then(|o| o.as_str()).is_some_and(|o| !std::path::Path::new(o).is_absolute()) => {
+            envelope(Err(Fail::invalid("`output` must be an absolute path")), started)
+        }
         "iph_script" | "iph_run" => match script_request(name, &args) {
             Ok(request) => client::request(udid, "script", request).await,
             Err(f) => envelope(Err(f), started),
         },
         "iph_read" | "iph_find" | "iph_tap" | "iph_swipe" | "iph_pinch" | "iph_scroll" | "iph_type" | "iph_key"
         | "iph_button" | "iph_launch" | "iph_apps" | "iph_screenshot" | "iph_batch" | "iph_doctor"
-        | "iph_dnd" => {
+        | "iph_dnd" | "iph_syslog" => {
             let cmd = name.trim_start_matches("iph_");
             let args = if cmd == "apps" { Value::Null } else { args };
             client::request(udid, cmd, args).await
@@ -366,6 +395,18 @@ mod tests {
         let props = &launch["inputSchema"]["properties"];
         assert_eq!(props["arguments"]["items"]["type"], "string");
         assert_eq!(props["environment"]["additionalProperties"]["type"], "string");
+    }
+
+    #[test]
+    fn syslog_offers_read_with_a_cursor_and_a_file_only_on_request() {
+        let tool = tools().into_iter().find(|t| t["name"] == "iph_syslog").unwrap();
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert_eq!(props["action"]["enum"], json!(["start", "read", "stop", "status"]));
+        for key in ["after", "grep", "max", "output", "max_mb", "buffer_entries", "buffer_mb", "app", "process", "pid", "level"] {
+            assert!(props.contains_key(key), "missing {key}");
+        }
+        assert_eq!(props["app"]["items"]["type"], "string");
+        assert_eq!(tool["inputSchema"]["required"], json!(["action"]));
     }
 
     #[test]

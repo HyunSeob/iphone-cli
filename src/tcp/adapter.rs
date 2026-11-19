@@ -330,6 +330,33 @@ impl Adapter {
         }
     }
 
+    /// Reset the connection: the peer drops it at once, unlike a FIN, which
+    /// a peer that never reads does not notice.
+    pub(crate) async fn abort(&mut self, host_port: u16) -> Result<(), std::io::Error> {
+        let Some(state) = self.states.remove(&host_port) else {
+            return Err(std::io::Error::new(ErrorKind::NotConnected, "not connected"));
+        };
+        let tcp = TcpPacket::create(
+            self.host_ip,
+            self.peer_ip,
+            state.host_port,
+            state.peer_port,
+            state.seq,
+            state.ack,
+            TcpFlags {
+                rst: true,
+                ack: true,
+                ..Default::default()
+            },
+            0,
+            &[],
+            &[],
+        );
+        let ip = self.ip_wrap(&tcp);
+        self.log_packet(&ip)?;
+        self.send_packet(ip).await
+    }
+
     pub(crate) fn connection_drop(&mut self, host_port: u16) {
         self.dropped.push(host_port);
     }
@@ -1577,6 +1604,102 @@ mod tests {
             PEER_ISN + 1,
             "out-of-order packet must be answered with a duplicate ACK"
         );
+    }
+
+    #[tokio::test]
+    async fn abort_sends_a_reset_and_forgets_the_connection() {
+        let (adapter_end, test_end) = tokio::io::duplex(1 << 16);
+        let (mut test_rx, mut test_tx) = tokio::io::split(test_end);
+        let mut adapter = Adapter::new(
+            Box::new(TestTransport(adapter_end)),
+            IpAddr::V6(HOST_IP),
+            IpAddr::V6(PEER_IP),
+        );
+        let hp = handshake(&mut adapter, &mut test_rx, &mut test_tx).await;
+        let data_seq = PEER_ISN + 1;
+        adapter
+            .process_tcp_packet_from_payload(&tcp_seg(hp, data_seq, 0, TcpFlags { psh: true, ack: true, ..Default::default() }, b"log"))
+            .await
+            .unwrap();
+        let _ack = read_pkt(&mut test_rx).await;
+
+        adapter.abort(hp).await.unwrap();
+        let rst = read_pkt(&mut test_rx).await;
+        assert!(rst.flags.rst && !rst.flags.fin, "an abort resets rather than closes");
+        assert_eq!(rst.source_port, hp);
+        assert_eq!(rst.acknowledgment_number, data_seq + 3, "the reset acknowledges what was read");
+        assert!(adapter.abort(hp).await.is_err(), "the connection is gone after the reset");
+    }
+
+    /// Connect through the async handle, answering as the peer.
+    async fn handle_connect(
+        handle: &mut crate::tcp::handle::AdapterHandle,
+        test_rx: &mut (impl AsyncRead + Unpin),
+        test_tx: &mut (impl AsyncWrite + Unpin),
+    ) -> (crate::tcp::handle::StreamHandle, u16) {
+        let (stream, hp) = tokio::join!(handle.connect(PEER_PORT), async {
+            let syn = read_pkt(test_rx).await;
+            let syn_ack = TcpFlags { syn: true, ack: true, ..Default::default() };
+            test_tx
+                .write_all(&peer_ipv6_pkt(syn.source_port, PEER_ISN, syn.sequence_number.wrapping_add(1), syn_ack, &[]))
+                .await
+                .unwrap();
+            let _ack = read_pkt(test_rx).await;
+            syn.source_port
+        });
+        (stream.expect("connect failed"), hp)
+    }
+
+    async fn nothing_more(test_rx: &mut (impl AsyncRead + Unpin)) -> bool {
+        tokio::time::timeout(Duration::from_millis(300), read_pkt(test_rx)).await.is_err()
+    }
+
+    #[tokio::test]
+    async fn a_stream_marked_reset_on_drop_resets_once_and_sends_no_fin() {
+        let (adapter_end, test_end) = tokio::io::duplex(1 << 16);
+        let (mut test_rx, mut test_tx) = tokio::io::split(test_end);
+        let mut handle =
+            Adapter::new(Box::new(TestTransport(adapter_end)), IpAddr::V6(HOST_IP), IpAddr::V6(PEER_IP)).to_async_handle();
+        let (mut stream, hp) = handle_connect(&mut handle, &mut test_rx, &mut test_tx).await;
+        let mut reset = stream.reset_on_drop();
+
+        drop(stream);
+        let rst = read_pkt(&mut test_rx).await;
+        assert!(rst.flags.rst && !rst.flags.fin, "a dropped stream marked reset-on-drop resets");
+        assert_eq!(rst.source_port, hp);
+        tokio::time::timeout(Duration::from_secs(1), reset.sent()).await.expect("resolves once the reset is out");
+        reset.now();
+        assert!(nothing_more(&mut test_rx).await, "no FIN and no second reset");
+    }
+
+    #[tokio::test]
+    async fn a_stream_reset_early_sends_nothing_when_dropped() {
+        let (adapter_end, test_end) = tokio::io::duplex(1 << 16);
+        let (mut test_rx, mut test_tx) = tokio::io::split(test_end);
+        let mut handle =
+            Adapter::new(Box::new(TestTransport(adapter_end)), IpAddr::V6(HOST_IP), IpAddr::V6(PEER_IP)).to_async_handle();
+        let (mut stream, hp) = handle_connect(&mut handle, &mut test_rx, &mut test_tx).await;
+        let reset = stream.reset_on_drop();
+
+        reset.now();
+        let rst = read_pkt(&mut test_rx).await;
+        assert!(rst.flags.rst && rst.source_port == hp, "the reset goes out before the stream is dropped");
+        drop(stream);
+        assert!(nothing_more(&mut test_rx).await, "the drop sends neither a FIN nor a second reset");
+    }
+
+    #[tokio::test]
+    async fn a_dropped_stream_still_closes_with_a_fin() {
+        let (adapter_end, test_end) = tokio::io::duplex(1 << 16);
+        let (mut test_rx, mut test_tx) = tokio::io::split(test_end);
+        let mut handle =
+            Adapter::new(Box::new(TestTransport(adapter_end)), IpAddr::V6(HOST_IP), IpAddr::V6(PEER_IP)).to_async_handle();
+        let (stream, _) = handle_connect(&mut handle, &mut test_rx, &mut test_tx).await;
+
+        drop(stream);
+        let fin = read_pkt(&mut test_rx).await;
+        assert!(fin.flags.fin && !fin.flags.rst, "an unmarked stream closes");
+        assert!(nothing_more(&mut test_rx).await, "and is not reset after");
     }
 
     /// A duplicate segment (seq < expected, already received) is re-ACKed but

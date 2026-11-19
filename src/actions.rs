@@ -479,6 +479,39 @@ fn app_changed(before: &Screen, after: &Screen) -> Option<Value> {
     (!was.contains(&now.pid)).then(|| json!({ "name": now.name, "pid": now.pid }))
 }
 
+/// Something with a dot and no spaces is a bundle id; anything else is a name.
+fn is_bundle_id(app: &str) -> bool {
+    app.contains('.') && !app.contains(' ')
+}
+
+/// The bundle id `app` names, looked up by name in `apps` unless it is one already.
+pub(crate) fn bundle_id_in(apps: &[idevice::core_device::AppListEntry], app: &str) -> Res<String> {
+    if is_bundle_id(app) {
+        return Ok(app.to_string());
+    }
+    let want = nfc(app).to_lowercase();
+    let hits: Vec<&idevice::core_device::AppListEntry> = apps
+        .iter()
+        .filter(|a| nfc(&a.name).to_lowercase() == want)
+        .collect();
+    match hits.len() {
+        1 => Ok(hits[0].bundle_identifier.clone()),
+        0 => Err(Fail::not_sent("app_not_found", format!("no installed app is named \"{app}\""))
+            .hint(t(
+                "`iph apps`로 이름과 bundle id를 확인하세요.",
+                "See names and bundle ids with `iph apps`.",
+            ))),
+        _ => Err(Fail::not_sent(
+            "ambiguous_app",
+            format!("{} apps are named \"{app}\"", hits.len()),
+        )
+        .with(
+            "candidates",
+            Value::Array(hits.iter().map(|a| json!(a.bundle_identifier)).collect()),
+        )),
+    }
+}
+
 impl Session {
     fn build_opts(all: bool, raw: bool) -> BuildOptions {
         BuildOptions { include_offscreen: all, raw }
@@ -1198,34 +1231,9 @@ impl Session {
         Ok(fields! { "count": list.len(), "apps": list })
     }
 
-    async fn resolve_bundle(&mut self, app: &str) -> Res<String> {
-        // Something with a dot and no spaces is a bundle id; anything else is
-        // looked up by name.
-        if app.contains('.') && !app.contains(' ') {
-            return Ok(app.to_string());
-        }
-        let want = nfc(app).to_lowercase();
-        let apps = self.list_apps(false).await?;
-        let hits: Vec<&idevice::core_device::AppListEntry> = apps
-            .iter()
-            .filter(|a| nfc(&a.name).to_lowercase() == want)
-            .collect();
-        match hits.len() {
-            1 => Ok(hits[0].bundle_identifier.clone()),
-            0 => Err(Fail::not_sent("app_not_found", format!("no installed app is named \"{app}\""))
-                .hint(t(
-                    "`iph apps`로 이름과 bundle id를 확인하세요.",
-                    "See names and bundle ids with `iph apps`.",
-                ))),
-            _ => Err(Fail::not_sent(
-                "ambiguous_app",
-                format!("{} apps are named \"{app}\"", hits.len()),
-            )
-            .with(
-                "candidates",
-                Value::Array(hits.iter().map(|a| json!(a.bundle_identifier)).collect()),
-            )),
-        }
+    pub(crate) async fn resolve_bundle(&mut self, app: &str) -> Res<String> {
+        let apps = if is_bundle_id(app) { Vec::new() } else { self.list_apps(false).await? };
+        bundle_id_in(&apps, app)
     }
 
     pub async fn cmd_launch(&mut self, args: LaunchArgs) -> Res {

@@ -102,6 +102,7 @@ Every command outputs JSON by default; pass `--human` for human-readable output.
 - `iph script <file | -> [--arg k=v]` — run QuickJS JavaScript automation in one call
 - `iph run <name> [--arg k=v]` / `iph scripts` — run or list saved scripts (`~/.config/iph/scripts/<name>.js`)
 - `iph mcp [--tools a,b]` — run stdio MCP server
+- `iph syslog <start|read|status|stop> [--app bundle|name] [--process NAME] [--pid N] [--level L] [--after SEQ] [--grep RE] [--max N] [-o file]` — capture the phone's unified log into a memory buffer and read new entries with a cursor while other commands run
 - `iph dnd <on|off|status>` — toggle Do Not Disturb to prevent notification banners from intercepting top-of-screen taps
 - `iph diagnose [--wifi] [-- <cmd>]` — collect a diagnostic bundle for issue reporting
 - `iph stop` — stop the resident daemon for the selected phone
@@ -145,6 +146,7 @@ Available globals inside `iph script` (sandboxed: no filesystem, network, or pro
 - `scroll(direction, {until, max})`
 - `type(text, {clear, submit})`, `key(name)`, `button(name)`
 - `launch(app, {restart, arguments, environment})`
+- `syslog(action, opts)` — `start`, `read`, `status` or `stop`; scripts cannot write a file, and a capture outlives the script
 - `waitFor(selector, {timeout_ms})`
 - `readField({selector, take, regex})`
 - `readList({row, columns, key, group, stop_below, until, max_scrolls, limit})`
@@ -154,4 +156,4 @@ Available globals inside `iph script` (sandboxed: no filesystem, network, or pro
 
 ## MCP Tools (`iph mcp`)
 
-`iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`.
+`iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`, `iph_syslog`.

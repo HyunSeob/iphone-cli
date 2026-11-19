@@ -82,6 +82,7 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
         "script" => Box::pin(s.serve_script(args)).await,
         "doctor" => Box::pin(doctor::run(s, parse_args(args)?)).await,
         "dnd" => Box::pin(s.cmd_dnd(parse_args(args)?)).await,
+        "syslog" => Box::pin(s.cmd_syslog(args)).await,
         "status" => Ok(fields! {
             "udid": s.udid.clone(),
             "connection": s.connection(),
@@ -90,6 +91,7 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
             "input_session": s.input.is_some(),
             "connects": s.connects,
             "ax_restarts": s.ax_restarts,
+            "capture": s.capture_state(),
             "pid": std::process::id(),
             "build": build_stamp(),
         }),
@@ -147,6 +149,7 @@ async fn handle(stream: ipc::Stream, shared: Arc<Shared>) -> Result<()> {
         "shutdown" => {
             log("shutdown requested");
             let mut session = shared.session.lock().await;
+            session.end_capture_before_exit("the daemon was stopped (iph stop, or replaced by a newer build)").await;
             let reply = json!({ "ok": true });
             write.write_all(format!("{reply}\n").as_bytes()).await?;
             write.shutdown().await.ok();
@@ -240,6 +243,7 @@ pub async fn run(udid: String) -> Result<()> {
                         session.close_idle_input().await;
                         if idle > idle_exit {
                             log("idle, exiting");
+                            session.end_capture_before_exit("the daemon exited after its idle time").await;
                             session.shutdown().await;
                             ipc::cleanup(&keeper.udid);
                             let _ = std::fs::remove_file(paths::daemon_pid(&keeper.udid));

@@ -159,6 +159,7 @@ Apple 기기 연결 서비스가 필요합니다. CLI·MCP·스크립트는 선�
 | `iph run <이름> [--arg k=v]` / `iph scripts` | 저장된 스크립트 실행 · 목록 |
 | `iph mcp [--tools a,b]` | MCP 서버 (stdio) |
 | `iph dnd <on\|off\|status>` | 방해금지 모드를 켜기, 원래 집중 모드로 되돌리기, 지금 상태 보기 |
+| `iph syslog <start\|read\|stop\|status> [--app 앱] [--process 이름] [--pid N] [--level L] [--after SEQ] [--grep RE] [--max N] [-o 파일]` | 다른 명령을 쓰는 동안 폰의 로그를 메모리에 모읍니다. `read`는 끝내지 않고 새로 들어온 항목만 돌려주고, `stop`은 조건에 맞는 최근 항목을 돌려줄 수 있습니다. 아래 [폰 로그](#폰-로그) |
 | `iph stop` | 이 폰의 상주 프로세스 종료 |
 
 ### 셀렉터
@@ -239,6 +240,36 @@ memory_mb = 64           # 스크립트가 쓸 수 있는 메모리
 - **필요한 것:** 제어 센터 첫 페이지에 '집중 모드' 항목이 있고, 앱을 쓰는 중에도 제어 센터가 열려야 합니다. 폰 언어가 한국어 · 영어가 아니면 `[dnd]`의 `control`, `focus`에 폰에 보이는 이름을 적으세요.
 - **막지 못하는 것:** 방해금지 모드에서도 뜨는 것(알람 · 타이머, 긴급 재난 문자, 방해금지 모드 설정에서 허용해 둔 사람 · 앱)과 시스템 팝업. 방해금지 모드가 켜진 동안 실제로 배너가 안 뜨는지는 따로 확인하지 않았습니다 (iOS의 동작에 기댑니다).
 
+### 폰 로그
+
+`iph syslog start`는 탭 · 읽기 · 스크립트를 그대로 쓰는 동안 폰이 남기는 로그를 상주 프로세스 안의 버퍼에 모읍니다. `iph syslog read`는 기록을 끝내지 않고 그 뒤에 들어온 항목만 돌려주므로, 탭을 할 때마다 앱이 무엇을 남겼는지 테스트나 에이전트가 확인할 수 있습니다. 맥에서 `sudo log collect`를 돌리지 않아도 됩니다.
+
+```sh
+iph syslog start --app com.apple.Preferences # 앱을 bundle id나 이름으로 (`iph launch`와 같은 방식)
+iph launch com.apple.Preferences --restart
+iph tap "배터리"
+iph syslog read --grep "battery"              # 시작한 뒤 남은 로그. 결과에 "cursor": 12가 있습니다
+iph tap "일반"
+iph syslog read --after 12 --grep "general"   # 지난 읽기보다 새 항목만
+iph syslog stop                               # 또는 stop --grep "general" --max 20
+```
+
+- **버퍼:** 남긴 항목은 메모리의 링 버퍼에 쌓입니다. 최대 100,000개, 64MiB(`--buffer-entries`, `--buffer-mb`)이고, 넘으면 오래된 것부터 버립니다. 항목마다 `seq`가 붙습니다. 한 기록의 첫 항목이 1이고 하나 들어올 때마다 1씩 늘어납니다. `-o`를 주지 않으면 디스크에는 아무것도 쓰지 않습니다. 버퍼는 상주 프로세스 안에 있어서, `iph stop`으로 끝나거나 새 빌드가 상주 프로세스를 바꾸거나 오래 쓰이지 않아 끝나면 기록과 함께 사라집니다. `status`의 `buffer`에 채워진 정도가 나옵니다(`entries`, `bytes`, `oldest_seq`, `newest_seq`, `evicted`).
+- **`read`:** `--after SEQ`보다 새 항목 가운데 메시지가 `--grep`(정규식)에 맞는 것을 오래된 순서로 `--max`개까지(기본 50, 최대 1000) 돌려줍니다. 메시지는 500자에서 자릅니다(`message_cut`. 메시지 전체는 `-o` 파일에 남습니다). `--after`를 주지 않으면 버퍼에 남은 가장 오래된 항목부터입니다. 결과에는 `entries`, `count`, `cursor`, `more`, `dropped`, `state`가 있고, 기록이 끝났다면 `ended_reason`도 있습니다.
+  - `cursor`: 다음 `--after`에 그대로 넣습니다. `--max`에서 잘렸으면 돌려준 마지막 항목이고, 버퍼를 끝까지 훑었으면 맞는 항목이 없어도 가장 새 `seq`입니다. 그래서 같은 항목을 두 번 읽지도, 버퍼에 남은 항목을 건너뛰지도 않습니다. `cursor`는 그것을 준 기록에서만 쓸 수 있습니다. `seq`는 기록마다 1부터 다시 시작하므로, 새로 `start`한 뒤에는 `--after` 없이 읽으세요.
+  - `more`: `--max`에서 잘렸고 맞는 항목이 이미 더 있으면 `true`입니다.
+  - `dropped`: `--after`보다 새 항목 가운데 이번 읽기 전에 버퍼에서 밀려난 수입니다. 0이 아니면 빠진 항목이 있다는 뜻이니, 더 자주 읽거나 거르세요.
+  - 연결이 끊겨 끝난 기록도 `stop`하기 전에는 읽을 수 있습니다.
+- **파일(선택):** `-o <파일>`을 주면 남긴 항목을 메시지 전체와 함께 JSON Lines 파일에도 씁니다(나만 읽을 수 있습니다). `{"event": "start", …}` 줄, 항목마다 한 줄(`seq`, `time`(UTC), `pid`, `process`, `sender`, `level`, `subsystem`, `category`, `message`), 마지막 `{"event": "end", "reason": …}` 줄입니다. `end` 줄이 없으면 상주 프로세스가 강제로 끝난 것입니다. `--max-mb` MiB(1~4096, 기본 64이며 `-o`가 있어야 합니다)에 닿으면 파일을 `<파일>.1`로 옮기고(이전 것은 지우고, `start` 줄도 함께 옮겨 갑니다) 새로 씁니다. 다시 시작하면 폰이 로그를 보내기 시작한 뒤에 파일을 비웁니다. 실패한 `start`는 파일을 건드리지 않습니다.
+- **거르기:** `--app`은 앱의 항목만 남깁니다. `iph launch`처럼 bundle id나 표시 이름으로 지정하고, 여러 번 줄 수 있습니다. `iph`가 앱이 설치된 위치를 찾아, 실행 파일이 그 번들 안에 있는 항목을 남깁니다. 그래서 앱의 확장도 포함되고, 앱을 다시 띄워도 계속 걸립니다. 설치되지 않은 앱이거나 이름이 둘 이상에 맞으면 아무것도 시작하기 전에 실패합니다. `--process`는 실행 파일 이름이 정확히 같은 항목만 남깁니다 (여러 번 줄 수 있습니다). 설정 앱은 `Preferences`입니다. 둘을 함께 주면 지정한 앱이나 프로세스 어느 쪽에든 맞는 항목을 남깁니다. `--level`은 debug, info, notice, error, fault 중 고른 것보다 낮은 항목을 뺍니다. 앱이나 프로세스로 고른 항목에도 똑같이 적용됩니다. `--pid`는 폰이 그 프로세스의 항목만 보내게 하므로, `--app`과 `--process`가 맞출 수 있는 범위를 좁힙니다.
+- **양:** 거르지 않으면 Wi-Fi에서 꽤 많습니다. 가만히 둔 60초 동안 초당 약 4,800개, 1.4MB가 왔습니다. 이 속도면 기본 버퍼는 약 20초(100,000개)를 담습니다. 더 길게 받을 때는 자주 읽거나 `--process`로 거르세요. JSON으로 약 290바이트인 항목은 메모리에서 약 430바이트라서, 기본 버퍼가 가득 차면 약 41MiB를 씁니다. 메시지가 길면 64MiB 제한이 걸립니다.
+- **다른 명령에 주는 부담:** Wi-Fi로 한 번 측정했을 때(iPhone 16 Pro, `iph`를 띄운 뒤 첫 탭. 기록 없이 6회, 초당 2,900~9,900개를 받는 거르지 않은 기록으로 4회, `--pid`로 3회) 기록은 탭을 늦추지 않았습니다. 중앙값은 10.0초, 10.1초, 9.7초였습니다. 6초를 넘은 탭은 기록이 있든 없든 모두 폰이 답하지 않은 화면 읽기 한 번을 기다렸고, `iph`는 6.5초 뒤에 다시 묻습니다. 상주 프로세스는 CPU 코어 하나의 12%를 넘지 않았습니다. 양 자체는 읽기에 부담을 줍니다. 폰이 잠긴 상태에서 거르지 않은 항목이 초당 9,000개 올 때 `read`는 2.3초, 기록이 없을 때는 1.0초 걸렸습니다. 그러니 Wi-Fi에서 읽기가 빨라야 하면 `--pid`를 쓰세요(`--app`과 `--process`는 항목이 네트워크를 건너온 뒤 컴퓨터에서 거릅니다).
+- **`stop`:** `seen`(폰이 보낸 항목 수), `kept`(버퍼에 넣은 수), `buffer`, 끝난 이유를 돌려주고, `-o`를 썼다면 `rotations`와 `path`도 줍니다. `--grep`이나 `--max`를 주면 버퍼에서 맞은 항목 전체 수 `matched`와, 그중 최근 `--max`개를 오래된 순서로 담은 `entries`(기본 50, 최대 1000, 메시지는 `read`처럼 자름)도 돌려줍니다. `stop`하면 버퍼가 사라지니 필요한 것은 먼저 읽으세요.
+- **기록이 끝나는 때:** `stop`, 연결이 끊겼을 때, `iph`가 연결을 새로 맺을 때 (명령이 시간을 넘기거나 폰이 답하지 않을 때), `iph stop`, 새 빌드의 `iph`가 상주 프로세스를 바꿀 때, 상주 프로세스가 오래 쓰이지 않아 끝날 때 (기록 중이어도 상주 프로세스는 그대로 끝납니다). 어느 것인지는 `end` 줄(`-o`를 썼을 때)과 `status`에 나옵니다. 저절로 다시 시작하지 않으므로 로그에 빈 구간이 생기면 드러납니다. 기록은 한 번에 하나입니다. 두 번째 `start`는 `capture_running`으로, 끝났지만 아직 `stop`하지 않은 기록이 있으면 `capture_ended`로 실패하니 먼저 `stop`하세요.
+- **연결이 끊긴 직후**에는 폰이 다음 기록에 약 20~30초 동안 아무것도 보내지 않습니다. 그동안 `status`와 `read`의 `hint`가 이를 알려 줍니다.
+- **비공개 값:** 앱이 로그에서 비공개로 표시한 값은 콘솔 앱에서처럼 `<private>`로 옵니다. 한 앱을 띄울 때 받은 항목 가운데 약 5분의 1에 들어 있었습니다.
+- 스크립트에서는 `syslog(action, opts)`, MCP에서는 `iph_syslog`입니다. 스크립트는 파일을 쓰지 못합니다. `batch`에는 없습니다. 기록은 그것을 시작한 호출보다 오래가기 때문입니다.
+
 ## 스크립트
 
 자주 하는 순서는 자바스크립트로 적어 한 번에 실행합니다. `read`, `tap`, `scroll` 같은 명령이 그대로 함수이고, 반복 · 조건 · 변수는 언어의 것을 씁니다. 엔진(QuickJS)이 `iph` 안에 들어 있어 따로 설치할 것은 없습니다.
@@ -281,6 +312,7 @@ iph scripts                            # 저장된 스크립트 목록
 | `readField({selector, take, regex})` | 값 하나를 글자로. `take`: `value`(기본), `label`, `identifier`, `text` |
 | `readList({row, columns, key, group, stop_below, until, max_scrolls, limit})` | 목록을 스크롤하며 겹치지 않게 모아 `{rows, scrolls, ended}`로 돌려줍니다 |
 | `sleep(ms)` · `log(…)` · `output(k, v)` | 대기 · 기록 · 결과에 값 넣기 |
+| `syslog(action, {app, process, pid, level, after, grep, max})` | `iph syslog`입니다. 로그는 메모리에 남고 `syslog("read", {after})`로 읽습니다. 스크립트는 파일을 쓰지 못합니다. `inputs_sent`에 세지 않습니다 |
 
 - 함수가 돌려주는 것은 같은 이름의 CLI 명령이 내는 JSON 객체 그대로입니다 (`tap("일반").screen_changed`, `read().elements`). 셀렉터는 문자열과 객체 둘 다 됩니다.
 - **실패는 예외입니다.** 실패한 호출은 `Error`를 던지고, `e.code`, `e.outcome`, `e.hint`, `e.result`(결과 객체 전체)가 붙어 있습니다. 잡지 않으면 스크립트가 거기서 멈추고 결과에 `failed_call: {cmd, line, outcome}`, `reason: {code, message}`, `screen_summary`가 담깁니다. 추측해서 진행하지 않습니다. 없어도 되는 것을 눌러 볼 때만 `try { … } catch (e) { … }`로 잡으세요.
@@ -327,7 +359,7 @@ ln -s "$PWD/skills/iph" ~/.claude/skills/iph                    # Claude Code
 ln -s "$PWD/skills/iph" ~/.codex/skills/iph                     # Codex
 ```
 
-도구: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`. 인자와 결과는 CLI와 같고, `iph_launch`는 `arguments`(글자 배열)와 `environment`(글자 값 객체)를 받습니다. `iph_script`는 `code`(자바스크립트)와 `args`를, `iph_run`은 `name`과 `args`를 받습니다. 에이전트용 안내는 [skills/iph/SKILL.md](skills/iph/SKILL.md)에 있습니다.
+도구: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`, `iph_syslog`. 인자와 결과는 CLI와 같고, `iph_launch`는 `arguments`(글자 배열)와 `environment`(글자 값 객체)를 받습니다. `iph_script`는 `code`(자바스크립트)와 `args`를, `iph_run`은 `name`과 `args`를 받습니다. 에이전트용 안내는 [skills/iph/SKILL.md](skills/iph/SKILL.md)에 있습니다.
 
 ## 속도
 
@@ -428,4 +460,4 @@ IPH_PCAP=<폴더> iph … # 터널의 패킷을 Wireshark용 파일로 남김. �
 
 ## 라이선스
 
-MIT. [LICENSE](LICENSE). 미디어 세션 시작 부분은 idevice의 예제 도구를 고쳐 썼습니다 ([LICENSE.idevice](LICENSE.idevice)). `src/tcp`는 터널의 TCP 스택으로, jktcp 0.1.8(MIT)을 가져와 연결을 포기하기까지의 시간 상수 두 개를 늘리고 패킷 기록의 마이크로초 값을 고친 것입니다 ([LICENSE.jktcp](LICENSE.jktcp)).
+MIT. [LICENSE](LICENSE). 미디어 세션 시작 부분은 idevice의 예제 도구를 고쳐 썼습니다 ([LICENSE.idevice](LICENSE.idevice)). `src/tcp`는 터널의 TCP 스택으로, jktcp 0.1.8(MIT)을 가져와 연결을 포기하기까지의 시간 상수 두 개를 늘리고, 패킷 기록의 마이크로초 값을 고치고, `iph syslog`를 위해 연결 하나를 초기화(RST)하는 기능을 더한 것입니다 ([LICENSE.jktcp](LICENSE.jktcp)).

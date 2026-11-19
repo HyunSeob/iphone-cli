@@ -61,6 +61,10 @@ enum HandleMessage {
     Close {
         host_port: u16,
     },
+    Abort {
+        host_port: u16,
+        done: oneshot::Sender<()>,
+    },
     Send {
         host_port: u16,
         data: Vec<u8>,
@@ -173,6 +177,11 @@ impl AdapterHandle {
                                 HandleMessage::Close { host_port } => {
                                     handles.remove(&host_port);
                                     adapter.close(host_port).await.ok();
+                                }
+                                HandleMessage::Abort { host_port, done } => {
+                                    handles.remove(&host_port);
+                                    adapter.abort(host_port).await.ok();
+                                    done.send(()).ok();
                                 }
                                 HandleMessage::Send {
                                     host_port,
@@ -325,6 +334,7 @@ impl AdapterHandle {
                     send_channel: self.sender.clone(),
                     read_buffer: Vec::new(),
                     pending_writes: FuturesUnordered::new(),
+                    reset: None,
                 })
             }
             Ok(Err(_)) => Err(std::io::Error::new(
@@ -379,7 +389,8 @@ impl AdapterHandle {
 /// be used anywhere a Tokio I/O stream is expected.
 ///
 /// Dropping this handle automatically sends a `Close` message to the background
-/// task, which sends a TCP FIN and cleans up connection state.
+/// task, which sends a TCP FIN and cleans up connection state, or an `Abort`
+/// (a RST) after [`StreamHandle::reset_on_drop`].
 #[derive(Debug)]
 pub struct StreamHandle {
     host_port: u16,
@@ -390,13 +401,61 @@ pub struct StreamHandle {
 
     read_buffer: Vec<u8>,
     pending_writes: FuturesUnordered<oneshot::Receiver<Result<(), std::io::Error>>>,
+    /// Set by [`StreamHandle::reset_on_drop`]; shared with the returned [`Reset`].
+    reset: Option<ResetSlot>,
 }
+
+/// The one reset a marked stream gets: taken by its drop or by [`Reset::now`],
+/// whichever comes first. After that the connection is gone, and the other
+/// sends nothing, so it can never reach a port a later connection reuses.
+type ResetSlot = std::sync::Arc<Mutex<Option<oneshot::Sender<()>>>>;
 
 impl StreamHandle {
     pub fn close(&mut self) {
         let _ = self.send_channel.send(HandleMessage::Close {
             host_port: self.host_port,
         });
+    }
+
+    /// Reset the connection (RST) when this stream is dropped, instead of
+    /// closing it (FIN). A peer that only writes, such as the phone's log
+    /// relay, never reads a FIN: it keeps sending into a closed port, and
+    /// serves no other client until it gives up about 30 s later.
+    ///
+    /// Set it before handing the stream to a library that keeps it: the
+    /// reset then goes out however that library ends.
+    pub fn reset_on_drop(&mut self) -> Reset {
+        let (done, sent) = oneshot::channel();
+        let slot = ResetSlot::default();
+        *slot.lock().unwrap() = Some(done);
+        self.reset = Some(slot.clone());
+        Reset { host_port: self.host_port, send_channel: self.send_channel.clone(), slot, sent: Some(sent) }
+    }
+}
+
+/// The reset of a stream marked with [`StreamHandle::reset_on_drop`].
+#[derive(Debug)]
+pub struct Reset {
+    host_port: u16,
+    send_channel: mpsc::UnboundedSender<HandleMessage>,
+    slot: ResetSlot,
+    sent: Option<oneshot::Receiver<()>>,
+}
+
+impl Reset {
+    /// Reset now instead of when the stream is dropped, for an owner that
+    /// cannot wait for a library to drop it, before the tunnel goes.
+    pub fn now(&self) {
+        if let Some(done) = self.slot.lock().unwrap().take() {
+            let _ = self.send_channel.send(HandleMessage::Abort { host_port: self.host_port, done });
+        }
+    }
+
+    /// Resolves once the reset has gone out, or once the tunnel is gone.
+    pub async fn sent(&mut self) {
+        if let Some(sent) = self.sent.take() {
+            let _ = sent.await;
+        }
     }
 }
 
@@ -504,9 +563,14 @@ impl AsyncWrite for StreamHandle {
 
 impl Drop for StreamHandle {
     fn drop(&mut self) {
-        let _ = self.send_channel.send(HandleMessage::Close {
-            host_port: self.host_port,
-        });
+        let host_port = self.host_port;
+        let message = match &self.reset {
+            None => Some(HandleMessage::Close { host_port }),
+            Some(slot) => slot.lock().unwrap().take().map(|done| HandleMessage::Abort { host_port, done }),
+        };
+        if let Some(message) = message {
+            let _ = self.send_channel.send(message);
+        }
     }
 }
 

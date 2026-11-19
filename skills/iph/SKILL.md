@@ -79,6 +79,7 @@ A script is the body of a function, so `return` ends it. The commands are functi
 - `readList({row, columns, key, group, stop_below, max_scrolls})` scrolls a list and returns `{rows, scrolls, ended}` with each row once. `columns: {name: {take, regex}}`, or `{name: {value: "…"}}` for a constant. `group: {selector, regex, as}` gives each row the heading it stands under (a date line), and `stop_below: N` stops once a heading's number falls below N. `key: "column"` names the column that identifies a row; use it when rows change while the list is read (a clock, time left).
 - `args` holds the `--arg k=v` values as text (`Number(args.n)` for a number). Return an object, or call `output(key, value)`, and it comes back as `outputs`. `log(…)` lines come back as `logs`. `sleep(ms)` waits.
 - Any call takes `hint: "…"`: what to tell the person if the script stops there. A screen that waits for Face ID: `waitFor(sel, { timeout_ms: 40000, hint: "폰을 봐 주세요" })`.
+- `syslog(action, {app, process, pid, level, after, grep, max})` captures the phone's log and returns what `iph syslog` does below (`syslog("read", {after: cursor})` for what is new). A script cannot write a file.
 - There are no files, no network and no timers. `Date`, `JSON`, `RegExp` and the rest of the language work.
 
 ### When a call fails
@@ -117,9 +118,29 @@ After `launch`, that app must stay in front; if another one comes up, the script
 
 `iph type "글"` pastes into the field that has the keyboard, so tap the field first. `--clear` replaces the content, `--submit` presses Return. The result has `value` (what the field shows now) and `clipboard_restored`. iph does not judge `value`: apps format, mask and correct what is pasted (`30000` shows as `₩ 30,000`), so you decide whether it is right. A `value` that is still what the field held before means the paste did not happen; before `--submit` sends something that matters, type without it, look at `value`, then `iph key return`. When the user had copied something in an app, it cannot be put back (`clipboard_restored: false`, `clipboard_note`); tell the user. The on-screen keyboard disappears for a moment while typing; that is expected.
 
+## What the app logged
+
+To check what an app logged after a tap, start a capture, act, and read it as you go (MCP: `iph_syslog` with `action`):
+
+```sh
+iph syslog start --app <bundle id or name>   # entries are kept in memory; nothing is written to disk
+iph tap "…"
+iph syslog read --grep <regex>               # entries, each with a seq, and "cursor": 12
+iph tap "…"
+iph syslog read --after 12 --grep <regex>    # only what is newer than the cursor
+iph syslog stop
+```
+
+- `read` does not stop the capture. It returns `entries` newer than `--after`, oldest first, and a `cursor`: pass it as the next `--after` and no entry is read twice or skipped, even when `--grep` matched nothing. A cursor belongs to the capture that gave it: after a new `start`, read without `--after`. Without `--after` it starts at the oldest entry the buffer holds.
+- `more: true` means `--max` cut the page short, so read again from the `cursor`. `dropped` above 0 means that many newer entries were pushed out of the buffer before you read: read more often or filter. A capture whose `state` is `ended` (the connection dropped) can still be read, and a new `start` fails with `capture_ended` until you `stop` it.
+- The buffer keeps the last 100,000 entries and goes with the capture, so `read` what you need before `stop`. Messages come back cut to 500 characters (`message_cut`); `-o <file>` also writes them whole to a file.
+- `--app` takes what `iph launch` takes (a bundle id or the display name) and keeps every entry from that app's install location, extensions included, across restarts; an app that is not installed fails before the capture starts. `--process <executable>` names an executable instead (Settings is `Preferences`, not its display name). With both, an entry is kept if it matches any of them, and `--level` narrows the result.
+- Unfiltered over Wi-Fi the phone sends thousands of entries a second, and the buffer then holds about 20 s: filter for anything longer. If `seen` is 0, nothing arrived: after a dropped connection the phone sends nothing for about 30 s, and `status` and `read` give a `hint` while it waits.
+- Values the app marked private arrive as `<private>`; that is the app's choice, not a failure. The entries are the user's data: quote only what the task needs.
+
 ## Commands at a glance
 
-`read`, `find`, `tap`, `swipe`, `pinch`, `scroll`, `type`, `key`, `button`, `launch`, `apps` (bundle ids), `screenshot`, `script`, `run`, `scripts`, `batch`, `dnd`, `doctor`, `connect --ip <IP>`, `devices`, `stop`. `iph <command> --help` has the flags; add `--human` to read a result yourself.
+`read`, `find`, `tap`, `swipe`, `pinch`, `scroll`, `type`, `key`, `button`, `launch`, `apps` (bundle ids), `screenshot`, `script`, `run`, `scripts`, `batch`, `dnd`, `syslog`, `doctor`, `connect --ip <IP>`, `devices`, `stop`. `iph <command> --help` has the flags; add `--human` to read a result yourself.
 
 ## When something is off
 
