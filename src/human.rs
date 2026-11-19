@@ -69,6 +69,80 @@ fn type_observation(v: &Value, out: &mut Vec<String>) {
     }
 }
 
+fn size(bytes: u64) -> String {
+    match bytes {
+        b if b < 1024 => format!("{b} B"),
+        b if b < 1024 * 1024 => format!("{} KiB", b / 1024),
+        b => format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0)),
+    }
+}
+
+fn syslog_entry(e: &Value) -> String {
+    let mut line = format!("  {:>7} {} {:<6} {}[{}]", s(&e["seq"]), s(&e["time"]), s(&e["level"]), s(&e["process"]), s(&e["pid"]));
+    if let Some(sub) = e["subsystem"].as_str() {
+        line.push_str(&format!(" {sub}/{}", s(&e["category"])));
+    }
+    line.push_str(&format!(": {}", s(&e["message"]).replace('\n', " ⏎ ")));
+    if e["message_cut"] == true {
+        line.push_str(" …");
+    }
+    line
+}
+
+/// What a capture is and holds: `start`, `status` and `stop`.
+fn syslog_status(v: &Value, out: &mut Vec<String>) {
+    if v["state"] == "none" {
+        out.push("✓ syslog: no capture".into());
+        return;
+    }
+    out.push(format!(
+        "✓ syslog {}  seen {}  kept {}  unparsed {}",
+        s(&v["state"]),
+        s(&v["seen"]),
+        s(&v["kept"]),
+        s(&v["unparsed"])
+    ));
+    let b = &v["buffer"];
+    let mut buffer = format!(
+        "  buffer {}/{} entries, {} of {}",
+        s(&b["entries"]),
+        s(&b["max_entries"]),
+        size(b["bytes"].as_u64().unwrap_or(0)),
+        size(b["max_bytes"].as_u64().unwrap_or(0))
+    );
+    if let (Some(oldest), Some(newest)) = (b["oldest_seq"].as_u64(), b["newest_seq"].as_u64()) {
+        buffer.push_str(&format!(", seq {oldest} to {newest}"));
+    }
+    buffer.push_str(&format!(", {} evicted", s(&b["evicted"])));
+    out.push(buffer);
+    let mut only = Vec::new();
+    if let Some(p) = v["process"].as_array() {
+        only.push(format!("process {}", p.iter().map(s).collect::<Vec<_>>().join(", ")));
+    }
+    if !v["pid"].is_null() {
+        only.push(format!("pid {}", s(&v["pid"])));
+    }
+    if !v["level"].is_null() {
+        only.push(format!("level {} and up", s(&v["level"])));
+    }
+    if !only.is_empty() {
+        out.push(format!("  only {}", only.join("  ")));
+    }
+    if let Some(path) = v["path"].as_str() {
+        out.push(format!("  file {path}  {} rotations", s(&v["rotations"])));
+    }
+    syslog_tail(v, out);
+}
+
+fn syslog_tail(v: &Value, out: &mut Vec<String>) {
+    if let Some(reason) = v["ended_reason"].as_str() {
+        out.push(format!("  ended: {reason}"));
+    }
+    if let Some(hint) = v["hint"].as_str() {
+        out.push(format!("  → {hint}"));
+    }
+}
+
 pub fn render(cmd: &str, v: &Value) -> String {
     let mut out = Vec::new();
     if v["ok"] != true {
@@ -189,6 +263,26 @@ pub fn render(cmd: &str, v: &Value) -> String {
                 out.push(format!("{:<24} {}  [{}]", s(&r["name"]), s(&r["description"]), s(&r["source"])));
             }
         }
+        "syslog" => match v["entries"].as_array() {
+            Some(entries) if v.get("cursor").is_some() => {
+                let mut head = format!("✓ syslog {}  {} entries  cursor {}", s(&v["state"]), entries.len(), s(&v["cursor"]));
+                if v["more"] == true {
+                    head.push_str("  more waiting");
+                }
+                if let Some(dropped) = v["dropped"].as_u64().filter(|d| *d > 0) {
+                    head.push_str(&format!("  {dropped} dropped before this read"));
+                }
+                out.push(head);
+                out.extend(entries.iter().map(syslog_entry));
+                syslog_tail(v, &mut out);
+            }
+            Some(entries) => {
+                syslog_status(v, &mut out);
+                out.push(format!("  matched {}, the latest {} below", s(&v["matched"]), entries.len()));
+                out.extend(entries.iter().map(syslog_entry));
+            }
+            None => syslog_status(v, &mut out),
+        },
         "script" | "batch" => {
             for line in v["logs"].as_array().into_iter().flatten() {
                 out.push(format!("  {}", s(line)));
@@ -271,6 +365,47 @@ mod tests {
         assert!(text.contains("Return withheld"));
         assert!(text.contains("value_changed=null"));
         assert!(text.contains("value_unchanged: value is unchanged"));
+    }
+
+    #[test]
+    fn syslog_prints_counts_a_page_and_the_matches_of_a_stop() {
+        let status = json!({
+            "ok": true, "state": "running", "seen": 5000, "kept": 1234, "unparsed": 0,
+            "buffer": {"entries": 1234, "bytes": 700_000, "max_entries": 100_000, "max_bytes": 67_108_864,
+                       "oldest_seq": 1, "newest_seq": 1234, "evicted": 0},
+            "started_at": "2026-11-19T01:00:00Z", "process": ["Papago", "Preferences"], "level": "info",
+            "path": "/tmp/cap.jsonl", "rotations": 2,
+        });
+        let text = render("syslog", &status);
+        assert!(text.contains("syslog running  seen 5000  kept 1234  unparsed 0"));
+        assert!(text.contains("buffer 1234/100000 entries, 683 KiB of 64.0 MiB, seq 1 to 1234, 0 evicted"));
+        assert!(text.contains("only process Papago, Preferences  level info and up"));
+        assert!(text.contains("file /tmp/cap.jsonl  2 rotations"));
+        assert!(render("syslog", &json!({"ok": true, "state": "none"})).contains("no capture"));
+
+        let entry = json!({"seq": 12, "time": "2026-11-19T01:02:03.004005Z", "pid": 412, "process": "Papago", "level": "error",
+                           "subsystem": "com.naver.papago", "category": "ui", "message": "line one\nline two", "message_cut": true});
+        let page = json!({"ok": true, "state": "ended", "count": 1, "entries": [entry], "cursor": 12, "more": true, "dropped": 3,
+                          "ended_reason": "the connection to the phone was reset"});
+        let text = render("syslog", &page);
+        assert!(text.starts_with("✓ syslog ended  1 entries  cursor 12  more waiting  3 dropped before this read"));
+        assert!(text.contains("12 2026-11-19T01:02:03.004005Z error  Papago[412] com.naver.papago/ui: line one ⏎ line two …"));
+        assert!(text.contains("ended: the connection to the phone was reset"));
+
+        let mut stopped = status.clone();
+        stopped["state"] = json!("ended");
+        stopped["matched"] = json!(7);
+        stopped["entries"] = json!([entry]);
+        let text = render("syslog", &stopped);
+        assert!(text.contains("syslog ended  seen 5000"));
+        assert!(text.contains("matched 7, the latest 1 below"));
+        assert!(text.contains("Papago[412]"));
+
+        let empty = json!({"ok": true, "state": "running", "count": 0, "entries": [], "cursor": 0, "more": false, "dropped": 0,
+                           "hint": "No entries yet."});
+        let text = render("syslog", &empty);
+        assert!(text.starts_with("✓ syslog running  0 entries  cursor 0\n"));
+        assert!(!text.contains("dropped") && text.contains("→ No entries yet."));
     }
 
     #[test]

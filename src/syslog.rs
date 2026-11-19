@@ -1,16 +1,20 @@
-//! `iph syslog`: the phone's log stream, written to a file while a test runs,
-//! so what an app logged after a tap can be checked afterwards.
+//! `iph syslog`: the phone's log stream, kept in the daemon while a test
+//! runs, so what an app logged after a tap can be read back.
 //!
 //! One capture per daemon. The stream is read by a task of its own that never
-//! touches the session, so commands keep working while it runs. The file is
-//! JSON Lines: a `start` line, the kept entries, and an `end` line that says
+//! touches the session, so commands keep working while it runs. An entry that
+//! passes the filters goes into a ring buffer bounded by entry count and by
+//! bytes and gets a `seq` (1 for the first). `read` returns what is newer than
+//! a `seq` the caller already has and says where to continue; the buffer goes
+//! with the capture. With `output` the kept entries are also written to a
+//! JSON Lines file: a `start` line, the entries, and an `end` line that says
 //! why the capture ended. A file without an `end` line belongs to a daemon
 //! that was killed.
 
 use std::{
     collections::VecDeque,
     fs::File,
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
     time::Duration,
@@ -31,16 +35,27 @@ use crate::{
     tcp::handle::Reset,
 };
 
+/// The buffer's defaults. Unfiltered over Wi-Fi the phone sent about 4,800
+/// entries/s, 1.4 MB/s, 290 B an entry as JSON; 100,000 entries hold about
+/// 20 s of that worst case, longer than a sensible gap between a tap and the
+/// `read` after it, and minutes of a filtered capture. In memory an entry
+/// weighs more than its JSON (see `Entry::weight`): about 430 B for one of
+/// 290 B of JSON, so 100,000 of them take about 41 MiB. The 64 MiB limit
+/// binds once messages average more than about 540 B.
+const DEFAULT_BUFFER_ENTRIES: u64 = 100_000;
+const MAX_BUFFER_ENTRIES: u64 = 1_000_000;
+const DEFAULT_BUFFER_MB: u64 = 64;
+const MAX_BUFFER_MB: u64 = 1024;
 const DEFAULT_MAX_MB: u64 = 64;
 /// The most `max_mb` takes. A part is read back whole by whoever opens it.
 const MAX_FILE_MB: u64 = 4096;
+const DEFAULT_MATCHES: u64 = 50;
+const MAX_MATCHES: u64 = 1000;
+/// Longest message a reply returns; the file keeps the whole message.
+const MATCH_CHARS: usize = 500;
 /// How long a written line may wait in the buffer before it is flushed.
 const FLUSH_EVERY: Duration = Duration::from_millis(250);
 const FILE_BUFFER: usize = 32 * 1024;
-const DEFAULT_MATCHES: u64 = 50;
-const MAX_MATCHES: u64 = 1000;
-/// Longest message a match returns; the file keeps the whole message.
-const MATCH_CHARS: usize = 500;
 
 /// Severity, lowest first. The device's own codes are not in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -88,7 +103,7 @@ impl From<LogLevel> for Level {
     }
 }
 
-/// One log entry as the file keeps it.
+/// One log entry as it is kept. Its `seq` belongs to the buffer, not to it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     /// UTC.
@@ -135,8 +150,11 @@ impl From<OsTraceLog> for Entry {
 }
 
 impl Entry {
-    pub fn line(&self) -> String {
+    /// The entry as a reply or the file shows it. A message longer than
+    /// `max_chars` is cut and marked with `message_cut`.
+    fn value(&self, seq: u64, max_chars: usize) -> Value {
         let mut v = json!({
+            "seq": seq,
             "time": self.time,
             "pid": self.pid,
             "process": self.process,
@@ -149,8 +167,33 @@ impl Entry {
         if let Some(c) = &self.category {
             v["category"] = json!(c);
         }
-        v["message"] = json!(self.message);
-        v.to_string()
+        if self.message.len() > max_chars && self.message.chars().count() > max_chars {
+            v["message"] = json!(self.message.chars().take(max_chars).collect::<String>());
+            v["message_cut"] = json!(true);
+        } else {
+            v["message"] = json!(self.message);
+        }
+        v
+    }
+
+    /// The file's line: the whole message.
+    pub fn line(&self, seq: u64) -> String {
+        self.value(seq, usize::MAX).to_string()
+    }
+
+    /// What the buffer counts against its byte budget: the text, the struct
+    /// and a flat allowance for the six allocations behind it. An estimate,
+    /// not an allocator's figure; above the entry's JSON.
+    fn weight(&self) -> usize {
+        const ALLOCATOR_SLACK: usize = 96;
+        std::mem::size_of::<Entry>()
+            + ALLOCATOR_SLACK
+            + self.time.len()
+            + self.process.len()
+            + self.sender.len()
+            + self.subsystem.as_ref().map_or(0, String::len)
+            + self.category.as_ref().map_or(0, String::len)
+            + self.message.len()
     }
 }
 
@@ -168,12 +211,25 @@ impl Filter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Limits {
+    pub entries: usize,
+    pub bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileSpec {
+    pub path: PathBuf,
+    pub max_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spec {
     pub filter: Filter,
     pub pid: Option<u32>,
-    pub path: PathBuf,
-    pub max_bytes: u64,
+    pub limits: Limits,
+    /// Only when `output` is given: nothing is written to disk otherwise.
+    pub file: Option<FileSpec>,
 }
 
 #[derive(Debug)]
@@ -185,14 +241,16 @@ pub struct Query {
 #[derive(Debug)]
 pub enum Request {
     Start(Spec),
+    /// Entries newer than `after` (0: from the start), without stopping.
+    Read { after: u64, query: Query },
     /// `None`: report the counts only.
     Stop(Option<Query>),
     Status,
 }
 
-/// Parse the arguments every surface sends. `default_path` is used when no
-/// `output` is given; a given one must be absolute, since the daemon writes it.
-pub fn parse(args: &Value, default_path: impl FnOnce() -> PathBuf) -> Res<Request> {
+/// Parse the arguments every surface sends. A given `output` must be
+/// absolute, since the daemon writes it.
+pub fn parse(args: &Value) -> Res<Request> {
     let given: Map<String, Value> = match args {
         Value::Null => Map::new(),
         Value::Object(m) => m.iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| (k.clone(), v.clone())).collect(),
@@ -201,12 +259,13 @@ pub fn parse(args: &Value, default_path: impl FnOnce() -> PathBuf) -> Res<Reques
     let action = given
         .get("action")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Fail::invalid("syslog needs an action: start, stop or status"))?;
+        .ok_or_else(|| Fail::invalid("syslog needs an action: start, read, stop or status"))?;
     let allowed: &[&str] = match action {
-        "start" => &["action", "process", "pid", "level", "output", "max_mb"],
+        "start" => &["action", "process", "pid", "level", "output", "max_mb", "buffer_entries", "buffer_mb"],
+        "read" => &["action", "after", "grep", "max"],
         "stop" => &["action", "grep", "max"],
         "status" => &["action"],
-        other => return Err(Fail::invalid(format!("unknown syslog action `{other}` (start, stop, status)"))),
+        other => return Err(Fail::invalid(format!("unknown syslog action `{other}` (start, read, stop, status)"))),
     };
     if let Some(key) = given.keys().find(|k| !allowed.contains(&k.as_str())) {
         return Err(Fail::invalid(format!("`syslog {action}` takes no `{key}`")));
@@ -215,6 +274,23 @@ pub fn parse(args: &Value, default_path: impl FnOnce() -> PathBuf) -> Res<Reques
         match given.get(key) {
             None => Ok(None),
             Some(v) => v.as_u64().map(Some).ok_or_else(|| Fail::invalid(format!("`{key}` takes a whole number"))),
+        }
+    };
+    let sized = |key: &str, default: u64, most: u64| -> Res<u64> {
+        let n = number(key)?.unwrap_or(default);
+        if (1..=most).contains(&n) {
+            Ok(n)
+        } else {
+            Err(Fail::invalid(format!("`{key}` takes a whole number from 1 to {most}")))
+        }
+    };
+    let grep = || -> Res<Option<Regex>> {
+        match given.get("grep") {
+            None => Ok(None),
+            Some(v) => {
+                let pattern = v.as_str().ok_or_else(|| Fail::invalid("`grep` takes a regular expression"))?;
+                Ok(Some(Regex::new(pattern).map_err(|e| Fail::invalid(format!("`grep`: {e}")))?))
+            }
         }
     };
     match action {
@@ -242,37 +318,44 @@ pub fn parse(args: &Value, default_path: impl FnOnce() -> PathBuf) -> Res<Reques
                 None => None,
                 Some(n) => Some(u32::try_from(n).map_err(|_| Fail::invalid("`pid` is out of range"))?),
             };
-            let path = match given.get("output") {
-                None => default_path(),
+            let limits = Limits {
+                entries: usize::try_from(sized("buffer_entries", DEFAULT_BUFFER_ENTRIES, MAX_BUFFER_ENTRIES)?)
+                    .map_err(|_| Fail::invalid("`buffer_entries` is out of range"))?,
+                bytes: sized("buffer_mb", DEFAULT_BUFFER_MB, MAX_BUFFER_MB)?
+                    .checked_mul(1024 * 1024)
+                    .and_then(|b| usize::try_from(b).ok())
+                    .ok_or_else(|| Fail::invalid("`buffer_mb` is out of range"))?,
+            };
+            let file = match given.get("output") {
+                None if given.contains_key("max_mb") => {
+                    return Err(Fail::invalid("`max_mb` sizes the file that `output` names"));
+                }
+                None => None,
                 Some(v) => {
                     let path = PathBuf::from(v.as_str().ok_or_else(|| Fail::invalid("`output` takes a path"))?);
                     if !path.is_absolute() {
                         return Err(Fail::invalid("`output` must be an absolute path"));
                     }
-                    path
+                    let max_bytes = sized("max_mb", DEFAULT_MAX_MB, MAX_FILE_MB)?
+                        .checked_mul(1024 * 1024)
+                        .ok_or_else(|| Fail::invalid("`max_mb` is out of range"))?;
+                    Some(FileSpec { path, max_bytes })
                 }
             };
-            let max_mb = number("max_mb")?.unwrap_or(DEFAULT_MAX_MB);
-            let max_bytes = (1..=MAX_FILE_MB)
-                .contains(&max_mb)
-                .then(|| max_mb.checked_mul(1024 * 1024))
-                .flatten()
-                .ok_or_else(|| Fail::invalid(format!("`max_mb` takes a whole number from 1 to {MAX_FILE_MB}")))?;
-            Ok(Request::Start(Spec {
-                filter: Filter { processes, min_level },
-                pid,
-                path,
-                max_bytes,
-            }))
+            Ok(Request::Start(Spec { filter: Filter { processes, min_level }, pid, limits, file }))
+        }
+        "read" => {
+            let max = number("max")?.unwrap_or(DEFAULT_MATCHES);
+            if max == 0 {
+                return Err(Fail::invalid("`max` must be at least 1"));
+            }
+            Ok(Request::Read {
+                after: number("after")?.unwrap_or(0),
+                query: Query { grep: grep()?, max: max.min(MAX_MATCHES) as usize },
+            })
         }
         "stop" => {
-            let grep = match given.get("grep") {
-                None => None,
-                Some(v) => {
-                    let pattern = v.as_str().ok_or_else(|| Fail::invalid("`grep` takes a regular expression"))?;
-                    Some(Regex::new(pattern).map_err(|e| Fail::invalid(format!("`grep`: {e}")))?)
-                }
-            };
+            let grep = grep()?;
             let max = number("max")?;
             if grep.is_none() && max.is_none() {
                 return Ok(Request::Stop(None));
@@ -281,6 +364,132 @@ pub fn parse(args: &Value, default_path: impl FnOnce() -> PathBuf) -> Res<Reques
             Ok(Request::Stop(Some(Query { grep, max })))
         }
         _ => Ok(Request::Status),
+    }
+}
+
+/// The kept entries, newest last. Their seqs run without a gap from
+/// `first_seq` to `newest_seq`, since only the oldest are evicted, so a seq
+/// finds its entry by position.
+pub struct Ring {
+    entries: VecDeque<Entry>,
+    bytes: usize,
+    /// The seq of the next entry kept. The first is 1.
+    next_seq: u64,
+    limits: Limits,
+}
+
+/// One `read`: the matching entries oldest first and where to go on.
+#[derive(Debug, PartialEq)]
+pub struct Page {
+    pub entries: Vec<Value>,
+    /// Pass it as `after` to the next read. Everything up to it has been
+    /// returned or did not match; nothing after it has been looked at, except
+    /// when it is the newest seq, which means everything has.
+    pub cursor: u64,
+    /// `max` cut the page short: another matching entry is already waiting.
+    pub more: bool,
+    /// Entries newer than `after` that were evicted before this read.
+    pub dropped: u64,
+}
+
+impl Ring {
+    pub fn new(limits: Limits) -> Self {
+        Self { entries: VecDeque::new(), bytes: 0, next_seq: 1, limits }
+    }
+
+    fn first_seq(&self) -> u64 {
+        self.next_seq - self.entries.len() as u64
+    }
+
+    fn newest_seq(&self) -> u64 {
+        self.next_seq - 1
+    }
+
+    /// Keep an entry, evicting the oldest while over a limit. An entry larger
+    /// than the byte budget evicts itself and everything before it.
+    pub fn push(&mut self, entry: Entry) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.bytes += entry.weight();
+        self.entries.push_back(entry);
+        while self.entries.len() > self.limits.entries || self.bytes > self.limits.bytes {
+            let Some(old) = self.entries.pop_front() else { break };
+            self.bytes = self.bytes.saturating_sub(old.weight());
+        }
+        seq
+    }
+
+    pub fn usage(&self) -> Value {
+        let mut v = json!({
+            "entries": self.entries.len(),
+            "bytes": self.bytes,
+            "max_entries": self.limits.entries,
+            "max_bytes": self.limits.bytes,
+            "evicted": self.first_seq() - 1,
+        });
+        if !self.entries.is_empty() {
+            v["oldest_seq"] = json!(self.first_seq());
+        }
+        if self.next_seq > 1 {
+            v["newest_seq"] = json!(self.newest_seq());
+        }
+        v
+    }
+
+    /// The entries newer than `after` whose message matches, at most `max`,
+    /// oldest first. A cursor is only meaningful in the capture that issued
+    /// it, since seqs begin again at 1 with each capture. One that is newer
+    /// than every entry returns nothing and gets the newest seq back, so it
+    /// cannot run ahead of the buffer.
+    pub fn read(&self, after: u64, grep: Option<&Regex>, max: usize) -> Page {
+        let first = self.first_seq();
+        let newest = self.newest_seq();
+        let next = after.saturating_add(1);
+        let skip = usize::try_from(next.saturating_sub(first)).unwrap_or(usize::MAX);
+        let mut entries = Vec::new();
+        let mut last = None;
+        let mut more = false;
+        for (i, entry) in self.entries.iter().enumerate().skip(skip) {
+            if grep.is_some_and(|re| !re.is_match(&entry.message)) {
+                continue;
+            }
+            if entries.len() == max {
+                more = true;
+                break;
+            }
+            let seq = first + i as u64;
+            entries.push(entry.value(seq, MATCH_CHARS));
+            last = Some(seq);
+        }
+        Page {
+            entries,
+            cursor: if more { last.unwrap_or(after.min(newest)) } else { newest },
+            more,
+            dropped: first.saturating_sub(next),
+        }
+    }
+
+    /// The latest `max` entries whose message matches, oldest first, with
+    /// the number that matched in all.
+    pub fn latest(&self, grep: Option<&Regex>, max: usize) -> (Vec<Value>, u64) {
+        let first = self.first_seq();
+        let mut found = VecDeque::new();
+        let mut matched = 0;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if grep.is_some_and(|re| !re.is_match(&entry.message)) {
+                continue;
+            }
+            matched += 1;
+            if max == 0 {
+                continue;
+            }
+            if found.len() == max {
+                found.pop_front();
+            }
+            found.push_back(i);
+        }
+        let entries = found.into_iter().map(|i| self.entries[i].value(first + i as u64, MATCH_CHARS)).collect();
+        (entries, matched)
     }
 }
 
@@ -349,8 +558,9 @@ impl Sink {
     /// On failure the file that holds the last entry stays open, so the
     /// `end` line still lands after it.
     fn rotate(&mut self) -> std::io::Result<()> {
-        // The handle goes first: Windows renames neither an open file nor
-        // over an existing one.
+        // Close the file and clear the old `.1` before the rename, so it
+        // does not depend on how a platform treats an open file or an
+        // existing target.
         if let Some(writer) = self.writer.as_mut() {
             writer.flush()?;
         }
@@ -388,7 +598,8 @@ fn reopen(path: &Path) -> Option<BufWriter<File>> {
 
 /// What the reading task and the session share.
 pub struct Live {
-    sink: Sink,
+    ring: Ring,
+    sink: Option<Sink>,
     filter: Filter,
     pub seen: u64,
     pub kept: u64,
@@ -398,20 +609,30 @@ pub struct Live {
 }
 
 impl Live {
-    pub fn new(sink: Sink, filter: Filter) -> Self {
-        Self { sink, filter, seen: 0, kept: 0, unparsed: 0, ended: None }
+    pub fn new(ring: Ring, sink: Option<Sink>, filter: Filter) -> Self {
+        Self { ring, sink, filter, seen: 0, kept: 0, unparsed: 0, ended: None }
     }
 
-    pub fn take(&mut self, entry: &Entry) -> std::io::Result<()> {
+    pub fn take(&mut self, entry: Entry) -> std::io::Result<()> {
         if self.ended.is_some() {
             return Ok(());
         }
         self.seen += 1;
-        if self.filter.keeps(entry) {
-            self.sink.write(&entry.line())?;
-            self.kept += 1;
+        if !self.filter.keeps(&entry) {
+            return Ok(());
         }
-        Ok(())
+        let line = self.sink.is_some().then(|| entry.line(self.ring.next_seq));
+        self.ring.push(entry);
+        self.kept += 1;
+        match (self.sink.as_mut(), line) {
+            (Some(sink), Some(line)) => sink.write(&line),
+            _ => Ok(()),
+        }
+    }
+
+    /// A line that is not an entry (`start`, `end`), for the file only.
+    fn note(&mut self, line: &Value) -> std::io::Result<()> {
+        self.sink.as_mut().map_or(Ok(()), |s| s.write(&line.to_string()))
     }
 
     /// Write the `end` line once; later calls change nothing.
@@ -426,11 +647,57 @@ impl Live {
             "seen": self.seen,
             "kept": self.kept,
             "unparsed": self.unparsed,
-            "rotations": self.sink.rotations,
+            "rotations": self.sink.as_ref().map_or(0, |s| s.rotations),
         });
         // The end line is what tells a reader the capture finished.
-        let _ = self.sink.append(&line.to_string()).and_then(|()| self.sink.flush());
+        if let Some(sink) = self.sink.as_mut() {
+            let _ = sink.append(&line.to_string()).and_then(|()| sink.flush());
+        }
         self.ended = Some(reason.to_string());
+    }
+
+    fn flush(&mut self) {
+        let _ = self.sink.as_mut().map(Sink::flush);
+    }
+
+    fn state(&self) -> &'static str {
+        if self.ended.is_none() { "running" } else { "ended" }
+    }
+
+    /// `status`: what was received, and what the buffer holds.
+    fn counts(&self) -> Map<String, Value> {
+        let mut out = fields! {
+            "state": self.state(),
+            "seen": self.seen,
+            "kept": self.kept,
+            "unparsed": self.unparsed,
+            "buffer": self.ring.usage(),
+        };
+        if let Some(sink) = &self.sink {
+            out.insert("rotations".into(), json!(sink.rotations));
+        }
+        if let Some(reason) = &self.ended {
+            out.insert("ended_reason".into(), json!(reason));
+        }
+        out
+    }
+
+    /// `read`: the page, and whether the capture is still running, so a
+    /// caller that polls sees it end.
+    fn read(&self, after: u64, q: &Query) -> Map<String, Value> {
+        let page = self.ring.read(after, q.grep.as_ref(), q.max);
+        let mut out = fields! {
+            "state": self.state(),
+            "count": page.entries.len(),
+            "entries": page.entries,
+            "cursor": page.cursor,
+            "more": page.more,
+            "dropped": page.dropped,
+        };
+        if let Some(reason) = &self.ended {
+            out.insert("ended_reason".into(), json!(reason));
+        }
+        out
     }
 }
 
@@ -445,7 +712,7 @@ async fn flusher(live: Weak<Mutex<Live>>) {
         if live.ended.is_some() {
             return;
         }
-        let _ = live.sink.flush();
+        live.flush();
     }
 }
 
@@ -461,7 +728,7 @@ async fn pump(mut stream: OsTraceRelayReceiver, live: Arc<Mutex<Live>>) {
         // Never under a timeout: an entry is several reads, and giving up
         // between them would leave the stream mid-entry.
         let reason = match stream.next().await {
-            Ok(log) => match live.lock().unwrap().take(&Entry::from(log)) {
+            Ok(log) => match live.lock().unwrap().take(Entry::from(log)) {
                 Ok(()) => continue,
                 Err(e) => format!("cannot write the file: {e}"),
             },
@@ -482,7 +749,8 @@ pub struct Capture {
     started: std::time::Instant,
     live: Arc<Mutex<Live>>,
     task: tokio::task::JoinHandle<()>,
-    flusher: tokio::task::JoinHandle<()>,
+    /// Only with a file.
+    flusher: Option<tokio::task::JoinHandle<()>>,
     reset: Reset,
 }
 
@@ -493,14 +761,16 @@ impl Capture {
     pub fn end(&self, reason: &str) {
         self.reset.now();
         self.task.abort();
-        self.flusher.abort();
+        if let Some(flusher) = &self.flusher {
+            flusher.abort();
+        }
         self.live.lock().unwrap().end(reason);
     }
 
     /// After `end`: wait until the connection has been reset, so the relay
     /// has let go of it before the next capture connects or the daemon exits.
     pub async fn settle(&mut self) {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), self.reset.sent()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), self.reset.sent()).await;
     }
 
     /// A task that stopped without saying why (a panic in the parser).
@@ -515,18 +785,36 @@ impl Capture {
         self.live.lock().unwrap().ended.is_none()
     }
 
+    /// While nothing has arrived for a while: why that can be. Not with
+    /// `--pid`, where a quiet process sends nothing either.
+    fn hint_if_silent(&self, live: &Live, out: &mut Map<String, Value>) {
+        if live.ended.is_none()
+            && self.spec.pid.is_none()
+            && live.seen == 0
+            && self.started.elapsed() > Duration::from_secs(5)
+        {
+            // Seen live: a relay connection that was dropped, not reset,
+            // held the next capture for about 30 s.
+            out.insert("hint".into(), json!(crate::i18n::t(
+                "아직 받은 로그가 없습니다. 연결이 끊긴 직후에는 폰이 약 30초 뒤에야 로그를 보냅니다.",
+                "No entries yet. Right after a dropped connection the phone starts sending about 30 s later.",
+            )));
+        }
+    }
+
+    pub fn read(&self, after: u64, q: &Query) -> Map<String, Value> {
+        self.check();
+        let live = self.live.lock().unwrap();
+        let mut out = live.read(after, q);
+        self.hint_if_silent(&live, &mut out);
+        out
+    }
+
     pub fn report(&self) -> Map<String, Value> {
         self.check();
         let live = self.live.lock().unwrap();
-        let mut out = fields! {
-            "state": if live.ended.is_none() { "running" } else { "ended" },
-            "path": self.spec.path.display().to_string(),
-            "started_at": self.started_at,
-            "seen": live.seen,
-            "kept": live.kept,
-            "unparsed": live.unparsed,
-            "rotations": live.sink.rotations,
-        };
+        let mut out = live.counts();
+        out.insert("started_at".into(), json!(self.started_at));
         if !self.spec.filter.processes.is_empty() {
             out.insert("process".into(), json!(self.spec.filter.processes));
         }
@@ -536,102 +824,75 @@ impl Capture {
         if let Some(level) = self.spec.filter.min_level {
             out.insert("level".into(), json!(level.name()));
         }
-        if live.sink.rotations > 0 {
-            out.insert("previous_part".into(), json!(rotated(&self.spec.path).display().to_string()));
+        if let Some(file) = &self.spec.file {
+            out.insert("path".into(), json!(file.path.display().to_string()));
+            if live.sink.as_ref().is_some_and(|s| s.rotations > 0) {
+                out.insert("previous_part".into(), json!(rotated(&file.path).display().to_string()));
+            }
         }
-        if let Some(reason) = &live.ended {
-            out.insert("ended_reason".into(), json!(reason));
-        }
-        // Not with a pid: a quiet process sends nothing either.
-        if live.ended.is_none()
-            && self.spec.pid.is_none()
-            && live.seen == 0
-            && self.started.elapsed() > std::time::Duration::from_secs(5)
-        {
-            // Seen live: a relay connection that was dropped, not reset,
-            // held the next capture for about 30 s.
-            out.insert("hint".into(), json!(crate::i18n::t(
-                "아직 받은 로그가 없습니다. 연결이 끊긴 직후에는 폰이 약 30초 뒤에야 로그를 보냅니다.",
-                "No entries yet. Right after a dropped connection the phone starts sending about 30 s later.",
-            )));
-        }
+        self.hint_if_silent(&live, &mut out);
         out
     }
-}
-
-/// Entries in `files` (oldest first) whose message matches, the most recent
-/// `max` of them, with the number that matched in all.
-pub fn search(files: &[PathBuf], grep: Option<&Regex>, max: usize) -> (Vec<Value>, u64) {
-    let mut found = VecDeque::new();
-    let mut matched = 0;
-    for path in files {
-        let Ok(file) = File::open(path) else { continue };
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            let Ok(Value::Object(mut entry)) = serde_json::from_str::<Value>(&line) else { continue };
-            if entry.contains_key("event") {
-                continue;
-            }
-            let message = entry.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
-            if grep.is_some_and(|re| !re.is_match(&message)) {
-                continue;
-            }
-            matched += 1;
-            if max == 0 {
-                continue;
-            }
-            if message.chars().count() > MATCH_CHARS {
-                entry.insert("message".into(), json!(message.chars().take(MATCH_CHARS).collect::<String>()));
-                entry.insert("message_cut".into(), json!(true));
-            }
-            if found.len() == max {
-                found.pop_front();
-            }
-            found.push_back(Value::Object(entry));
-        }
-    }
-    (found.into(), matched)
 }
 
 impl Session {
     pub async fn cmd_syslog(&mut self, args: &Value) -> Res {
         let udid = self.udid.clone();
-        let request = parse(args, || paths::state_dir().join(format!("{udid}.syslog.jsonl")))?;
-        match request {
+        match parse(args)? {
             Request::Status => Ok(match &self.capture {
                 Some(c) => c.report(),
                 None => fields! { "state": "none" },
             }),
+            Request::Read { after, query } => match &self.capture {
+                Some(c) => Ok(c.read(after, &query)),
+                None => Err(Fail::not_sent("no_capture", "no capture to read").hint(crate::i18n::t(
+                    "`iph syslog start`로 먼저 시작하세요.",
+                    "Start one with `iph syslog start`.",
+                ))),
+            },
             Request::Start(spec) => {
-                if let Some(c) = self.capture.as_ref().filter(|c| c.is_running()) {
-                    return Err(Fail::not_sent("capture_running", "a capture is already running")
-                        .with("path", c.spec.path.display().to_string())
-                        .hint(crate::i18n::t(
+                if let Some(c) = &self.capture {
+                    // An ended capture is kept for `read` until `stop`.
+                    let (code, message) = if c.is_running() {
+                        ("capture_running", "a capture is already running")
+                    } else {
+                        ("capture_ended", "an ended capture has not been stopped")
+                    };
+                    return Err(Fail::not_sent(code, message).with("started_at", c.started_at.clone()).hint(
+                        crate::i18n::t(
                             "`iph syslog stop`으로 끝낸 뒤 다시 시작하세요.",
                             "End it with `iph syslog stop` first.",
-                        )));
+                        ),
+                    ));
                 }
                 // The file is opened only once the relay runs: a start that
                 // fails leaves an earlier capture's file as it was.
                 let (stream, reset) = self.os_trace(spec.pid).await?;
-                let sink = Sink::create(&spec.path, spec.max_bytes)
-                    .map_err(|e| Fail::invalid(format!("{}: {e}", spec.path.display())))?;
-                let mut live = Live::new(sink, spec.filter.clone());
+                let sink = spec
+                    .file
+                    .as_ref()
+                    .map(|f| {
+                        Sink::create(&f.path, f.max_bytes).map_err(|e| Fail::invalid(format!("{}: {e}", f.path.display())))
+                    })
+                    .transpose()?;
+                let mut live = Live::new(Ring::new(spec.limits), sink, spec.filter.clone());
                 let started_at = clock::now_utc();
                 let start = json!({
                     "event": "start",
                     "time": started_at,
-                    "udid": self.udid,
+                    "udid": udid,
                     "process": spec.filter.processes,
                     "pid": spec.pid,
                     "level": spec.filter.min_level.map(Level::name),
-                    "max_mb": spec.max_bytes / (1024 * 1024),
+                    "max_mb": spec.file.as_ref().map(|f| f.max_bytes / (1024 * 1024)),
                 });
-                if let Err(e) = live.sink.write(&start.to_string()) {
-                    return Err(Fail::invalid(format!("{}: {e}", spec.path.display())));
+                if let Err(e) = live.note(&start) {
+                    let path = spec.file.as_ref().map(|f| f.path.display().to_string()).unwrap_or_default();
+                    return Err(Fail::invalid(format!("{path}: {e}")));
                 }
                 let live = Arc::new(Mutex::new(live));
                 let task = tokio::task::spawn_local(pump(stream, live.clone()));
-                let flusher = tokio::task::spawn_local(flusher(Arc::downgrade(&live)));
+                let flusher = spec.file.is_some().then(|| tokio::task::spawn_local(flusher(Arc::downgrade(&live))));
                 let started = std::time::Instant::now();
                 let capture = Capture { spec, started_at, started, live, task, flusher, reset };
                 let report = capture.report();
@@ -646,17 +907,16 @@ impl Session {
                 capture.settle().await;
                 let mut out = capture.report();
                 if let Some(q) = query {
-                    let files = [rotated(&capture.spec.path), capture.spec.path.clone()];
-                    let (matches, matched) = search(&files, q.grep.as_ref(), q.max);
+                    let (entries, matched) = capture.live.lock().unwrap().ring.latest(q.grep.as_ref(), q.max);
                     out.insert("matched".into(), json!(matched));
-                    out.insert("matches".into(), json!(matches));
+                    out.insert("entries".into(), json!(entries));
                 }
                 Ok(out)
             }
         }
     }
 
-    /// End the capture, keeping it for `status` and `stop` to report.
+    /// End the capture, keeping it for `status`, `read` and `stop`.
     pub fn end_capture(&mut self, reason: &str) {
         if let Some(c) = &self.capture {
             c.end(reason);
@@ -713,6 +973,14 @@ mod tests {
         }
     }
 
+    fn note(message: &str) -> Entry {
+        entry("Papago", Level::Info, message)
+    }
+
+    fn roomy() -> Limits {
+        Limits { entries: 1000, bytes: 1 << 20 }
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("iph-syslog-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -728,22 +996,55 @@ mod tests {
             .collect()
     }
 
+    fn seqs(page: &Page) -> Vec<u64> {
+        page.entries.iter().map(|e| e["seq"].as_u64().unwrap()).collect()
+    }
+
+    fn messages(page: &Page) -> Vec<&str> {
+        page.entries.iter().map(|e| e["message"].as_str().unwrap()).collect()
+    }
+
+    /// A ring holding `n` entries "m1".."mN" (seq 1..=N).
+    fn filled(limits: Limits, n: u64) -> Ring {
+        let mut ring = Ring::new(limits);
+        for i in 1..=n {
+            assert_eq!(ring.push(note(&format!("m{i}"))), i);
+        }
+        ring
+    }
+
     #[test]
     fn an_entry_becomes_one_json_line_named_by_its_executable() {
         let e = Entry::from(log("/Applications/Preferences.app/Preferences", "Error", Some(("com.apple.settings", "ui"))));
-        let v: Value = serde_json::from_str(&e.line()).unwrap();
+        let v: Value = serde_json::from_str(&e.line(7)).unwrap();
         assert_eq!(
             v,
             json!({
-                "time": "2026-11-19T01:02:03.004005Z", "pid": 412, "process": "Preferences", "sender": "UIKitCore",
+                "seq": 7, "time": "2026-11-19T01:02:03.004005Z", "pid": 412, "process": "Preferences", "sender": "UIKitCore",
                 "level": "error", "subsystem": "com.apple.settings", "category": "ui", "message": "tapped row",
             })
         );
         let plain = Entry::from(log("/usr/libexec/backboardd", "Notice", None));
-        let v: Value = serde_json::from_str(&plain.line()).unwrap();
+        let v: Value = serde_json::from_str(&plain.line(1)).unwrap();
         assert_eq!(v["process"], "backboardd");
         assert_eq!(v["level"], "notice");
         assert!(v.get("subsystem").is_none());
+    }
+
+    #[test]
+    fn a_long_message_is_cut_in_a_reply_and_whole_in_the_file() {
+        let long = note(&"y".repeat(900));
+        let cut = long.value(3, MATCH_CHARS);
+        assert_eq!(cut["message"].as_str().unwrap().chars().count(), MATCH_CHARS);
+        assert_eq!(cut["message_cut"], true);
+        let whole: Value = serde_json::from_str(&long.line(3)).unwrap();
+        assert_eq!(whole["message"].as_str().unwrap().len(), 900);
+        assert!(whole.get("message_cut").is_none());
+        let short = note("short").value(3, MATCH_CHARS);
+        assert!(short.get("message_cut").is_none());
+        // Cut by characters, not bytes.
+        let korean = note(&"가".repeat(600)).value(1, MATCH_CHARS);
+        assert_eq!(korean["message"].as_str().unwrap().chars().count(), MATCH_CHARS);
     }
 
     #[test]
@@ -778,6 +1079,200 @@ mod tests {
         let mut sorted = levels.clone();
         sorted.sort();
         assert_eq!(sorted, [Level::Debug, Level::Info, Level::Notice, Level::Error, Level::Fault]);
+    }
+
+    #[test]
+    fn kept_entries_get_seqs_from_one_and_the_oldest_are_evicted_by_count() {
+        let mut ring = filled(Limits { entries: 3, bytes: 1 << 20 }, 5);
+        let usage = ring.usage();
+        assert_eq!(
+            (usage["entries"].as_u64(), usage["oldest_seq"].as_u64(), usage["newest_seq"].as_u64(), usage["evicted"].as_u64()),
+            (Some(3), Some(3), Some(5), Some(2))
+        );
+        assert_eq!(usage["max_entries"], 3);
+        assert_eq!(ring.push(note("m6")), 6, "a seq is never reused");
+        assert_eq!(messages(&ring.read(0, None, 10)), ["m4", "m5", "m6"]);
+        let fresh = Ring::new(roomy()).usage();
+        assert!(fresh.get("oldest_seq").is_none() && fresh.get("newest_seq").is_none());
+        assert_eq!(fresh["evicted"], 0);
+    }
+
+    #[test]
+    fn the_byte_budget_evicts_by_weight_and_the_count_stays_exact() {
+        let w = note("m1").weight();
+        let mut ring = Ring::new(Limits { entries: 100, bytes: 3 * w });
+        for i in 1..=5 {
+            ring.push(note(&format!("m{i}")));
+        }
+        let usage = ring.usage();
+        assert_eq!(usage["entries"], 3);
+        assert_eq!(usage["bytes"], 3 * w);
+        assert_eq!(usage["oldest_seq"], 3);
+        // A heavy entry pushes out as many light ones as it takes.
+        ring.push(note(&"z".repeat(w)));
+        let usage = ring.usage();
+        assert!(usage["bytes"].as_u64().unwrap() <= 3 * w as u64);
+        assert_eq!((usage["newest_seq"].as_u64(), usage["oldest_seq"].as_u64(), usage["entries"].as_u64()), (Some(6), Some(5), Some(2)));
+    }
+
+    #[test]
+    fn an_entry_larger_than_the_whole_budget_evicts_itself_and_the_ring_goes_on() {
+        let mut ring = Ring::new(Limits { entries: 10, bytes: note("m1").weight() * 2 });
+        ring.push(note("m1"));
+        assert_eq!(ring.push(note(&"z".repeat(10_000))), 2);
+        let usage = ring.usage();
+        assert_eq!((usage["entries"].as_u64(), usage["bytes"].as_u64(), usage["evicted"].as_u64()), (Some(0), Some(0), Some(2)));
+        let page = ring.read(0, None, 10);
+        assert_eq!((page.entries.len(), page.cursor, page.dropped), (0, 2, 2));
+        ring.push(note("m3"));
+        assert_eq!(seqs(&ring.read(2, None, 10)), [3]);
+    }
+
+    #[test]
+    fn a_read_without_after_starts_at_the_oldest_kept_entry() {
+        let ring = filled(Limits { entries: 4, bytes: 1 << 20 }, 6);
+        let page = ring.read(0, None, 10);
+        assert_eq!(seqs(&page), [3, 4, 5, 6]);
+        assert_eq!((page.cursor, page.more, page.dropped), (6, false, 2), "the two evicted before this first read are reported");
+        let untouched = filled(roomy(), 3).read(0, None, 10);
+        assert_eq!((seqs(&untouched), untouched.cursor, untouched.dropped), (vec![1, 2, 3], 3, 0));
+    }
+
+    #[test]
+    fn a_read_after_a_seq_the_ring_still_holds_returns_only_what_is_newer() {
+        let ring = filled(Limits { entries: 4, bytes: 1 << 20 }, 6);
+        let page = ring.read(4, None, 10);
+        assert_eq!((seqs(&page), page.cursor, page.dropped, page.more), (vec![5, 6], 6, 0, false));
+        let page = ring.read(2, None, 10);
+        assert_eq!((seqs(&page), page.dropped), (vec![3, 4, 5, 6], 0), "seq 2 was the last one the caller had; 3 is still here");
+    }
+
+    #[test]
+    fn a_read_after_a_seq_older_than_the_ring_counts_what_was_lost() {
+        let ring = filled(Limits { entries: 4, bytes: 1 << 20 }, 10);
+        // Held: 7..=10. The caller has 3, so 4, 5 and 6 are gone.
+        let page = ring.read(3, None, 10);
+        assert_eq!(seqs(&page), [7, 8, 9, 10]);
+        assert_eq!((page.dropped, page.cursor), (3, 10));
+    }
+
+    #[test]
+    fn a_read_after_the_newest_seq_is_empty_and_a_cursor_beyond_it_is_pulled_back() {
+        let ring = filled(roomy(), 3);
+        let caught_up = ring.read(3, None, 10);
+        assert_eq!((caught_up.entries.len(), caught_up.cursor, caught_up.more, caught_up.dropped), (0, 3, false, 0));
+        // A cursor from an earlier capture, whose seqs ran higher.
+        let stale = ring.read(5000, None, 10);
+        assert_eq!((stale.entries.len(), stale.cursor, stale.dropped), (0, 3, 0));
+        let empty = Ring::new(roomy()).read(0, None, 10);
+        assert_eq!((empty.entries.len(), empty.cursor, empty.more, empty.dropped), (0, 0, false, 0));
+        assert_eq!(Ring::new(roomy()).read(u64::MAX, None, 10).cursor, 0);
+    }
+
+    #[test]
+    fn a_grep_with_no_match_returns_nothing_and_still_moves_the_cursor() {
+        let ring = filled(roomy(), 5);
+        let re = Regex::new("nothing like this").unwrap();
+        let page = ring.read(1, Some(&re), 10);
+        assert_eq!((page.entries.len(), page.cursor, page.more, page.dropped), (0, 5, false, 0));
+        // Reading on from that cursor looks at nothing already looked at.
+        let mut ring = ring;
+        ring.push(note("nothing like this, at last"));
+        assert_eq!(seqs(&ring.read(page.cursor, Some(&re), 10)), [6]);
+    }
+
+    #[test]
+    fn max_cuts_a_page_and_the_cursor_continues_exactly_after_the_last_entry_returned() {
+        let ring = filled(roomy(), 7);
+        let first = ring.read(0, None, 3);
+        assert_eq!((seqs(&first), first.cursor, first.more), (vec![1, 2, 3], 3, true));
+        let second = ring.read(first.cursor, None, 3);
+        assert_eq!((seqs(&second), second.cursor, second.more), (vec![4, 5, 6], 6, true));
+        let last = ring.read(second.cursor, None, 3);
+        assert_eq!((seqs(&last), last.cursor, last.more), (vec![7], 7, false));
+        // A page that is exactly full and has nothing behind it is not "more".
+        let exact = ring.read(4, None, 3);
+        assert_eq!((seqs(&exact), exact.cursor, exact.more), (vec![5, 6, 7], 7, false));
+    }
+
+    #[test]
+    fn a_grep_cut_by_max_leaves_the_cursor_on_the_last_match_so_nothing_between_is_skipped() {
+        let mut ring = Ring::new(roomy());
+        for i in 1..=10 {
+            ring.push(note(&if i % 3 == 0 { format!("hit {i}") } else { format!("miss {i}") }));
+        }
+        let re = Regex::new("^hit").unwrap();
+        let first = ring.read(0, Some(&re), 2);
+        assert_eq!((seqs(&first), first.cursor, first.more), (vec![3, 6], 6, true));
+        let second = ring.read(first.cursor, Some(&re), 2);
+        assert_eq!((seqs(&second), second.cursor, second.more), (vec![9], 10, false));
+    }
+
+    #[test]
+    fn paging_to_the_end_equals_one_read_of_the_same_filter() {
+        let mut ring = Ring::new(roomy());
+        for i in 1..=60 {
+            ring.push(note(&if i % 4 == 0 { format!("hit {i}") } else { format!("miss {i}") }));
+        }
+        let re = Regex::new("^hit").unwrap();
+        let whole = seqs(&ring.read(0, Some(&re), 1000));
+        for max in [1, 2, 3, 7, 15] {
+            let (mut cursor, mut got) = (0, Vec::new());
+            loop {
+                let page = ring.read(cursor, Some(&re), max);
+                assert_eq!(page.dropped, 0);
+                assert!(page.cursor >= cursor, "the cursor never goes back");
+                got.extend(seqs(&page));
+                cursor = page.cursor;
+                if !page.more {
+                    break;
+                }
+            }
+            assert_eq!(got, whole, "max {max}");
+            assert_eq!(cursor, 60);
+        }
+    }
+
+    #[test]
+    fn eviction_between_pages_is_reported_and_the_cursor_still_leaves_no_gap_in_what_remains() {
+        let mut ring = Ring::new(Limits { entries: 5, bytes: 1 << 20 });
+        let push = |ring: &mut Ring, from: u64, to: u64| {
+            for i in from..=to {
+                ring.push(note(&if i % 2 == 0 { format!("hit {i}") } else { format!("miss {i}") }));
+            }
+        };
+        let re = Regex::new("^hit").unwrap();
+        push(&mut ring, 1, 8);
+        // Held: 4..=8. Seqs 1, 2 and 3 went before anything was read.
+        let a = ring.read(0, Some(&re), 2);
+        assert_eq!((seqs(&a), a.cursor, a.more, a.dropped), (vec![4, 6], 6, true, 3));
+        push(&mut ring, 9, 12);
+        // Held: 8..=12. Seq 7 went while the caller was away.
+        let b = ring.read(a.cursor, Some(&re), 2);
+        assert_eq!((seqs(&b), b.cursor, b.more, b.dropped), (vec![8, 10], 10, true, 1));
+        let c = ring.read(b.cursor, Some(&re), 2);
+        assert_eq!((seqs(&c), c.cursor, c.more, c.dropped), (vec![12], 12, false, 0));
+    }
+
+    #[test]
+    fn latest_returns_the_most_recent_matches_oldest_first_with_the_total() {
+        let mut ring = Ring::new(roomy());
+        for i in 0..3 {
+            ring.push(note(&format!("hit {i}")));
+        }
+        ring.push(note("miss"));
+        ring.push(note(&format!("hit 3 {}", "y".repeat(900))));
+        let re = Regex::new("^hit").unwrap();
+        let (found, matched) = ring.latest(Some(&re), 2);
+        assert_eq!(matched, 4);
+        assert_eq!(found.iter().map(|e| e["seq"].as_u64().unwrap()).collect::<Vec<_>>(), [3, 5]);
+        assert_eq!(found[0]["message"], "hit 2");
+        assert_eq!(found[1]["message"].as_str().unwrap().chars().count(), MATCH_CHARS);
+        assert_eq!(found[1]["message_cut"], true);
+        let (all, matched) = ring.latest(None, 0);
+        assert_eq!((all.len(), matched), (0, 5), "max 0 only counts");
+        let (everything, _) = ring.latest(None, 1000);
+        assert_eq!(everything.len(), 5);
     }
 
     #[test]
@@ -821,7 +1316,7 @@ mod tests {
         std::fs::create_dir_all(rotated(&path).join("x")).unwrap();
         sink.write(&json!({ "message": "a".repeat(100) }).to_string()).unwrap();
         assert!(sink.write(&json!({ "message": "b".repeat(100) }).to_string()).is_err());
-        let mut live = Live::new(sink, Filter::default());
+        let mut live = Live::new(Ring::new(roomy()), Some(sink), Filter::default());
         live.end("cannot write the file");
         let got = lines(&path);
         assert_eq!(got.len(), 2, "the entry before the failed rotation, then the end line");
@@ -848,9 +1343,10 @@ mod tests {
     fn the_flusher_puts_a_quiet_capture_in_the_file() {
         let dir = temp_dir("flusher");
         let path = dir.join("cap.jsonl");
-        let live = Arc::new(Mutex::new(Live::new(Sink::create(&path, 1 << 20).unwrap(), Filter::default())));
-        live.lock().unwrap().take(&entry("Papago", Level::Info, "quiet")).unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let sink = Sink::create(&path, 1 << 20).unwrap();
+        let live = Arc::new(Mutex::new(Live::new(Ring::new(roomy()), Some(sink), Filter::default())));
+        live.lock().unwrap().take(note("quiet")).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().start_paused(true).build().unwrap();
         runtime.block_on(async {
             let task = tokio::spawn(flusher(Arc::downgrade(&live)));
             tokio::time::sleep(FLUSH_EVERY * 4).await;
@@ -866,15 +1362,15 @@ mod tests {
         let dir = temp_dir("end");
         let path = dir.join("cap.jsonl");
         let filter = Filter { processes: vec!["Papago".into()], min_level: None };
-        let mut live = Live::new(Sink::create(&path, 1 << 20).unwrap(), filter);
-        live.take(&entry("Papago", Level::Info, "one")).unwrap();
-        live.take(&entry("SpringBoard", Level::Info, "other")).unwrap();
+        let mut live = Live::new(Ring::new(roomy()), Some(Sink::create(&path, 1 << 20).unwrap()), filter);
+        live.take(note("one")).unwrap();
+        live.take(entry("SpringBoard", Level::Info, "other")).unwrap();
         live.end("the log stream ended: socket closed");
         live.end("stopped");
-        live.take(&entry("Papago", Level::Info, "late")).unwrap();
+        live.take(note("late")).unwrap();
         let got = lines(&path);
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0]["message"], "one");
+        assert_eq!(got.len(), 2, "the end line is flushed without anyone asking");
+        assert_eq!((got[0]["seq"].as_u64(), got[0]["message"].as_str()), (Some(1), Some("one")));
         assert_eq!(got[1]["event"], "end");
         assert_eq!(got[1]["reason"], "the log stream ended: socket closed");
         assert_eq!((got[1]["seen"].as_u64(), got[1]["kept"].as_u64()), (Some(2), Some(1)));
@@ -883,37 +1379,64 @@ mod tests {
     }
 
     #[test]
-    fn search_returns_the_latest_matches_cut_to_length() {
-        let dir = temp_dir("search");
-        let older = dir.join("cap.jsonl.1");
-        let newer = dir.join("cap.jsonl");
-        // The current part first: starting it removes an earlier `.1`.
-        let mut b = Sink::create(&newer, 1 << 20).unwrap();
-        let mut a = Sink::create(&older, 1 << 20).unwrap();
-        a.write(r#"{"event":"start"}"#).unwrap();
-        for i in 0..3 {
-            a.write(&entry("Papago", Level::Info, &format!("hit {i}")).line()).unwrap();
-        }
-        b.write(&entry("Papago", Level::Info, "miss").line()).unwrap();
-        b.write(&entry("Papago", Level::Info, &format!("hit 3 {}", "y".repeat(900))).line()).unwrap();
-        b.write(r#"{"event":"end","reason":"hit"}"#).unwrap();
-        a.flush().unwrap();
-        b.flush().unwrap();
-        let files = [older, newer];
-        let re = Regex::new("^hit").unwrap();
-        let (found, matched) = search(&files, Some(&re), 2);
-        assert_eq!(matched, 4);
-        assert_eq!(found.len(), 2);
-        assert_eq!(found[0]["message"], "hit 2");
-        assert_eq!(found[1]["message"].as_str().unwrap().chars().count(), MATCH_CHARS);
-        assert_eq!(found[1]["message_cut"], true);
-        let (all, matched) = search(&files, None, 0);
-        assert_eq!((all.len(), matched), (0, 5));
+    fn without_a_file_nothing_is_written_and_the_ring_alone_serves_reads() {
+        let dir = temp_dir("memory");
+        let mut live = Live::new(Ring::new(roomy()), None, Filter::default());
+        live.take(note("one")).unwrap();
+        live.note(&json!({ "event": "start" })).unwrap();
+        live.end("stopped");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let out = live.read(0, &Query { grep: None, max: 10 });
+        assert_eq!(out["count"], 1);
+        assert!(live.counts().get("rotations").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn the_file_and_the_ring_number_an_entry_alike() {
+        let dir = temp_dir("seq");
+        let path = dir.join("cap.jsonl");
+        let mut live = Live::new(Ring::new(roomy()), Some(Sink::create(&path, 1 << 20).unwrap()), Filter::default());
+        for m in ["a", "b", "c"] {
+            live.take(note(m)).unwrap();
+        }
+        live.end("stopped");
+        let in_file: Vec<(u64, String)> = lines(&path)
+            .iter()
+            .filter(|v| v.get("event").is_none())
+            .map(|v| (v["seq"].as_u64().unwrap(), v["message"].as_str().unwrap().to_string()))
+            .collect();
+        let page = live.ring.read(0, None, 10);
+        let in_ring: Vec<(u64, String)> =
+            page.entries.iter().map(|e| (e["seq"].as_u64().unwrap(), e["message"].as_str().unwrap().to_string())).collect();
+        assert_eq!(in_file, in_ring);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_kept_entries_are_numbered_and_a_read_keeps_working_after_the_capture_ended() {
+        let filter = Filter { processes: vec!["Papago".into()], min_level: None };
+        let mut live = Live::new(Ring::new(roomy()), None, filter);
+        live.take(note("one")).unwrap();
+        live.take(entry("SpringBoard", Level::Info, "skipped")).unwrap();
+        live.take(note("two")).unwrap();
+        let q = Query { grep: None, max: 10 };
+        let running = live.read(0, &q);
+        assert_eq!((running["state"].as_str(), running["cursor"].as_u64(), running["dropped"].as_u64()), (Some("running"), Some(2), Some(0)));
+        assert!(running.get("ended_reason").is_none());
+        live.end("the connection to the phone was reset");
+        let ended = live.read(1, &q);
+        assert_eq!(ended["state"], "ended");
+        assert_eq!(ended["ended_reason"], "the connection to the phone was reset");
+        assert_eq!(ended["entries"][0]["message"], "two");
+        assert_eq!(ended["entries"][0]["seq"], 2);
+        let counts = live.counts();
+        assert_eq!((counts["seen"].as_u64(), counts["kept"].as_u64()), (Some(3), Some(2)));
+        assert_eq!(counts["buffer"]["entries"], 2);
+    }
+
     fn parsed(args: Value) -> Res<Request> {
-        parse(&args, || PathBuf::from("/state/u.syslog.jsonl"))
+        parse(&args)
     }
 
     fn absolute(name: &str) -> PathBuf {
@@ -921,49 +1444,93 @@ mod tests {
     }
 
     #[test]
-    fn each_action_takes_only_its_own_arguments() {
-        let Ok(Request::Start(spec)) = parsed(json!({
-            "action": "start", "process": "Preferences", "level": "default", "pid": null, "max_mb": 2,
-        })) else {
+    fn a_start_keeps_to_memory_unless_a_file_is_asked_for() {
+        let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "process": "Preferences", "level": "default", "pid": null })) else {
             panic!("start")
         };
         assert_eq!(spec.filter.processes, ["Preferences"]);
         assert_eq!(spec.filter.min_level, Some(Level::Notice));
-        assert_eq!(spec.path, PathBuf::from("/state/u.syslog.jsonl"));
-        assert_eq!(spec.max_bytes, 2 * 1024 * 1024);
-        let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "max_mb": MAX_FILE_MB })) else {
-            panic!("the largest max_mb")
-        };
-        assert_eq!(spec.max_bytes, MAX_FILE_MB * 1024 * 1024);
+        assert_eq!(spec.file, None);
+        assert_eq!(spec.limits, Limits { entries: 100_000, bytes: 64 * 1024 * 1024 });
         let out = absolute("x.jsonl");
-        let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "process": ["A", "B"], "pid": 7, "output": out })) else {
-            panic!("start with a list")
+        let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "process": ["A", "B"], "pid": 7, "output": out, "max_mb": 2 })) else {
+            panic!("start with a file")
         };
         assert_eq!((spec.filter.processes.len(), spec.pid), (2, Some(7)));
-        assert_eq!(spec.path, out);
+        assert_eq!(spec.file, Some(FileSpec { path: out.clone(), max_bytes: 2 * 1024 * 1024 }));
+        let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "output": out })) else { panic!("default size") };
+        assert_eq!(spec.file.unwrap().max_bytes, DEFAULT_MAX_MB * 1024 * 1024);
+        let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "output": absolute("y.jsonl"), "max_mb": MAX_FILE_MB })) else {
+            panic!("the largest max_mb")
+        };
+        assert_eq!(spec.file.unwrap().max_bytes, MAX_FILE_MB * 1024 * 1024);
+        let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "buffer_entries": 500, "buffer_mb": 2 })) else {
+            panic!("buffer limits")
+        };
+        assert_eq!(spec.limits, Limits { entries: 500, bytes: 2 * 1024 * 1024 });
+    }
 
+    #[test]
+    fn read_and_stop_take_a_cursor_a_pattern_and_a_count() {
+        let Ok(Request::Read { after, query }) = parsed(json!({ "action": "read" })) else { panic!("bare read") };
+        assert_eq!((after, query.max, query.grep.is_none()), (0, DEFAULT_MATCHES as usize, true));
+        let Ok(Request::Read { after, query }) = parsed(json!({ "action": "read", "after": 120, "grep": "a+", "max": 5000 })) else {
+            panic!("read")
+        };
+        assert_eq!((after, query.max, query.grep.unwrap().as_str()), (120, MAX_MATCHES as usize, "a+"));
         assert!(matches!(parsed(json!({ "action": "stop" })), Ok(Request::Stop(None))));
         let Ok(Request::Stop(Some(q))) = parsed(json!({ "action": "stop", "grep": "a+", "max": 5000 })) else {
             panic!("stop with grep")
         };
         assert_eq!(q.max, MAX_MATCHES as usize);
+        let Ok(Request::Stop(Some(q))) = parsed(json!({ "action": "stop", "max": 0 })) else { panic!("stop to count") };
+        assert_eq!(q.max, 0);
         assert!(matches!(parsed(json!({ "action": "status" })), Ok(Request::Status)));
+    }
 
+    #[test]
+    fn each_action_takes_only_its_own_arguments() {
         for bad in [
             json!({}),
             json!({ "action": "pause" }),
             json!({ "action": "stop", "process": "A" }),
+            json!({ "action": "stop", "after": 3 }),
+            json!({ "action": "read", "process": "A" }),
+            json!({ "action": "read", "output": absolute("x.jsonl") }),
+            json!({ "action": "start", "after": 3 }),
+            json!({ "action": "start", "grep": "a" }),
             json!({ "action": "status", "grep": "a" }),
+            json!({ "action": "read", "after": "three" }),
+            json!({ "action": "read", "after": -1 }),
+            json!({ "action": "read", "max": 0 }),
+            json!({ "action": "read", "grep": "(" }),
+            json!({ "action": "stop", "grep": "(" }),
             json!({ "action": "start", "output": "relative.jsonl" }),
             json!({ "action": "start", "level": "loud" }),
             json!({ "action": "start", "process": "/Applications/Preferences.app/Preferences" }),
-            json!({ "action": "start", "max_mb": 0 }),
-            json!({ "action": "start", "max_mb": MAX_FILE_MB + 1 }),
-            json!({ "action": "start", "max_mb": u64::MAX }),
-            json!({ "action": "stop", "grep": "(" }),
         ] {
             let err = parsed(bad.clone()).expect_err(&bad.to_string());
             assert_eq!(err.code, "invalid_argument", "{bad}");
         }
+    }
+
+    #[test]
+    fn sizes_are_bounded_and_a_file_size_needs_a_file() {
+        let file = absolute("z.jsonl");
+        for bad in [
+            json!({ "action": "start", "output": file, "max_mb": 0 }),
+            json!({ "action": "start", "output": file, "max_mb": MAX_FILE_MB + 1 }),
+            json!({ "action": "start", "output": file, "max_mb": u64::MAX }),
+            json!({ "action": "start", "max_mb": 8 }),
+            json!({ "action": "start", "buffer_entries": 0 }),
+            json!({ "action": "start", "buffer_entries": MAX_BUFFER_ENTRIES + 1 }),
+            json!({ "action": "start", "buffer_mb": 0 }),
+            json!({ "action": "start", "buffer_mb": MAX_BUFFER_MB + 1 }),
+            json!({ "action": "start", "buffer_mb": u64::MAX }),
+        ] {
+            let err = parsed(bad.clone()).expect_err(&bad.to_string());
+            assert_eq!(err.code, "invalid_argument", "{bad}");
+        }
+        assert!(parsed(json!({ "action": "start", "buffer_entries": MAX_BUFFER_ENTRIES, "buffer_mb": MAX_BUFFER_MB })).is_ok());
     }
 }

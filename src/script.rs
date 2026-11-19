@@ -461,8 +461,8 @@ impl RunState {
             return Err(Fail::invalid(format!("`{cmd}` takes an object of arguments")));
         };
         if cmd == "syslog" && map.get("output").is_some_and(|v| !v.is_null()) {
-            // Saved scripts come from anywhere; the file stays where iph keeps its own.
-            return Err(Fail::invalid("a script cannot choose the file; the capture goes to iph's state directory"));
+            // Saved scripts come from anywhere; they do not get to write files.
+            return Err(Fail::invalid("a script cannot write a file; read the log back with syslog(\"read\")"));
         }
         let hint = map.remove("hint").and_then(|v| v.as_str().map(String::from));
         Ok(Prepared { args: Value::Object(map), hint })
@@ -889,11 +889,14 @@ mod tests {
     }
 
     #[test]
-    fn syslog_is_not_an_input_and_cannot_choose_its_file() {
+    fn syslog_is_not_an_input_reads_with_a_cursor_and_cannot_write_a_file() {
         let mut fake = Fake::default();
         let code = r#"
             syslog("start", {process: ["Preferences"], level: "info"});
-            tap("일반"); tap("정보");
+            tap("일반");
+            const page = syslog("read", {after: 0, grep: "row", max: 5});
+            tap("정보");
+            syslog("read", {after: page.cursor});
             const done = syslog("stop", {grep: "row", max: 5});
             let refused = null;
             try { syslog("start", {output: "/tmp/elsewhere.jsonl"}); } catch (e) { refused = e.code; }
@@ -903,8 +906,11 @@ mod tests {
         let out = res.unwrap();
         let asked: Vec<(&str, &Value)> = fake.asked.iter().map(|(c, a)| (c.as_str(), a)).collect();
         assert_eq!(asked[0], ("syslog", &json!({"process": ["Preferences"], "level": "info", "action": "start"})));
-        assert_eq!(asked[3], ("syslog", &json!({"grep": "row", "max": 5, "action": "stop"})));
-        assert_eq!(asked.len(), 4, "the refused start never reached the phone");
+        assert_eq!(asked[2], ("syslog", &json!({"after": 0, "grep": "row", "max": 5, "action": "read"})));
+        assert_eq!(asked[4].0, "syslog");
+        assert_eq!(asked[4].1["action"], "read");
+        assert_eq!(asked[5], ("syslog", &json!({"grep": "row", "max": 5, "action": "stop"})));
+        assert_eq!(asked.len(), 6, "the refused start never reached the phone");
         assert_eq!(out["outputs"]["refused"], "invalid_argument");
         assert_eq!(out["inputs_sent"], 2);
     }

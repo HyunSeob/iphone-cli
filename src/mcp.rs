@@ -18,7 +18,7 @@ const SCRIPT_DOC: &str = "Run JavaScript that drives the phone, in one call: loo
 The commands are functions that return what the tool of the same name returns: read(opts), find(selector), tap(target, opts), swipe(direction | {from, to}, opts), \
 pinch(direction | {scale, rotate, at}, opts), scroll(direction, {until, max}), type(text, {clear, submit}), key(name), button(name), launch(app, {restart, arguments, environment}), apps(). Also waitFor(selector, {timeout_ms}), \
 readField({selector, take, regex}) → text, readList({row, columns, group, stop_below, max_scrolls}) → {rows, scrolls, ended}, sleep(ms), log(…), output(key, value). \
-syslog(\"start\" | \"stop\" | \"status\", {process, pid, level, grep, max}) captures the phone's log as iph_syslog does; a script cannot choose the file. \
+syslog(\"start\" | \"read\" | \"stop\" | \"status\", {process, pid, level, after, grep, max}) captures the phone's log as iph_syslog does and returns what it returns; a script cannot write a file. \
 tap(target) waits up to 5 s for a selector to appear and hold still; tap([a, b, c]) presses a keypad without re-reading. \
 A call that fails throws an Error with .code, .outcome, .hint and .result (the full result object); uncaught, it ends the script and the result says which call and line. \
 After a call whose outcome is \"unknown\" the script is stopped and cannot go on. \
@@ -171,18 +171,24 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "iph_syslog",
-            "Capture the phone's log to a JSON Lines file while other calls run, to check what an app logged after a tap. \
-             \"start\" (one capture at a time), \"stop\" (ends it; with grep or max it returns the latest matching entries), \"status\". \
-             Filter with process (executable names such as Preferences; survives app restarts) or pid; unfiltered over Wi-Fi it is a lot of data.",
+            "Capture the phone's log in the background while other calls run, to check what an app logged after a tap. \
+             \"start\" (one capture at a time; stop an ended one before starting again) keeps the entries in a buffer in memory, newest last, each with a seq; \
+             \"read\" returns the entries newer than `after` (the `cursor` of the previous read) without stopping the capture, \
+             so the loop is start, tap, read, tap, read, stop; \"stop\" ends it (with grep or max it returns the latest matching entries); \"status\". \
+             Filter with process (executable names such as Preferences; survives app restarts) or pid; unfiltered over Wi-Fi it is thousands of entries a second, \
+             and the buffer keeps the last 100,000. A read says how many entries were `dropped` before it could get them.",
             json!({
-                "action": { "type": "string", "enum": ["start", "stop", "status"] },
+                "action": { "type": "string", "enum": ["start", "read", "stop", "status"] },
                 "process": { "type": "array", "items": { "type": "string" }, "description": "start: keep only these executables." },
                 "pid": { "type": "integer", "description": "start: keep only this pid (filtered on the phone)." },
                 "level": { "type": "string", "enum": ["debug", "info", "notice", "error", "fault"], "description": "start: lowest level kept." },
-                "output": { "type": "string", "description": "start: absolute path of the file (default: in iph's state directory)." },
-                "max_mb": { "type": "integer", "description": "start: move the file to <file>.1 at this size in MiB (1 to 4096, default 64)." },
-                "grep": { "type": "string", "description": "stop: regular expression matched against each message." },
-                "max": { "type": "integer", "description": "stop: most entries returned, the latest (default 50, at most 1000)." },
+                "buffer_entries": { "type": "integer", "description": "start: most entries the buffer holds, 1 to 1000000 (default 100000); the oldest are dropped." },
+                "buffer_mb": { "type": "integer", "description": "start: most memory the buffer takes in MiB, 1 to 1024 (default 64)." },
+                "output": { "type": "string", "description": "start: absolute path of a JSON Lines file that also gets every kept entry (whole messages). Without it nothing is written to disk." },
+                "max_mb": { "type": "integer", "description": "start, with output: move the file to <file>.1 at this size in MiB, 1 to 4096 (default 64)." },
+                "after": { "type": "integer", "description": "read: only entries after this seq; pass the previous read's cursor. Omit for the oldest the buffer holds." },
+                "grep": { "type": "string", "description": "read, stop: regular expression matched against each message." },
+                "max": { "type": "integer", "description": "read: most entries returned, the oldest first. stop: most entries returned, the latest. Default 50, at most 1000." },
             }),
             &["action"],
         ),
@@ -387,6 +393,17 @@ mod tests {
         let props = &launch["inputSchema"]["properties"];
         assert_eq!(props["arguments"]["items"]["type"], "string");
         assert_eq!(props["environment"]["additionalProperties"]["type"], "string");
+    }
+
+    #[test]
+    fn syslog_offers_read_with_a_cursor_and_a_file_only_on_request() {
+        let tool = tools().into_iter().find(|t| t["name"] == "iph_syslog").unwrap();
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert_eq!(props["action"]["enum"], json!(["start", "read", "stop", "status"]));
+        for key in ["after", "grep", "max", "output", "max_mb", "buffer_entries", "buffer_mb", "process", "pid", "level"] {
+            assert!(props.contains_key(key), "missing {key}");
+        }
+        assert_eq!(tool["inputSchema"]["required"], json!(["action"]));
     }
 
     #[test]

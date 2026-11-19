@@ -188,7 +188,7 @@ enum Cmd {
     },
     /// Do Not Disturb on the phone: on, off (back to the Focus that was on), status.
     Dnd { action: String },
-    /// Write the phone's log to a JSON Lines file while a test runs: start, stop, status.
+    /// Capture the phone's log while a test runs and read it back: start, read, stop, status.
     Syslog {
         action: String,
         /// start: keep only this process, by executable name (Settings is Preferences). Repeatable.
@@ -200,16 +200,25 @@ enum Cmd {
         /// start: lowest level kept: debug, info, notice, error, fault.
         #[arg(long)]
         level: Option<String>,
-        /// start: the file to write (default: <udid>.syslog.jsonl in the state directory).
+        /// start: also write the kept entries to this JSON Lines file. Without it nothing is written to disk.
         #[arg(short, long)]
         output: Option<String>,
-        /// start: move the file to <file>.1 when it reaches this size in MiB (1 to 4096, default 64).
+        /// start, with -o: move the file to <file>.1 when it reaches this size in MiB (1 to 4096, default 64).
         #[arg(long)]
         max_mb: Option<u64>,
-        /// stop: return the entries whose message matches this regular expression.
+        /// start: most entries the buffer holds (1 to 1000000, default 100000). The oldest are dropped.
+        #[arg(long)]
+        buffer_entries: Option<u64>,
+        /// start: most memory the buffer takes in MiB (1 to 1024, default 64).
+        #[arg(long)]
+        buffer_mb: Option<u64>,
+        /// read: only entries after this seq: the `cursor` of the previous read (default: from the oldest kept).
+        #[arg(long)]
+        after: Option<u64>,
+        /// read, stop: only entries whose message matches this regular expression.
         #[arg(long)]
         grep: Option<String>,
-        /// stop: most entries to return, the latest ones (default 50, at most 1000).
+        /// read: most entries returned, the oldest first. stop: most entries returned, the latest (default 50, at most 1000).
         #[arg(long)]
         max: Option<u64>,
     },
@@ -420,13 +429,14 @@ async fn run(cli: Cli) -> i32 {
         Cmd::Key { key } => ("key", json!({ "key": key })),
         Cmd::Button { button } => ("button", json!({ "button": button })),
         Cmd::Dnd { action } => ("dnd", json!({ "action": action })),
-        Cmd::Syslog { action, process, pid, level, output, max_mb, grep, max } => {
+        Cmd::Syslog { action, process, pid, level, output, max_mb, buffer_entries, buffer_mb, after, grep, max } => {
             // The daemon writes the file, so the path must not depend on its cwd.
             let output = output.map(|o| std::path::absolute(&o).map(|p| p.display().to_string()).unwrap_or(o));
             let process = (!process.is_empty()).then_some(process);
             ("syslog", json!({
                 "action": action, "process": process, "pid": pid, "level": level, "output": output,
-                "max_mb": max_mb, "grep": grep, "max": max,
+                "max_mb": max_mb, "buffer_entries": buffer_entries, "buffer_mb": buffer_mb,
+                "after": after, "grep": grep, "max": max,
             }))
         }
         Cmd::Launch { app, restart, env, arguments } => match launch_args(&app, restart, &env, &arguments) {
@@ -527,6 +537,27 @@ mod tests {
         let v = launch_args("a", false, &strings(&["TZ=UTC", "TOKEN=a=b", "EMPTY="]), &strings(&["-k", "v"])).unwrap();
         assert_eq!(v["environment"], json!({"TZ": "UTC", "TOKEN": "a=b", "EMPTY": ""}));
         assert_eq!(v["arguments"], json!(["-k", "v"]));
+    }
+
+    #[test]
+    fn syslog_flags_reach_the_command() {
+        use clap::Parser;
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("iph").chain(args.iter().copied())).unwrap();
+        let Cmd::Syslog { action, after, grep, max, .. } =
+            parse(&["syslog", "read", "--after", "120", "--grep", "row", "--max", "5"]).command
+        else {
+            panic!("syslog read")
+        };
+        assert_eq!((action.as_str(), after, grep.as_deref(), max), ("read", Some(120), Some("row"), Some(5)));
+        let Cmd::Syslog { process, output, max_mb, buffer_entries, buffer_mb, .. } = parse(&[
+            "syslog", "start", "--process", "A", "--process", "B", "-o", "cap.jsonl", "--max-mb", "8",
+            "--buffer-entries", "500", "--buffer-mb", "2",
+        ])
+        .command
+        else {
+            panic!("syslog start")
+        };
+        assert_eq!((process, output.as_deref(), max_mb, buffer_entries, buffer_mb), (strings(&["A", "B"]), Some("cap.jsonl"), Some(8), Some(500), Some(2)));
     }
 
     #[test]

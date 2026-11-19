@@ -156,7 +156,7 @@ Every command prints JSON; add `--human` for people. The device is chosen by `--
 | `iph run <name> [--arg k=v]` / `iph scripts` | Run a saved script, list saved scripts |
 | `iph mcp [--tools a,b]` | MCP server on stdio |
 | `iph dnd <on\|off\|status>` | Turn Do Not Disturb on, put the earlier Focus back, or show the current state |
-| `iph syslog <start\|stop\|status> [--process name] [--pid N] [--level L] [-o file] [--max-mb N] [--grep RE] [--max N]` | Write the phone's log to a file while other commands run; `stop` can return the latest matching entries. See [Phone log](#phone-log) |
+| `iph syslog <start\|read\|stop\|status> [--process name] [--pid N] [--level L] [--after SEQ] [--grep RE] [--max N] [-o file]` | Capture the phone's log in memory while other commands run; `read` returns what is new without stopping it, `stop` can return the latest matching entries. See [Phone log](#phone-log) |
 | `iph stop` | Stop the resident process for this phone |
 
 ### Selectors
@@ -239,24 +239,33 @@ iph does not judge what it presses. Pay, send and order buttons are pressed like
 
 ### Phone log
 
-`iph syslog start` writes what the phone logs to a JSON Lines file while taps, reads and scripts go on as usual. `iph syslog stop` ends it, so a test or an agent can check what an app logged after a tap. No `sudo log collect` on the Mac is needed.
+`iph syslog start` collects what the phone logs, in a buffer inside the resident process, while taps, reads and scripts go on as usual. `iph syslog read` returns what arrived since the last read without stopping the capture, so a test or an agent can check what an app logged after each tap. No `sudo log collect` on the Mac is needed.
 
 ```sh
 iph syslog start --process Preferences        # Settings' executable name
 iph launch com.apple.Preferences --restart
 iph tap "Battery"
-iph syslog stop --grep "battery" --max 20     # the 20 latest entries whose message matches
+iph syslog read --grep "battery"              # what was logged since start; the result has "cursor": 12
+iph tap "General"
+iph syslog read --after 12 --grep "general"   # only what is newer than the last read
+iph syslog stop                               # or: stop --grep "general" --max 20
 ```
 
-- **The file:** `~/Library/Application Support/iph/<udid>.syslog.jsonl` (readable by you only), or `-o <file>`. Each entry is one line: `time` (UTC), `pid`, `process`, `sender`, `level`, `subsystem`, `category`, `message`. A capture begins with a `{"event": "start", …}` line and finishes with `{"event": "end", "reason": …}`. A file without an `end` line was cut off by a killed resident process. Starting again empties the file once the phone has started sending; a `start` that fails leaves it as it was.
+- **The buffer:** kept entries go into a ring buffer in memory, at most 100,000 entries and 64 MiB (`--buffer-entries`, `--buffer-mb`); the oldest are dropped first. Each entry gets a `seq`: 1 for the first of a capture, one more for each after it. Nothing is written to disk unless you ask with `-o`. The buffer lives in the resident process, so it goes with the capture when `iph stop` ends it, a newer build replaces it, or it exits after its idle time. `status` shows how full it is under `buffer` (`entries`, `bytes`, `oldest_seq`, `newest_seq`, `evicted`).
+- **`read`:** returns the entries newer than `--after SEQ` whose message matches `--grep` (a regular expression), oldest first, at most `--max` (50 by default, at most 1000). Each message is cut to 500 characters (`message_cut`; `-o` keeps the whole message). Without `--after` it starts at the oldest entry the buffer still holds. The result has `entries`, `count`, `cursor`, `more`, `dropped` and `state`, and `ended_reason` once the capture has ended.
+  - `cursor`: pass it as the next `--after`. It is the last entry returned when `--max` cut the page short, and the newest `seq` when the whole buffer was looked through, even if nothing matched. So a loop never reads an entry twice and never skips one that is still in the buffer. A cursor belongs to the capture that gave it: seqs start again at 1 with each capture, so after a new `start` read without `--after`.
+  - `more`: `true` when `--max` cut the page short and another matching entry is already waiting.
+  - `dropped`: entries newer than `--after` that were pushed out of the buffer before this read. Anything but 0 means entries were lost; read more often or filter.
+  - A capture that ended (a dropped connection) can still be read until you `stop` it.
+- **The file (optional):** `-o <file>` also writes every kept entry to a JSON Lines file with its whole message, readable by you only: a `{"event": "start", …}` line, one line per entry (`seq`, `time` (UTC), `pid`, `process`, `sender`, `level`, `subsystem`, `category`, `message`) and a final `{"event": "end", "reason": …}` line. A file without an `end` line was cut off by a killed resident process. At `--max-mb` MiB (1 to 4096, 64 by default; it needs `-o`) the file moves to `<file>.1`, replacing the previous one (the `start` line goes with it). Starting again empties the file once the phone has started sending; a `start` that fails leaves it as it was.
 - **Filters:** `--process` keeps entries by executable name, exactly (repeatable). It keeps matching across app restarts. Settings is `Preferences`; for another app, start without a filter and look at the `process` field. `--level` drops anything below debug, info, notice, error or fault. `--pid` makes the phone send only that process's entries.
-- **Volume:** unfiltered over Wi-Fi it is a lot. In one 60 s idle run the phone sent about 4,800 entries/s, 1.4 MB/s. At `--max-mb` MiB (1 to 4096, 64 by default) the file moves to `<file>.1`, replacing the previous one (the `start` line goes with it), so an unfiltered capture keeps roughly the last minute or two. Filter with `--process` for anything longer.
+- **Volume:** unfiltered over Wi-Fi it is a lot. In one 60 s idle run the phone sent about 4,800 entries/s, 1.4 MB/s. At that rate the default buffer holds about 20 s (100,000 entries), so read often or filter with `--process` for anything longer. An entry of about 290 B as JSON weighs about 430 B in memory, so a full default buffer takes about 41 MiB; the 64 MiB limit applies when messages run long.
 - **Cost to other commands:** with an unfiltered capture running, the median tap and the median read each took under 10% longer (10 taps and 5 reads each way, one run).
-- **`stop`:** returns `seen` (entries the phone sent), `kept` (written), `rotations` and why it ended. With `--grep` (a regular expression on the message) or `--max`, it also returns up to `--max` of the latest matching entries (50 by default, at most 1000), each message cut to 500 characters, and `matched`, the number that matched in all.
-- **What ends a capture:** `stop`, a dropped connection, iph rebuilding its connections (after a command times out or the phone stops answering), `iph stop`, a newer build of iph replacing the resident process, or the resident process exiting after its idle time (a capture does not keep it alive). The `end` line and `status` say which. A capture is not restarted by itself, so a gap in the log is never hidden. One capture runs at a time; a second `start` fails with `capture_running`.
-- **After a dropped connection** the phone sends nothing to the next capture for about 20 to 30 s. `status` says so in a `hint` while nothing has arrived.
+- **`stop`:** returns `seen` (entries the phone sent), `kept` (put in the buffer), `buffer` and why it ended, and with `-o` also `rotations` and `path`. With `--grep` or `--max` it also returns `matched`, the number of entries in the buffer that matched, and `entries`, the latest `--max` of them, oldest first (50 by default, at most 1000, cut like `read`'s). The buffer is gone after `stop`, so read what you need first.
+- **What ends a capture:** `stop`, a dropped connection, iph rebuilding its connections (after a command times out or the phone stops answering), `iph stop`, a newer build of iph replacing the resident process, or the resident process exiting after its idle time (a capture does not keep it alive). The `end` line (with `-o`) and `status` say which. A capture is not restarted by itself, so a gap in the log is never hidden. One capture runs at a time: a second `start` fails with `capture_running`, or with `capture_ended` while an ended capture waits to be read; `stop` it first.
+- **After a dropped connection** the phone sends nothing to the next capture for about 20 to 30 s. `status` and `read` say so in a `hint` while nothing has arrived.
 - **Private values:** values an app marks private in its log calls arrive as `<private>`, as in Console. In one app's launch, about a fifth of its entries carried one.
-- Also in scripts as `syslog(action, opts)` and over MCP as `iph_syslog`. A script cannot choose the file. Not in `batch`: a capture outlives the call that started it.
+- Also in scripts as `syslog(action, opts)` and over MCP as `iph_syslog`. A script cannot write a file. Not in `batch`: a capture outlives the call that started it.
 
 ## Scripts
 
@@ -300,7 +309,7 @@ iph scripts                            # list saved scripts
 | `readField({selector, take, regex})` | One value, as text. `take`: `value` (default), `label`, `identifier`, `text` |
 | `readList({row, columns, key, group, stop_below, until, max_scrolls, limit})` | Collect a list while scrolling, each row once; returns `{rows, scrolls, ended}` |
 | `sleep(ms)` · `log(…)` · `output(k, v)` | Wait, note, add a value to the result |
-| `syslog(action, {process, pid, level, grep, max})` | `iph syslog` without `-o`: the file stays in iph's state directory. Not counted in `inputs_sent` |
+| `syslog(action, {process, pid, level, after, grep, max})` | `iph syslog`: the log stays in memory and `syslog("read", {after})` returns it, a script cannot write a file. Not counted in `inputs_sent` |
 
 - A function returns the JSON object the CLI command of the same name prints (`tap("일반").screen_changed`, `read().elements`). Selectors can be strings or objects.
 - **A failure is an exception.** A call that fails throws an `Error` carrying `e.code`, `e.outcome`, `e.hint` and `e.result` (the whole result object). Uncaught, it ends the script, and the result has `failed_call: {cmd, line, outcome}`, `reason: {code, message}` and `screen_summary`. Nothing is guessed. Use `try { … } catch (e) { … }` only around something that may legitimately be missing.
