@@ -10,9 +10,10 @@
 use std::{
     collections::VecDeque,
     fs::File,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
+    time::Duration,
 };
 
 use idevice::{
@@ -31,6 +32,11 @@ use crate::{
 };
 
 const DEFAULT_MAX_MB: u64 = 64;
+/// The most `max_mb` takes. A part is read back whole by whoever opens it.
+const MAX_FILE_MB: u64 = 4096;
+/// How long a written line may wait in the buffer before it is flushed.
+const FLUSH_EVERY: Duration = Duration::from_millis(250);
+const FILE_BUFFER: usize = 32 * 1024;
 const DEFAULT_MATCHES: u64 = 50;
 const MAX_MATCHES: u64 = 1000;
 /// Longest message a match returns; the file keeps the whole message.
@@ -247,14 +253,16 @@ pub fn parse(args: &Value, default_path: impl FnOnce() -> PathBuf) -> Res<Reques
                 }
             };
             let max_mb = number("max_mb")?.unwrap_or(DEFAULT_MAX_MB);
-            if max_mb == 0 {
-                return Err(Fail::invalid("`max_mb` must be at least 1"));
-            }
+            let max_bytes = (1..=MAX_FILE_MB)
+                .contains(&max_mb)
+                .then(|| max_mb.checked_mul(1024 * 1024))
+                .flatten()
+                .ok_or_else(|| Fail::invalid(format!("`max_mb` takes a whole number from 1 to {MAX_FILE_MB}")))?;
             Ok(Request::Start(Spec {
                 filter: Filter { processes, min_level },
                 pid,
                 path,
-                max_bytes: max_mb * 1024 * 1024,
+                max_bytes,
             }))
         }
         "stop" => {
@@ -283,7 +291,7 @@ pub fn rotated(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-fn open_private(path: &Path) -> std::io::Result<File> {
+fn open_private(path: &Path) -> std::io::Result<BufWriter<File>> {
     let file = paths::private_file().write(true).create(true).truncate(true).open(path)?;
     #[cfg(unix)]
     {
@@ -291,14 +299,20 @@ fn open_private(path: &Path) -> std::io::Result<File> {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    Ok(file)
+    Ok(BufWriter::with_capacity(FILE_BUFFER, file))
 }
 
 /// The file, kept under a size: once the next line would pass it, the file
 /// becomes `<file>.1` (replacing an older one) and a new file starts.
+///
+/// Writes are buffered. A line reaches the file when the buffer fills, on
+/// `flush` (the capture flushes every `FLUSH_EVERY` and when it ends) and
+/// before a rotation. The buffer only ever holds whole lines, so a killed
+/// process loses at most the last few, never half of one.
 pub struct Sink {
     path: PathBuf,
-    file: File,
+    /// `None` only after a rotation that could reopen neither part.
+    writer: Option<BufWriter<File>>,
     size: u64,
     cap: u64,
     pub rotations: u32,
@@ -306,27 +320,70 @@ pub struct Sink {
 
 impl Sink {
     pub fn create(path: &Path, cap: u64) -> std::io::Result<Self> {
-        let file = open_private(path)?;
+        let writer = open_private(path)?;
         // A part left from an earlier capture would read as this one's.
         let _ = std::fs::remove_file(rotated(path));
-        Ok(Self { path: path.to_path_buf(), file, size: 0, cap, rotations: 0 })
+        Ok(Self { path: path.to_path_buf(), writer: Some(writer), size: 0, cap, rotations: 0 })
     }
 
-    /// Write one line in a single call, so nothing that stops the writer
-    /// leaves half a line behind.
     pub fn write(&mut self, line: &str) -> std::io::Result<()> {
-        let bytes = format!("{line}\n");
-        let len = bytes.len() as u64;
-        if self.size > 0 && self.size + len > self.cap {
-            std::fs::rename(&self.path, rotated(&self.path))?;
-            self.file = open_private(&self.path)?;
-            self.size = 0;
-            self.rotations += 1;
+        if self.size > 0 && self.size + line.len() as u64 + 1 > self.cap {
+            self.rotate()?;
         }
-        self.file.write_all(bytes.as_bytes())?;
-        self.size += len;
+        self.append(line)
+    }
+
+    /// Without rotating first, for the `end` line: it goes right after the
+    /// last entry, even past the size or after a rotation that failed.
+    fn append(&mut self, line: &str) -> std::io::Result<()> {
+        let bytes = format!("{line}\n");
+        self.writer.as_mut().ok_or_else(Self::closed)?.write_all(bytes.as_bytes())?;
+        self.size += bytes.len() as u64;
         Ok(())
     }
+
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.as_mut().map_or(Ok(()), |w| w.flush())
+    }
+
+    /// On failure the file that holds the last entry stays open, so the
+    /// `end` line still lands after it.
+    fn rotate(&mut self) -> std::io::Result<()> {
+        // The handle goes first: Windows renames neither an open file nor
+        // over an existing one.
+        if let Some(writer) = self.writer.as_mut() {
+            writer.flush()?;
+        }
+        self.writer = None;
+        let previous = rotated(&self.path);
+        let renamed = match std::fs::remove_file(&previous) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => std::fs::rename(&self.path, &previous),
+        };
+        if let Err(e) = renamed {
+            self.writer = reopen(&self.path);
+            return Err(e);
+        }
+        match open_private(&self.path) {
+            Ok(writer) => self.writer = Some(writer),
+            Err(e) => {
+                self.writer = reopen(&previous);
+                return Err(e);
+            }
+        }
+        self.size = 0;
+        self.rotations += 1;
+        Ok(())
+    }
+
+    fn closed() -> std::io::Error {
+        std::io::Error::other("the file could not be reopened after a rotation")
+    }
+}
+
+fn reopen(path: &Path) -> Option<BufWriter<File>> {
+    let file = std::fs::OpenOptions::new().append(true).open(path).ok()?;
+    Some(BufWriter::with_capacity(FILE_BUFFER, file))
 }
 
 /// What the reading task and the session share.
@@ -371,8 +428,24 @@ impl Live {
             "unparsed": self.unparsed,
             "rotations": self.sink.rotations,
         });
-        let _ = self.sink.write(&line.to_string());
+        // The end line is what tells a reader the capture finished.
+        let _ = self.sink.append(&line.to_string()).and_then(|()| self.sink.flush());
         self.ended = Some(reason.to_string());
+    }
+}
+
+/// Puts buffered lines in the file while the stream is quiet. Not part of
+/// the reading task: that one must never be interrupted between two reads.
+async fn flusher(live: Weak<Mutex<Live>>) {
+    let mut tick = tokio::time::interval(FLUSH_EVERY);
+    loop {
+        tick.tick().await;
+        let Some(live) = live.upgrade() else { return };
+        let mut live = live.lock().unwrap();
+        if live.ended.is_some() {
+            return;
+        }
+        let _ = live.sink.flush();
     }
 }
 
@@ -409,6 +482,7 @@ pub struct Capture {
     started: std::time::Instant,
     live: Arc<Mutex<Live>>,
     task: tokio::task::JoinHandle<()>,
+    flusher: tokio::task::JoinHandle<()>,
     reset: Reset,
 }
 
@@ -419,6 +493,7 @@ impl Capture {
     pub fn end(&self, reason: &str) {
         self.reset.now();
         self.task.abort();
+        self.flusher.abort();
         self.live.lock().unwrap().end(reason);
     }
 
@@ -556,8 +631,9 @@ impl Session {
                 }
                 let live = Arc::new(Mutex::new(live));
                 let task = tokio::task::spawn_local(pump(stream, live.clone()));
+                let flusher = tokio::task::spawn_local(flusher(Arc::downgrade(&live)));
                 let started = std::time::Instant::now();
-                let capture = Capture { spec, started_at, started, live, task, reset };
+                let capture = Capture { spec, started_at, started, live, task, flusher, reset };
                 let report = capture.report();
                 self.capture = Some(capture);
                 Ok(report)
@@ -709,22 +785,79 @@ mod tests {
         let dir = temp_dir("rotate");
         let path = dir.join("cap.jsonl");
         std::fs::write(rotated(&path), "left from before\n").unwrap();
-        let mut sink = Sink::create(&path, 1000).unwrap();
+        let line = |i: u32| json!({ "i": format!("{i:02}"), "message": "x".repeat(80) }).to_string();
+        let part = 10 * (line(0).len() as u64 + 1);
+        let mut sink = Sink::create(&path, part).unwrap();
         assert!(!rotated(&path).exists(), "an earlier part is removed at start");
-        let line = json!({ "message": "x".repeat(80) }).to_string();
-        for _ in 0..30 {
-            sink.write(&line).unwrap();
+        // Ten lines fit in a part, so 25 lines rotate twice and the second
+        // rotation renames over the `.1` the first one made.
+        for i in 0..25 {
+            sink.write(&line(i)).unwrap();
         }
-        assert!(sink.rotations >= 2);
+        sink.flush().unwrap();
+        assert_eq!(sink.rotations, 2);
+        let indexes = |p: &Path| lines(p).iter().map(|v| v["i"].as_str().unwrap().parse().unwrap()).collect::<Vec<u32>>();
+        assert_eq!(indexes(&rotated(&path)), (10..20).collect::<Vec<_>>(), "only the last full part is kept");
+        assert_eq!(indexes(&path), (20..25).collect::<Vec<_>>());
         for p in [&path, &rotated(&path)] {
-            assert!(std::fs::metadata(p).unwrap().len() <= 1000);
+            assert!(std::fs::metadata(p).unwrap().len() <= part);
             assert!(lines(p).iter().all(|v| v["message"].as_str().unwrap().len() == 80));
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(std::fs::metadata(rotated(&path)).unwrap().permissions().mode() & 0o777, 0o600);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rotation_that_fails_still_ends_the_file_with_the_end_line() {
+        let dir = temp_dir("rotate-fail");
+        let path = dir.join("cap.jsonl");
+        let mut sink = Sink::create(&path, 200).unwrap();
+        // A directory where the previous part goes: the rotation cannot clear it.
+        std::fs::create_dir_all(rotated(&path).join("x")).unwrap();
+        sink.write(&json!({ "message": "a".repeat(100) }).to_string()).unwrap();
+        assert!(sink.write(&json!({ "message": "b".repeat(100) }).to_string()).is_err());
+        let mut live = Live::new(sink, Filter::default());
+        live.end("cannot write the file");
+        let got = lines(&path);
+        assert_eq!(got.len(), 2, "the entry before the failed rotation, then the end line");
+        assert_eq!(got[1]["event"], "end");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rotation_flushes_what_is_buffered_before_it_moves_the_file() {
+        let dir = temp_dir("rotate-flush");
+        let path = dir.join("cap.jsonl");
+        let mut sink = Sink::create(&path, 200).unwrap();
+        sink.write(&json!({ "message": "a".repeat(100) }).to_string()).unwrap();
+        // Nothing was flushed yet; the rotation must not lose this line.
+        sink.write(&json!({ "message": "b".repeat(100) }).to_string()).unwrap();
+        assert_eq!(sink.rotations, 1);
+        sink.flush().unwrap();
+        assert_eq!(lines(&rotated(&path))[0]["message"], "a".repeat(100));
+        assert_eq!(lines(&path)[0]["message"], "b".repeat(100));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_flusher_puts_a_quiet_capture_in_the_file() {
+        let dir = temp_dir("flusher");
+        let path = dir.join("cap.jsonl");
+        let live = Arc::new(Mutex::new(Live::new(Sink::create(&path, 1 << 20).unwrap(), Filter::default())));
+        live.lock().unwrap().take(&entry("Papago", Level::Info, "quiet")).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        runtime.block_on(async {
+            let task = tokio::spawn(flusher(Arc::downgrade(&live)));
+            tokio::time::sleep(FLUSH_EVERY * 4).await;
+            assert_eq!(lines(&path)[0]["message"], "quiet", "written without an explicit flush");
+            live.lock().unwrap().end("stopped");
+            tokio::time::timeout(FLUSH_EVERY * 4, task).await.expect("the flusher stops once the capture ended").unwrap();
+        });
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -764,6 +897,8 @@ mod tests {
         b.write(&entry("Papago", Level::Info, "miss").line()).unwrap();
         b.write(&entry("Papago", Level::Info, &format!("hit 3 {}", "y".repeat(900))).line()).unwrap();
         b.write(r#"{"event":"end","reason":"hit"}"#).unwrap();
+        a.flush().unwrap();
+        b.flush().unwrap();
         let files = [older, newer];
         let re = Regex::new("^hit").unwrap();
         let (found, matched) = search(&files, Some(&re), 2);
@@ -781,6 +916,10 @@ mod tests {
         parse(&args, || PathBuf::from("/state/u.syslog.jsonl"))
     }
 
+    fn absolute(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
     #[test]
     fn each_action_takes_only_its_own_arguments() {
         let Ok(Request::Start(spec)) = parsed(json!({
@@ -792,11 +931,16 @@ mod tests {
         assert_eq!(spec.filter.min_level, Some(Level::Notice));
         assert_eq!(spec.path, PathBuf::from("/state/u.syslog.jsonl"));
         assert_eq!(spec.max_bytes, 2 * 1024 * 1024);
-        let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "process": ["A", "B"], "pid": 7, "output": "/tmp/x.jsonl" })) else {
+        let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "max_mb": MAX_FILE_MB })) else {
+            panic!("the largest max_mb")
+        };
+        assert_eq!(spec.max_bytes, MAX_FILE_MB * 1024 * 1024);
+        let out = absolute("x.jsonl");
+        let Ok(Request::Start(spec)) = parsed(json!({ "action": "start", "process": ["A", "B"], "pid": 7, "output": out })) else {
             panic!("start with a list")
         };
         assert_eq!((spec.filter.processes.len(), spec.pid), (2, Some(7)));
-        assert_eq!(spec.path, PathBuf::from("/tmp/x.jsonl"));
+        assert_eq!(spec.path, out);
 
         assert!(matches!(parsed(json!({ "action": "stop" })), Ok(Request::Stop(None))));
         let Ok(Request::Stop(Some(q))) = parsed(json!({ "action": "stop", "grep": "a+", "max": 5000 })) else {
@@ -814,6 +958,8 @@ mod tests {
             json!({ "action": "start", "level": "loud" }),
             json!({ "action": "start", "process": "/Applications/Preferences.app/Preferences" }),
             json!({ "action": "start", "max_mb": 0 }),
+            json!({ "action": "start", "max_mb": MAX_FILE_MB + 1 }),
+            json!({ "action": "start", "max_mb": u64::MAX }),
             json!({ "action": "stop", "grep": "(" }),
         ] {
             let err = parsed(bad.clone()).expect_err(&bad.to_string());

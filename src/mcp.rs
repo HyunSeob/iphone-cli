@@ -180,7 +180,7 @@ fn tools() -> Vec<Value> {
                 "pid": { "type": "integer", "description": "start: keep only this pid (filtered on the phone)." },
                 "level": { "type": "string", "enum": ["debug", "info", "notice", "error", "fault"], "description": "start: lowest level kept." },
                 "output": { "type": "string", "description": "start: absolute path of the file (default: in iph's state directory)." },
-                "max_mb": { "type": "integer", "description": "start: move the file to <file>.1 at this size (default 64)." },
+                "max_mb": { "type": "integer", "description": "start: move the file to <file>.1 at this size in MiB (1 to 4096, default 64)." },
                 "grep": { "type": "string", "description": "stop: regular expression matched against each message." },
                 "max": { "type": "integer", "description": "stop: most entries returned, the latest (default 50, at most 1000)." },
             }),

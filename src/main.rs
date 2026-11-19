@@ -203,7 +203,7 @@ enum Cmd {
         /// start: the file to write (default: <udid>.syslog.jsonl in the state directory).
         #[arg(short, long)]
         output: Option<String>,
-        /// start: move the file to <file>.1 when it reaches this size (default 64).
+        /// start: move the file to <file>.1 when it reaches this size in MiB (1 to 4096, default 64).
         #[arg(long)]
         max_mb: Option<u64>,
         /// stop: return the entries whose message matches this regular expression.
