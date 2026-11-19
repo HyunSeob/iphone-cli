@@ -6,6 +6,7 @@
   <title>iphone-cli (iph) — Control a Real iPhone from AI Agents via Accessibility Tree</title>
   <meta name="description" content="Single-binary Rust CLI and MCP server that lets AI agents (Claude Code, Codex) read and operate any app on a real iPhone (iOS 27+) via the accessibility tree. No Xcode, no WebDriverAgent, no phone app. Works on macOS and Windows over USB or Wi-Fi.">
   <meta name="keywords" content="iphone-cli, iph, iPhone CLI, iOS automation, MCP server, Claude Code, Codex, AI agent, accessibility tree, WebDriverAgent alternative, no Xcode, iOS 27, Rust">
+  <meta name="theme-color" content="#090a0f">
   <link rel="canonical" href="https://hyunseob.github.io/iphone-cli/">
   <link rel="alternate" type="text/plain" title="LLMs Index" href="https://hyunseob.github.io/iphone-cli/llms.txt">
   <link rel="alternate" type="text/plain" title="LLMs Full Reference" href="https://hyunseob.github.io/iphone-cli/llms-full.txt">
@@ -19,6 +20,10 @@
   <meta name="twitter:title" content="iphone-cli (iph) — Control a Real iPhone from AI Agents">
   <meta name="twitter:description" content="Accessibility tree CLI + MCP server for real iPhones (iOS 27+). No Xcode, no WebDriverAgent, works on macOS &amp; Windows.">
   <meta name="twitter:image" content="https://hyunseob.github.io/iphone-cli/demo.gif">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
   <script type="application/ld+json">
   {
@@ -99,402 +104,1170 @@
 
   <style>
     :root {
-      --bg: #ffffff;
-      --fg: #111827;
-      --muted: #4b5563;
-      --border: #e5e7eb;
-      --surface: #f9fafb;
-      --code-bg: #0f172a;
-      --code-fg: #e2e8f0;
-      --accent: #2563eb;
-      --accent-soft: #eff6ff;
-      --ok: #15803d;
+      --bg: #090a0f;
+      --bg-elevated: #11131b;
+      --bg-surface: rgba(255, 255, 255, 0.03);
+      --bg-surface-hover: rgba(255, 255, 255, 0.055);
+      --border: rgba(255, 255, 255, 0.085);
+      --border-strong: rgba(255, 255, 255, 0.16);
+      --fg: #f3f4f6;
+      --fg-muted: #989fae;
+      --fg-dim: #687082;
+      --amber: #ff9f0a;
+      --amber-soft: rgba(255, 159, 10, 0.12);
+      --amber-border: rgba(255, 159, 10, 0.34);
+      --green: #30d158;
+      --green-soft: rgba(48, 209, 88, 0.12);
+      --red: #ff453a;
+      --red-soft: rgba(255, 69, 58, 0.12);
+      --blue: #64d2ff;
+      --code-bg: #0d0f17;
+      --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
+      --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      --radius: 14px;
+      --max-w: 1080px;
     }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #0b0f17;
-        --fg: #f3f4f6;
-        --muted: #9ca3af;
-        --border: #1f2937;
-        --surface: #111827;
-        --code-bg: #030712;
-        --code-fg: #e5e7eb;
-        --accent: #60a5fa;
-        --accent-soft: #172554;
-        --ok: #4ade80;
-      }
-    }
+
     * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
     body {
       margin: 0;
-      background: var(--bg);
+      background-color: var(--bg);
       color: var(--fg);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      font-family: var(--font-sans);
       line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+      background-image:
+        radial-gradient(ellipse 75% 45% at 50% -10%, rgba(255, 159, 10, 0.12), transparent 65%),
+        radial-gradient(ellipse 50% 40% at 85% 15%, rgba(100, 210, 255, 0.06), transparent 60%);
     }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .container {
-      max-width: 920px;
-      margin: 0 auto;
-      padding: 2.5rem 1.25rem 4rem;
+
+    /* Subtle engineering dot grid */
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: radial-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+      background-size: 28px 28px;
+      mask-image: radial-gradient(ellipse 85% 65% at 50% 0%, #000 35%, transparent 90%);
+      -webkit-mask-image: radial-gradient(ellipse 85% 65% at 50% 0%, #000 35%, transparent 90%);
+      z-index: -1;
     }
-    header {
-      padding-bottom: 2rem;
+
+    a { color: inherit; text-decoration: none; }
+
+    /* Navbar */
+    .nav-wrap {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      background: rgba(9, 10, 15, 0.72);
       border-bottom: 1px solid var(--border);
     }
-    .badge-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      margin-bottom: 1rem;
-      font-size: 0.82rem;
-    }
-    .badge {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      padding: 0.2rem 0.6rem;
-      border-radius: 999px;
-      color: var(--muted);
-    }
-    h1 {
-      font-size: clamp(2rem, 4vw, 2.75rem);
-      line-height: 1.15;
-      margin: 0 0 0.75rem;
-      letter-spacing: -0.02em;
-    }
-    .lead {
-      font-size: 1.15rem;
-      color: var(--muted);
-      margin: 0 0 1.25rem;
-      max-width: 72ch;
-    }
-    .cta-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.75rem;
-      margin: 1.5rem 0;
-    }
-    .btn {
-      display: inline-block;
-      padding: 0.6rem 1.1rem;
-      border-radius: 8px;
-      font-weight: 600;
-      font-size: 0.95rem;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      color: var(--fg);
-    }
-    .btn.primary {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: #ffffff;
-    }
-    .btn:hover { opacity: 0.92; text-decoration: none; }
-    .demo {
-      margin-top: 1.75rem;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      overflow: hidden;
-      background: var(--surface);
-      text-align: center;
-    }
-    .demo img {
-      max-width: 100%;
-      height: auto;
-      display: block;
+    .nav {
+      max-width: var(--max-w);
       margin: 0 auto;
-    }
-    section {
-      margin-top: 2.75rem;
-    }
-    h2 {
-      font-size: 1.5rem;
-      margin: 0 0 0.9rem;
-      letter-spacing: -0.01em;
-    }
-    h3 {
-      font-size: 1.08rem;
-      margin: 1.25rem 0 0.45rem;
-    }
-    pre {
-      background: var(--code-bg);
-      color: var(--code-fg);
-      padding: 1rem 1.15rem;
-      border-radius: 10px;
-      overflow-x: auto;
-      font-size: 0.9rem;
-      line-height: 1.5;
-      border: 1px solid var(--border);
-    }
-    code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 0.9em;
-    }
-    p code, li code, td code {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      padding: 0.1rem 0.35rem;
-      border-radius: 5px;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      padding: 0.85rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       gap: 1rem;
     }
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 1.05rem 1.15rem;
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.6rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      font-size: 0.98rem;
     }
-    .card h3 { margin-top: 0; font-size: 1rem; }
-    .card p { margin: 0; color: var(--muted); font-size: 0.93rem; }
-    .table-wrap {
-      overflow-x: auto;
+    .brand-mark {
+      width: 26px;
+      height: 26px;
+      border-radius: 7px;
+      background: linear-gradient(145deg, #252836, #13151e);
+      border: 1px solid var(--border-strong);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.12);
+      display: grid;
+      place-items: center;
+      color: var(--amber);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 600;
+    }
+    .brand-sub {
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      color: var(--fg-dim);
+      font-weight: 400;
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
+      font-size: 0.88rem;
+      color: var(--fg-muted);
+    }
+    .nav-links a:hover { color: var(--fg); }
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+    .pill-link {
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      color: var(--fg-muted);
+      padding: 0.36rem 0.68rem;
+      border-radius: 999px;
       border: 1px solid var(--border);
-      border-radius: 10px;
+      background: var(--bg-surface);
+      transition: border-color 0.18s, color 0.18s, background 0.18s;
+    }
+    .pill-link:hover {
+      border-color: var(--amber-border);
+      color: var(--amber);
+      background: var(--amber-soft);
+    }
+    .nav-gh {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      font-size: 0.84rem;
+      font-weight: 500;
+      padding: 0.42rem 0.85rem;
+      border-radius: 8px;
+      background: #f3f4f6;
+      color: #090a0f;
+      transition: transform 0.15s, background 0.15s;
+    }
+    .nav-gh:hover { background: #ffffff; transform: translateY(-1px); }
+
+    /* Container */
+    .container {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      padding: 0 1.5rem;
+    }
+
+    /* Hero */
+    .hero {
+      padding: 4.5rem 0 3.5rem;
+      text-align: center;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.55rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--fg-muted);
+      padding: 0.35rem 0.85rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      margin-bottom: 1.5rem;
+    }
+    .eyebrow .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 10px var(--green);
+    }
+    .hero h1 {
+      font-size: clamp(2.4rem, 5.6vw, 4.15rem);
+      font-weight: 700;
+      line-height: 1.07;
+      letter-spacing: -0.04em;
+      margin: 0 auto 1.25rem;
+      max-width: 17ch;
+      background: linear-gradient(180deg, #ffffff 30%, #aeb5c4 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .hero h1 .accent {
+      background: linear-gradient(135deg, #ffd080 0%, #ff9f0a 55%, #ff6b00 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .hero-sub {
+      font-size: clamp(1.02rem, 1.8vw, 1.2rem);
+      color: var(--fg-muted);
+      max-width: 60ch;
+      margin: 0 auto 2rem;
+      line-height: 1.65;
+    }
+    .hero-sub strong {
+      color: var(--fg);
+      font-weight: 500;
+    }
+
+    /* Install Command Dock */
+    .install-dock {
+      max-width: 700px;
+      margin: 0 auto 1.5rem;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+      overflow: hidden;
+      text-align: left;
+    }
+    .install-tabs {
+      display: flex;
+      align-items: center;
+      gap: 0.2rem;
+      padding: 0.45rem 0.6rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.02);
+      overflow-x: auto;
+    }
+    .tab-btn {
+      appearance: none;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--fg-muted);
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      padding: 0.34rem 0.68rem;
+      border-radius: 7px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+    .tab-btn:hover { color: var(--fg); background: rgba(255,255,255,0.04); }
+    .tab-btn.active {
+      color: var(--amber);
+      background: var(--amber-soft);
+      border-color: var(--amber-border);
+    }
+    .install-body {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.9rem 1rem 0.9rem 1.15rem;
+    }
+    .install-cmd {
+      font-family: var(--font-mono);
+      font-size: 0.86rem;
+      color: var(--fg);
+      overflow-x: auto;
+      white-space: nowrap;
+      scrollbar-width: none;
+    }
+    .install-cmd::-webkit-scrollbar { display: none; }
+    .install-cmd .prompt { color: var(--green); margin-right: 0.5rem; user-select: none; }
+    .copy-btn {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.38rem;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      color: var(--fg-muted);
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.4rem 0.7rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .copy-btn:hover { color: var(--fg); border-color: var(--border-strong); background: rgba(255,255,255,0.09); }
+    .copy-btn.copied { color: var(--green); border-color: rgba(48, 209, 88, 0.4); background: var(--green-soft); }
+
+    .hero-links {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
+      gap: 1.25rem;
+      font-size: 0.85rem;
+      color: var(--fg-muted);
+      margin-bottom: 3rem;
+    }
+    .hero-links a {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      transition: color 0.15s;
+    }
+    .hero-links a:hover { color: var(--fg); }
+    .hero-links .sep { color: var(--fg-dim); }
+
+    /* Cinema Demo Stage */
+    .stage-wrap {
+      position: relative;
+      max-width: 960px;
+      margin: 0 auto;
+    }
+    .stage-glow {
+      position: absolute;
+      inset: -1px;
+      border-radius: 20px;
+      background: linear-gradient(135deg, rgba(255, 159, 10, 0.35), rgba(255, 255, 255, 0.08) 40%, rgba(100, 210, 255, 0.18));
+      filter: blur(0.5px);
+      z-index: 0;
+    }
+    .stage {
+      position: relative;
+      z-index: 1;
+      border-radius: 19px;
+      background: #101118;
+      padding: 0.75rem;
+      box-shadow: 0 32px 90px rgba(0, 0, 0, 0.7);
+      overflow: hidden;
+    }
+    .stage img {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 12px;
+    }
+    .stage-caption {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.75rem 0.5rem 0.15rem;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      color: var(--fg-dim);
+    }
+    .stage-caption span strong { color: var(--fg-muted); font-weight: 500; }
+
+    /* Section chrome */
+    section {
+      padding: 4.5rem 0;
+      border-top: 1px solid var(--border);
+    }
+    .section-head {
+      max-width: 660px;
+      margin-bottom: 2.5rem;
+    }
+    .section-kicker {
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--amber);
+      margin-bottom: 0.65rem;
+      display: block;
+    }
+    .section-head h2 {
+      font-size: clamp(1.65rem, 3.2vw, 2.35rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.15;
+      margin: 0 0 0.75rem;
+    }
+    .section-head p {
+      margin: 0;
+      color: var(--fg-muted);
+      font-size: 1.02rem;
+    }
+
+    /* Split Terminal + Outcomes */
+    .split {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 1.25rem;
+      align-items: stretch;
+    }
+    .terminal-card {
+      background: var(--code-bg);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+    }
+    .terminal-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.65rem 1rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.025);
+    }
+    .dots { display: flex; gap: 6px; }
+    .dots i {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: block;
+    }
+    .dots i:nth-child(1) { background: #ff5f56; }
+    .dots i:nth-child(2) { background: #ffbd2e; }
+    .dots i:nth-child(3) { background: #27c93f; }
+    .terminal-title {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--fg-dim);
+    }
+    .terminal-code {
+      margin: 0;
+      padding: 1.15rem 1.25rem;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.65;
+      overflow-x: auto;
+      color: #d6dce8;
+      flex: 1;
+    }
+    .t-prompt { color: var(--green); }
+    .t-cmd { color: #ffffff; font-weight: 500; }
+    .t-dim { color: #677087; }
+    .t-role { color: #7aa2f7; }
+    .t-str { color: #ffd080; }
+    .t-key { color: #7dcfff; }
+    .t-bool { color: var(--green); }
+    .t-num { color: #ff9f0a; }
+
+    .outcome-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 0.85rem;
+    }
+    .outcome-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.1rem 1.2rem;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .outcome-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.4rem;
+    }
+    .outcome-badge {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 0.18rem 0.55rem;
+      border-radius: 6px;
+    }
+    .outcome-badge.done { color: var(--green); background: var(--green-soft); border: 1px solid rgba(48, 209, 88, 0.3); }
+    .outcome-badge.not-sent { color: var(--amber); background: var(--amber-soft); border: 1px solid var(--amber-border); }
+    .outcome-badge.unknown { color: var(--red); background: var(--red-soft); border: 1px solid rgba(255, 69, 58, 0.32); }
+    .exit-code {
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      color: var(--fg-dim);
+    }
+    .outcome-card p {
+      margin: 0;
+      font-size: 0.88rem;
+      color: var(--fg-muted);
+      line-height: 1.5;
+    }
+
+    /* Bento Grid */
+    .bento {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 1rem;
+    }
+    .bento-card {
+      grid-column: span 2;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.4rem;
+      transition: border-color 0.2s, background 0.2s, transform 0.2s;
+      position: relative;
+      overflow: hidden;
+    }
+    .bento-card.wide { grid-column: span 3; }
+    .bento-card:hover {
+      border-color: var(--border-strong);
+      background: var(--bg-surface-hover);
+      transform: translateY(-2px);
+    }
+    .icon-box {
+      width: 36px;
+      height: 36px;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      display: grid;
+      place-items: center;
+      color: var(--amber);
+      margin-bottom: 1rem;
+    }
+    .bento-card h3 {
+      font-size: 1.04rem;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      margin: 0 0 0.45rem;
+    }
+    .bento-card p {
+      margin: 0;
+      font-size: 0.9rem;
+      color: var(--fg-muted);
+      line-height: 1.58;
+    }
+    .inline-code {
+      font-family: var(--font-mono);
+      font-size: 0.82em;
+      color: #e5e7eb;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border);
+      padding: 0.08rem 0.35rem;
+      border-radius: 5px;
+    }
+    .mini-code {
+      margin: 0.9rem 0 0;
+      padding: 0.75rem 0.9rem;
+      border-radius: 9px;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      line-height: 1.55;
+      color: #cfd6e6;
+      overflow-x: auto;
+    }
+
+    /* Comparison Table */
+    .table-shell {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      overflow-x: auto;
+      background: var(--bg-elevated);
     }
     table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.92rem;
+      font-size: 0.9rem;
+      min-width: 680px;
     }
-    th, td {
+    thead th {
       text-align: left;
-      padding: 0.7rem 0.85rem;
-      border-bottom: 1px solid var(--border);
-      vertical-align: top;
+      padding: 1rem 1.1rem;
+      font-weight: 600;
+      font-size: 0.86rem;
+      border-bottom: 1px solid var(--border-strong);
+      color: var(--fg-muted);
+      background: rgba(255, 255, 255, 0.02);
     }
-    th { background: var(--surface); font-weight: 600; }
-    tr:last-child td { border-bottom: none; }
-    .yes { color: var(--ok); font-weight: 600; }
-    details {
+    thead th.col-iph {
+      color: var(--fg);
+      background: rgba(255, 159, 10, 0.08);
+      border-bottom-color: var(--amber-border);
+    }
+    tbody td {
+      padding: 0.9rem 1.1rem;
+      border-bottom: 1px solid var(--border);
+      color: var(--fg-muted);
+      vertical-align: middle;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody td:first-child { color: var(--fg); font-weight: 500; }
+    tbody td.col-iph {
+      background: rgba(255, 159, 10, 0.04);
+      color: var(--fg);
+    }
+    .status-yes {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      color: var(--green);
+      font-weight: 500;
+    }
+    .status-no {
+      color: var(--fg-dim);
+    }
+
+    /* Architecture Pipeline */
+    .arch-flow {
+      display: grid;
+      grid-template-columns: 1fr auto 1.1fr auto 1.45fr;
+      gap: 0.75rem;
+      align-items: center;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+    }
+    .arch-col {
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+    }
+    .arch-node {
+      background: var(--bg-surface);
       border: 1px solid var(--border);
       border-radius: 10px;
-      padding: 0.85rem 1rem;
-      background: var(--surface);
-      margin-bottom: 0.75rem;
+      padding: 0.75rem 0.95rem;
+    }
+    .arch-node.highlight {
+      border-color: var(--amber-border);
+      background: var(--amber-soft);
+    }
+    .arch-node strong {
+      display: block;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      color: var(--fg);
+    }
+    .arch-node span {
+      display: block;
+      font-size: 0.78rem;
+      color: var(--fg-muted);
+      margin-top: 0.15rem;
+    }
+    .arch-arrow {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--fg-dim);
+      text-align: center;
+      padding: 0 0.25rem;
+    }
+    .arch-arrow .line {
+      display: block;
+      color: var(--amber);
+      font-size: 1rem;
+      line-height: 1;
+      margin-bottom: 0.2rem;
+    }
+    .arch-foot {
+      margin-top: 1rem;
+      font-size: 0.88rem;
+      color: var(--fg-muted);
+    }
+    .arch-foot a { color: var(--amber); }
+    .arch-foot a:hover { text-decoration: underline; }
+
+    /* FAQ */
+    .faq-list {
+      display: grid;
+      gap: 0.75rem;
+    }
+    details {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      transition: border-color 0.18s, background 0.18s;
+    }
+    details[open] {
+      border-color: var(--border-strong);
+      background: rgba(255, 255, 255, 0.04);
     }
     summary {
+      list-style: none;
       cursor: pointer;
+      padding: 1.1rem 1.25rem;
       font-weight: 600;
+      font-size: 0.98rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
     }
-    details p {
-      margin: 0.65rem 0 0;
-      color: var(--muted);
+    summary::-webkit-details-marker { display: none; }
+    summary .chev {
+      flex-shrink: 0;
+      color: var(--fg-dim);
+      transition: transform 0.2s, color 0.2s;
     }
+    details[open] summary .chev {
+      transform: rotate(180deg);
+      color: var(--amber);
+    }
+    details .faq-body {
+      padding: 0 1.25rem 1.15rem;
+      color: var(--fg-muted);
+      font-size: 0.93rem;
+      line-height: 1.65;
+    }
+
+    /* Footer */
     footer {
-      margin-top: 3.5rem;
-      padding-top: 1.5rem;
       border-top: 1px solid var(--border);
-      color: var(--muted);
-      font-size: 0.9rem;
+      padding: 2.5rem 0 3.5rem;
+      color: var(--fg-dim);
+      font-size: 0.85rem;
+    }
+    .footer-inner {
       display: flex;
       flex-wrap: wrap;
+      align-items: center;
       justify-content: space-between;
-      gap: 0.75rem;
+      gap: 1rem;
+    }
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1.25rem;
+    }
+    .footer-links a:hover { color: var(--fg); }
+
+    @media (max-width: 860px) {
+      .nav-links { display: none; }
+      .split { grid-template-columns: 1fr; }
+      .bento-card, .bento-card.wide { grid-column: span 6; }
+      .arch-flow { grid-template-columns: 1fr; }
+      .arch-arrow .line { transform: rotate(90deg); display: inline-block; }
     }
   </style>
 </head>
 <body>
-  <main class="container">
-    <header>
-      <div class="badge-row">
-        <span class="badge">100% Rust</span>
-        <span class="badge">macOS &amp; Windows</span>
-        <span class="badge">Real iPhone (iOS 27+)</span>
-        <span class="badge">CLI + MCP Server</span>
-        <span class="badge">MIT License</span>
+  <div class="nav-wrap">
+    <nav class="nav" aria-label="Primary">
+      <a class="brand" href="./">
+        <span class="brand-mark">iph</span>
+        <span>iphone-cli</span>
+        <span class="brand-sub">by HyunSeob</span>
+      </a>
+      <div class="nav-links">
+        <a href="#why">Features</a>
+        <a href="#compare">Compare</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#faq">FAQ</a>
       </div>
-      <h1>iphone-cli (<code>iph</code>)</h1>
-      <p class="lead">
-        Let AI agents read and operate any app on a <strong>real physical iPhone</strong> through the native
-        <strong>accessibility tree</strong> — straight from your terminal.
-        <strong>No Xcode. No WebDriverAgent. No app installed on the phone.</strong>
-      </p>
-      <div class="cta-row">
-        <a class="btn primary" href="https://github.com/HyunSeob/iphone-cli">GitHub Repository</a>
-        <a class="btn" href="https://crates.io/crates/iphone-cli">crates.io</a>
-        <a class="btn" href="./llms.txt">llms.txt</a>
-        <a class="btn" href="./llms-full.txt">llms-full.txt</a>
-        <a class="btn" href="https://github.com/HyunSeob/iphone-cli/blob/main/README.ko.md">한국어 문서</a>
+      <div class="nav-actions">
+        <a class="pill-link" href="./llms.txt">llms.txt</a>
+        <a class="nav-gh" href="https://github.com/HyunSeob/iphone-cli">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.25.45-2.28 1.18-3.08-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.16-1.18 3.16-1.18.63 1.58.24 2.75.12 3.04.74.8 1.18 1.83 1.18 3.08 0 4.41-2.69 5.39-5.25 5.67.41.36.78 1.07.78 2.15v3.19c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/></svg>
+          GitHub
+        </a>
       </div>
-      <div class="demo">
-        <img src="./demo.gif" alt="iphone-cli (iph) terminal demo reading and tapping elements on a real iPhone">
-      </div>
-    </header>
+    </nav>
+  </div>
 
-    <section id="highlights">
-      <h2>Why iphone-cli</h2>
-      <div class="grid">
-        <div class="card">
-          <h3>Accessibility Tree, Not OCR</h3>
-          <p>Reads structured UI elements (role, label, value, frame, identifier) directly from Apple's remote accessibility service. Targets elements by label or selector instead of brittle coordinates.</p>
+  <main>
+    <div class="container">
+      <header class="hero">
+        <div class="eyebrow">
+          <span class="dot" aria-hidden="true"></span>
+          100% Rust · macOS &amp; Windows · Real iPhone (iOS 27+)
         </div>
-        <div class="card">
-          <h3>No Xcode or WebDriverAgent</h3>
-          <p>Talks directly to Apple's developer services over USB or Wi-Fi. No code signing, no XCUITest runner, no Appium server, and no app installed on the iPhone.</p>
+        <h1>Control a <span class="accent">real iPhone</span> from any AI agent.</h1>
+        <p class="hero-sub">
+          A single native CLI &amp; MCP binary that reads Apple's <strong>accessibility tree</strong> and drives any app over USB or Wi-Fi.
+          <strong>No Xcode. No WebDriverAgent. No app installed on the phone.</strong>
+        </p>
+
+        <div class="install-dock" role="region" aria-label="Quick install commands">
+          <div class="install-tabs" role="tablist">
+            <button class="tab-btn active" role="tab" aria-selected="true" data-cmd="curl -fsSL https://raw.githubusercontent.com/HyunSeob/iphone-cli/main/install.sh | sh && iph setup">macOS</button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-cmd="claude mcp add iph -- iph mcp">Claude Code</button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-cmd="codex mcp add iph -- iph mcp">Codex</button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-cmd="cargo install iphone-cli">Cargo</button>
+            <button class="tab-btn" role="tab" aria-selected="false" data-cmd="winget install Apple.AppleMobileDeviceSupport">Windows prereq</button>
+          </div>
+          <div class="install-body">
+            <div class="install-cmd" id="install-cmd"><span class="prompt">$</span><span id="cmd-text">curl -fsSL https://raw.githubusercontent.com/HyunSeob/iphone-cli/main/install.sh | sh &amp;&amp; iph setup</span></div>
+            <button class="copy-btn" id="copy-btn" type="button" aria-label="Copy command">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span id="copy-label">Copy</span>
+            </button>
+          </div>
         </div>
-        <div class="card">
-          <h3>Built-in QuickJS Scripting</h3>
-          <p>Run loops, conditionals, list extraction (<code>readList</code>), and multi-step flows in a single agent call via an embedded QuickJS engine (<code>iph script</code> / <code>iph run</code>).</p>
+
+        <div class="hero-links">
+          <a href="https://github.com/HyunSeob/iphone-cli/releases">Releases (macOS &amp; Windows)</a>
+          <span class="sep">·</span>
+          <a href="https://crates.io/crates/iphone-cli">crates.io</a>
+          <span class="sep">·</span>
+          <a href="./llms-full.txt">llms-full.txt</a>
+          <span class="sep">·</span>
+          <a href="https://github.com/HyunSeob/iphone-cli/blob/main/README.ko.md">한국어 문서</a>
         </div>
-        <div class="card">
-          <h3>Agent-Ready &amp; Safety-First</h3>
-          <p>Ships with an MCP server (<code>iph mcp</code>), Agent Skill (<code>SKILL.md</code>), and strict outcomes (<code>done</code> / <code>not_sent</code> / <code>unknown</code>) to prevent double taps or duplicate orders.</p>
+
+        <div class="stage-wrap">
+          <div class="stage-glow" aria-hidden="true"></div>
+          <div class="stage">
+            <img src="./demo.gif" width="1047" height="560" alt="iphone-cli (iph) terminal driving a real iPhone Calculator app directly without Xcode or WebDriverAgent">
+            <div class="stage-caption">
+              <span><strong>Live session:</strong> terminal driving a stock iPhone via native accessibility tree + CoreDevice HID</span>
+              <span>MIT · Zero phone-side app</span>
+            </div>
+          </div>
         </div>
-      </div>
-    </section>
+      </header>
 
-    <section id="install">
-      <h2>Quick Install</h2>
-      <p>Single native binary — no Python, Node.js, Xcode, or Rust runtime required.</p>
-      <pre><code># macOS (Apple Silicon &amp; Intel universal binary)
-curl -fsSL https://raw.githubusercontent.com/HyunSeob/iphone-cli/main/install.sh | sh
-iph setup
+      <section id="model">
+        <div class="section-head">
+          <span class="section-kicker">Structured UI + Safety Contract</span>
+          <h2>Accessibility tree in. Verified outcomes out.</h2>
+          <p>Every command outputs compact JSON. Selectors target labels, roles, values, and identifiers — and never silently retry an ambiguous touch.</p>
+        </div>
 
-# Or via Cargo (Rust 1.88+, macOS &amp; Windows)
-cargo install iphone-cli</code></pre>
-      <p>
-        On Windows 10/11 (x64), download <code>iph-windows-x86_64.zip</code> from
-        <a href="https://github.com/HyunSeob/iphone-cli/releases">GitHub Releases</a>
-        and install Apple's device service via the Microsoft Store (<strong>Apple Devices</strong>) or
-        <code>winget install Apple.AppleMobileDeviceSupport</code>.
-      </p>
+        <div class="split">
+          <div class="terminal-card">
+            <div class="terminal-bar">
+              <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
+              <span class="terminal-title">zsh — iph</span>
+              <span class="terminal-title">JSON / --human</span>
+            </div>
+            <pre class="terminal-code"><span class="t-prompt">$</span> <span class="t-cmd">iph read --human</span>
+<span class="t-dim">Settings  430x932  15 elements</span>
+<span class="t-role">application</span>  <span class="t-str">"Settings"</span>             <span class="t-dim">@0,0 430x932</span>
+  <span class="t-role">header</span>     <span class="t-str">"Settings"</span>             <span class="t-dim">@20,119.3 53.7x37</span>
+  <span class="t-role">switch</span>     <span class="t-str">"Airplane Mode"</span> = <span class="t-str">"0"</span>  <span class="t-dim">@20,489.3 390x49.3</span>
+  <span class="t-role">button</span>     <span class="t-str">"Wi-Fi, HomeNet"</span>       <span class="t-dim">@20,538.7 390x49.3</span>
+  <span class="t-role">button</span>     <span class="t-str">"General"</span>              <span class="t-dim">@20,700 390x49.3</span>
 
-      <h3>Connect to Claude Code or Codex</h3>
-      <pre><code># Register the built-in MCP server
-claude mcp add iph -- iph mcp
-codex mcp add iph -- iph mcp
+<span class="t-prompt">$</span> <span class="t-cmd">iph tap "General"</span>
+{
+  <span class="t-key">"ok"</span>: <span class="t-bool">true</span>,
+  <span class="t-key">"outcome"</span>: <span class="t-str">"done"</span>,
+  <span class="t-key">"elapsed_ms"</span>: <span class="t-num">1752</span>,
+  <span class="t-key">"sent"</span>: <span class="t-bool">true</span>,
+  <span class="t-key">"verified"</span>: <span class="t-bool">true</span>,
+  <span class="t-key">"screen_changed"</span>: <span class="t-bool">true</span>
+}</pre>
+          </div>
 
-# Example terminal workflow
-iph read --human
-iph tap "General"
-iph type "hello" --submit</code></pre>
-    </section>
+          <div class="outcome-stack">
+            <div class="outcome-card">
+              <div class="outcome-top">
+                <span class="outcome-badge done">outcome: "done"</span>
+                <span class="exit-code">exit 0</span>
+              </div>
+              <p>Command finished and re-read the settled screen. <code class="inline-code">tap</code> returns the next screen's elements so agents skip an extra <code class="inline-code">read</code> turn.</p>
+            </div>
+            <div class="outcome-card">
+              <div class="outcome-top">
+                <span class="outcome-badge not-sent">outcome: "not_sent"</span>
+                <span class="exit-code">exit 1</span>
+              </div>
+              <p>Nothing reached the phone (missing selector, ambiguous match, covered target). Safe to adjust and retry immediately.</p>
+            </div>
+            <div class="outcome-card">
+              <div class="outcome-top">
+                <span class="outcome-badge unknown">outcome: "unknown"</span>
+                <span class="exit-code">exit 2</span>
+              </div>
+              <p>Input may have landed. Scripts halt immediately — even inside <code class="inline-code">try/catch</code> — preventing double payments or duplicate messages.</p>
+            </div>
+          </div>
+        </div>
+      </section>
 
-    <section id="comparison">
-      <h2>How iphone-cli Compares to Alternatives</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Capability</th>
-              <th>iphone-cli (<code>iph</code>)</th>
-              <th>iPhone Mirroring + OCR tools</th>
-              <th>Appium / WebDriverAgent</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Native Accessibility Tree</td>
-              <td class="yes">Yes (structured JSON)</td>
-              <td>No (screenshots / Vision OCR)</td>
-              <td class="yes">Yes</td>
-            </tr>
-            <tr>
-              <td>No Xcode / No Code Signing</td>
-              <td class="yes">Yes</td>
-              <td class="yes">Yes</td>
-              <td>No (requires Xcode &amp; signing)</td>
-            </tr>
-            <tr>
-              <td>No App Installed on iPhone</td>
-              <td class="yes">Yes</td>
-              <td class="yes">Yes</td>
-              <td>No (installs WDA runner)</td>
-            </tr>
-            <tr>
-              <td>Windows Host Support</td>
-              <td class="yes">Yes (macOS &amp; Windows)</td>
-              <td>No (macOS Sequoia+ only)</td>
-              <td>Limited (macOS required to build WDA)</td>
-            </tr>
-            <tr>
-              <td>Works in the EU</td>
-              <td class="yes">Yes (no iPhone Mirroring needed)</td>
-              <td>No (iPhone Mirroring unavailable)</td>
-              <td class="yes">Yes</td>
-            </tr>
-            <tr>
-              <td>Multi-step Embedded Scripting</td>
-              <td class="yes">Built-in QuickJS + saved scripts</td>
-              <td>External runner / per-turn calls</td>
-              <td>External client SDK</td>
-            </tr>
-            <tr>
-              <td>Safety Outcome Contract</td>
-              <td class="yes"><code>done</code> / <code>not_sent</code> / <code>unknown</code></td>
-              <td>Varies</td>
-              <td>Standard exceptions</td>
-            </tr>
-            <tr>
-              <td>iOS Requirement</td>
-              <td>Real iPhone, iOS 27+</td>
-              <td>iOS 18+ (macOS 15+)</td>
-              <td>Broad iOS versions</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+      <section id="why">
+        <div class="section-head">
+          <span class="section-kicker">Engineered for Agents</span>
+          <h2>Built to replace fragile OCR hacks and heavy WDA stacks.</h2>
+          <p>Everything ships inside a single static Rust binary with zero Node.js, Python, Appium, or Xcode dependency.</p>
+        </div>
 
-    <section id="architecture">
-      <h2>Architecture</h2>
-      <pre><code>iph (CLI) ─┐
-iph mcp  ──┼─ Unix socket / named pipe ─ iph daemon ─ lockdown → CoreDeviceProxy → TCP tunnel → RSD
-           ┘                              ├ axAuditDaemon.remoteAXService   (accessibility tree)
-                                          ├ displayservice + universalhid   (touch, keyboard)
-                                          ├ pasteboardservice               (clipboard)
-                                          ├ appservice                      (launch, app list)
-                                          └ screencaptureservice            (PNG capture)</code></pre>
-      <p>
-        Built in Rust on top of <a href="https://github.com/jkcoxson/idevice">idevice</a> (MIT) and
-        <a href="https://github.com/jkcoxson/jktcp">jktcp</a> (MIT), inspired by the documented principles of
-        <a href="https://github.com/JosssphZhou/poki">Poki</a>.
-      </p>
-    </section>
+        <div class="bento">
+          <article class="bento-card wide">
+            <div class="icon-box" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h10M4 18h14"/><circle cx="19" cy="12" r="2"/></svg>
+            </div>
+            <h3>Embedded QuickJS Scripting (<code class="inline-code">iph script</code>)</h3>
+            <p>Collapse 10 model turns into one call. Write loops, conditions, <code class="inline-code">waitFor</code>, <code class="inline-code">readField</code>, and auto-stitched scrolling <code class="inline-code">readList</code> inside a sandboxed JS engine built right into <code class="inline-code">iph</code>.</p>
+            <pre class="mini-code">launch("com.apple.Preferences", { restart: true });
+scroll("down", { until: "General" });
+tap("General");
+tap("About");
+return { ios: readField({ selector: { label: "iOS Version" } }) };</pre>
+          </article>
 
-    <section id="faq">
-      <h2>Frequently Asked Questions</h2>
+          <article class="bento-card wide">
+            <div class="icon-box" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M8 10l3 2-3 2M13 14h3"/></svg>
+            </div>
+            <h3>First-Class MCP Server &amp; Agent Skill</h3>
+            <p>Run <code class="inline-code">iph mcp</code> over stdio to expose 19 tools (<code class="inline-code">iph_read</code>, <code class="inline-code">iph_tap</code>, <code class="inline-code">iph_pinch</code>, <code class="inline-code">iph_script</code>, <code class="inline-code">iph_dnd</code>, …) to Claude Code or Codex — or link <code class="inline-code">skills/iph/SKILL.md</code> for shell-native driving.</p>
+            <pre class="mini-code">claude mcp add iph -- iph mcp
+codex  mcp add iph -- iph mcp
+iph mcp --tools read,find,script</pre>
+          </article>
 
-      <details open>
-        <summary>How can Claude Code or Codex control a real iPhone without Xcode or WebDriverAgent?</summary>
-        <p>Install <code>iph</code>, connect your iOS 27+ iPhone over USB, run <code>iph setup</code>, and add the MCP server via <code>claude mcp add iph -- iph mcp</code> or <code>codex mcp add iph -- iph mcp</code>. You can also link <code>skills/iph</code> so the agent uses <code>iph</code> directly in the shell.</p>
-      </details>
+          <article class="bento-card">
+            <div class="icon-box" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2L2 7l10 5 10-5-10-5Z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+            </div>
+            <h3>Zero Xcode, Zero WDA</h3>
+            <p>Connects straight to Apple's developer services via <code class="inline-code">idevice</code>. No signing certificates, no 7-day re-signing, and nothing installed on the phone.</p>
+          </article>
 
-      <details open>
-        <summary>Why use the accessibility tree instead of screenshots and OCR?</summary>
-        <p>The accessibility tree exposes exact UI roles, labels, values, and frames in compact JSON. Agents spend far fewer tokens than sending screenshots every turn and target controls semantically (<code>iph tap "General"</code>, <code>role=button label~="Save"</code>) instead of stale coordinates.</p>
-      </details>
+          <article class="bento-card">
+            <div class="icon-box" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            </div>
+            <h3>macOS, Windows &amp; EU Ready</h3>
+            <p>Never depends on macOS iPhone Mirroring. Runs natively on macOS (universal binary) and Windows 10/11 x64 — anywhere in the world, including the EU.</p>
+          </article>
 
-      <details open>
-        <summary>Does iphone-cli work on Windows or in the EU without macOS iPhone Mirroring?</summary>
-        <p>Yes. <code>iph</code> connects directly to the iPhone's developer services over USB or Wi-Fi, so it runs natively on both macOS and Windows 10/11 (x64) and does not depend on macOS iPhone Mirroring.</p>
-      </details>
+          <article class="bento-card">
+            <div class="icon-box" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12.55a11 11 0 0 1 14.08 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/></svg>
+            </div>
+            <h3>USB, Wi-Fi &amp; Resident Daemon</h3>
+            <p><code class="inline-code">iph daemon</code> keeps tunnels, AX subscriptions, and HID sessions warm per UDID — plus <code class="inline-code">iph doctor</code>, direct IP fallback, and <code class="inline-code">iph dnd</code> banner protection.</p>
+          </article>
+        </div>
+      </section>
 
-      <details open>
-        <summary>Which iOS versions and devices are supported?</summary>
-        <p>Real physical iPhones running <strong>iOS 27 or later</strong> over USB or the same LAN/Wi-Fi. Touch and text input rely on <code>com.apple.coredevice.displayservice</code>, introduced in iOS 27. Simulators, Android, Linux hosts, and landscape mode are currently out of scope.</p>
-      </details>
+      <section id="compare">
+        <div class="section-head">
+          <span class="section-kicker">Tradeoffs &amp; Positioning</span>
+          <h2>How iphone-cli compares to alternatives</h2>
+          <p>Why direct CoreDevice + Accessibility Tree beats screenshot/OCR mirroring and legacy WebDriverAgent setups on iOS 27+.</p>
+        </div>
 
-      <details open>
-        <summary>How does iphone-cli prevent accidental double taps or duplicate actions?</summary>
-        <p>Because iOS does not acknowledge HID touch packets, every command returns structured JSON with <code>outcome</code> (<code>done</code>, <code>not_sent</code>, or <code>unknown</code>), <code>sent</code>, <code>verified</code>, and <code>screen_changed</code>. An <code>unknown</code> outcome exits with code 2 and halts scripts so agents read the screen before retrying.</p>
-      </details>
-    </section>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>Capability</th>
+                <th class="col-iph">iphone-cli (<code>iph</code>)</th>
+                <th>iPhone Mirroring + OCR</th>
+                <th>Appium / WebDriverAgent</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Native Accessibility Tree</td>
+                <td class="col-iph"><span class="status-yes">✓ Structured JSON</span></td>
+                <td><span class="status-no">✗ Screenshots / Vision OCR</span></td>
+                <td><span class="status-yes">✓ Yes</span></td>
+              </tr>
+              <tr>
+                <td>No Xcode / No Code Signing</td>
+                <td class="col-iph"><span class="status-yes">✓ Zero signing</span></td>
+                <td><span class="status-yes">✓ Yes</span></td>
+                <td><span class="status-no">✗ Requires Xcode &amp; signing</span></td>
+              </tr>
+              <tr>
+                <td>No App Installed on iPhone</td>
+                <td class="col-iph"><span class="status-yes">✓ Stock phone</span></td>
+                <td><span class="status-yes">✓ Yes</span></td>
+                <td><span class="status-no">✗ Installs WDA runner</span></td>
+              </tr>
+              <tr>
+                <td>Windows Host Support</td>
+                <td class="col-iph"><span class="status-yes">✓ macOS &amp; Windows</span></td>
+                <td><span class="status-no">✗ macOS Sequoia+ only</span></td>
+                <td><span class="status-no">✗ Needs macOS to build WDA</span></td>
+              </tr>
+              <tr>
+                <td>Works in the EU</td>
+                <td class="col-iph"><span class="status-yes">✓ No Mirroring needed</span></td>
+                <td><span class="status-no">✗ Mirroring unavailable</span></td>
+                <td><span class="status-yes">✓ Yes</span></td>
+              </tr>
+              <tr>
+                <td>Unicode / Clipboard Input</td>
+                <td class="col-iph"><span class="status-yes">✓ Paste + clipboard restore</span></td>
+                <td><span class="status-no">✗ Simulated keystrokes</span></td>
+                <td><span class="status-yes">✓ Yes</span></td>
+              </tr>
+              <tr>
+                <td>Embedded Multi-Step Runtime</td>
+                <td class="col-iph"><span class="status-yes">✓ Built-in QuickJS</span></td>
+                <td><span class="status-no">✗ External / per-turn</span></td>
+                <td><span class="status-no">✗ External SDK</span></td>
+              </tr>
+              <tr>
+                <td>Safety Outcome Contract</td>
+                <td class="col-iph"><code class="inline-code">done</code> / <code class="inline-code">not_sent</code> / <code class="inline-code">unknown</code></td>
+                <td>Varies</td>
+                <td>Standard exceptions</td>
+              </tr>
+              <tr>
+                <td>Target Scope</td>
+                <td class="col-iph">Real iPhone, iOS 27+</td>
+                <td>iOS 18+ (macOS 15+)</td>
+                <td>Broad iOS versions</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
 
-    <footer>
-      <span><code>HyunSeob/iphone-cli</code> · MIT License</span>
-      <span>
-        <a href="https://github.com/HyunSeob/iphone-cli">GitHub</a> ·
-        <a href="https://crates.io/crates/iphone-cli">crates.io</a> ·
-        <a href="https://docs.rs/iphone-cli">docs.rs</a> ·
-        <a href="./llms.txt">llms.txt</a> ·
-        <a href="./llms-full.txt">llms-full.txt</a>
-      </span>
-    </footer>
+      <section id="architecture">
+        <div class="section-head">
+          <span class="section-kicker">Under the Hood</span>
+          <h2>Direct Apple developer services over a userspace tunnel.</h2>
+          <p>One resident daemon per UDID multiplexes CLI and MCP requests onto Apple's CoreDevice RSD services without Xcode running.</p>
+        </div>
+
+        <div class="arch-flow" aria-label="Architecture diagram">
+          <div class="arch-col">
+            <div class="arch-node">
+              <strong>iph (CLI)</strong>
+              <span>Terminal, scripts, batch</span>
+            </div>
+            <div class="arch-node">
+              <strong>iph mcp</strong>
+              <span>19 stdio MCP tools</span>
+            </div>
+          </div>
+
+          <div class="arch-arrow" aria-hidden="true">
+            <span class="line">→</span>
+            Unix socket /<br>named pipe
+          </div>
+
+          <div class="arch-col">
+            <div class="arch-node highlight">
+              <strong>iph daemon</strong>
+              <span>lockdown → CoreDeviceProxy → userspace TCP tunnel (jktcp) → RSD</span>
+            </div>
+          </div>
+
+          <div class="arch-arrow" aria-hidden="true">
+            <span class="line">→</span>
+            USB or<br>LAN / Wi-Fi
+          </div>
+
+          <div class="arch-col">
+            <div class="arch-node">
+              <strong>axAuditDaemon.remoteAXService</strong>
+              <span>Structured accessibility tree</span>
+            </div>
+            <div class="arch-node">
+              <strong>displayservice + universalhid</strong>
+              <span>Touch, swipe, pinch, keyboard (iOS 27+)</span>
+            </div>
+            <div class="arch-node">
+              <strong>pasteboard · appservice · screencapture</strong>
+              <span>Clipboard, app launch/env, PNG capture</span>
+            </div>
+          </div>
+        </div>
+
+        <p class="arch-foot">
+          Written in 100% Rust on top of <a href="https://github.com/jkcoxson/idevice">idevice</a> (MIT) and
+          <a href="https://github.com/jkcoxson/jktcp">jktcp</a> (MIT), built on the documented principles of
+          <a href="https://github.com/JosssphZhou/poki">Poki</a>.
+        </p>
+      </section>
+
+      <section id="faq">
+        <div class="section-head">
+          <span class="section-kicker">FAQ</span>
+          <h2>Common questions</h2>
+        </div>
+
+        <div class="faq-list">
+          <details open>
+            <summary>
+              How can Claude Code or Codex control a real iPhone without Xcode or WebDriverAgent?
+              <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+            </summary>
+            <div class="faq-body">
+              Install <code class="inline-code">iph</code>, plug in your iOS 27+ iPhone, run <code class="inline-code">iph setup</code>, and register the MCP server via <code class="inline-code">claude mcp add iph -- iph mcp</code> or <code class="inline-code">codex mcp add iph -- iph mcp</code>. You can also link <code class="inline-code">skills/iph</code> so the agent uses <code class="inline-code">iph</code> directly from the shell.
+            </div>
+          </details>
+
+          <details>
+            <summary>
+              Why use the accessibility tree instead of screenshots and OCR?
+              <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+            </summary>
+            <div class="faq-body">
+              The native accessibility tree returns structured roles, labels, values, enabled states, and frames in compact JSON. Agents use a fraction of the tokens required for repeated screenshots and target controls semantically (<code class="inline-code">iph tap "General"</code>, <code class="inline-code">role=button label~="Save"</code>) rather than brittle pixel coordinates.
+            </div>
+          </details>
+
+          <details>
+            <summary>
+              Does iphone-cli work on Windows or in the EU without macOS iPhone Mirroring?
+              <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+            </summary>
+            <div class="faq-body">
+              Yes. <code class="inline-code">iph</code> talks directly to the phone's developer services over USB or LAN/Wi-Fi. It runs natively on both macOS and Windows 10/11 (x64) and is completely unaffected by EU iPhone Mirroring restrictions.
+            </div>
+          </details>
+
+          <details>
+            <summary>
+              Which iOS versions and devices are supported?
+              <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+            </summary>
+            <div class="faq-body">
+              Real physical iPhones running <strong>iOS 27 or later</strong> over USB or the same LAN/Wi-Fi. Touch and keyboard input rely on <code class="inline-code">com.apple.coredevice.displayservice</code> introduced in iOS 27. iOS Simulators, Android devices, Linux hosts, and landscape orientation are currently out of scope.
+            </div>
+          </details>
+
+          <details>
+            <summary>
+              How does iphone-cli prevent accidental double taps or duplicate orders?
+              <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+            </summary>
+            <div class="faq-body">
+              Because iOS never confirms HID touch packets, every command returns <code class="inline-code">outcome</code> (<code class="inline-code">done</code>, <code class="inline-code">not_sent</code>, or <code class="inline-code">unknown</code>) alongside <code class="inline-code">sent</code>, <code class="inline-code">verified</code>, and <code class="inline-code">screen_changed</code>. An <code class="inline-code">unknown</code> outcome exits with code 2 and halts scripts immediately so agents inspect the screen before resending input.
+            </div>
+          </details>
+        </div>
+      </section>
+    </div>
   </main>
+
+  <footer>
+    <div class="container footer-inner">
+      <span><code class="inline-code">HyunSeob/iphone-cli</code> · MIT License</span>
+      <div class="footer-links">
+        <a href="https://github.com/HyunSeob/iphone-cli">GitHub</a>
+        <a href="https://crates.io/crates/iphone-cli">crates.io</a>
+        <a href="https://docs.rs/iphone-cli">docs.rs</a>
+        <a href="./llms.txt">llms.txt</a>
+        <a href="./llms-full.txt">llms-full.txt</a>
+        <a href="https://github.com/HyunSeob/iphone-cli/blob/main/README.ko.md">한국어</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    (function () {
+      const tabs = document.querySelectorAll(".tab-btn");
+      const cmdText = document.getElementById("cmd-text");
+      const copyBtn = document.getElementById("copy-btn");
+      const copyLabel = document.getElementById("copy-label");
+      let current = tabs[0].dataset.cmd;
+      let timer;
+
+      tabs.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          tabs.forEach((t) => {
+            t.classList.remove("active");
+            t.setAttribute("aria-selected", "false");
+          });
+          btn.classList.add("active");
+          btn.setAttribute("aria-selected", "true");
+          current = btn.dataset.cmd;
+          cmdText.textContent = current;
+          copyBtn.classList.remove("copied");
+          copyLabel.textContent = "Copy";
+        });
+      });
+
+      copyBtn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(current);
+          copyBtn.classList.add("copied");
+          copyLabel.textContent = "Copied";
+          clearTimeout(timer);
+          timer = setTimeout(() => {
+            copyBtn.classList.remove("copied");
+            copyLabel.textContent = "Copy";
+          }, 1800);
+        } catch (_) {}
+      });
+    })();
+  </script>
 </body>
 </html>
