@@ -19,6 +19,7 @@ use crate::{
     device::{
         ax::trace,
         input::{Motion, normalize},
+        pinch,
         session::{Fresh, Gesture, Session, reuse},
     },
     fields,
@@ -100,6 +101,39 @@ pub struct SwipeArgs {
     pub duration_ms: Option<u64>,
     /// Slow to a stop before lifting (a drag) instead of flicking.
     pub drag: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PinchArgs {
+    /// `in` (scale 0.5) or `out` (scale 2); not with `scale`.
+    pub direction: Option<String>,
+    /// End span over start span, 0.25..4.
+    pub scale: Option<f64>,
+    /// Degrees, positive clockwise, -180..180.
+    pub rotate: Option<f64>,
+    /// Where the fingers meet: a selector, `"x,y"`, or `{x, y}`. Default: the
+    /// middle of the screen.
+    pub at: Value,
+    pub duration_ms: Option<u64>,
+}
+
+impl PinchArgs {
+    /// The `(scale, rotate)` these arguments ask for.
+    fn motion(&self) -> Res<(f64, f64)> {
+        let scale = match (self.direction.as_deref(), self.scale) {
+            (Some(_), Some(_)) => return Err(Fail::invalid("a direction and a scale cannot be combined")),
+            (Some("in"), None) => 0.5,
+            (Some("out"), None) => 2.0,
+            (Some(other), None) => {
+                return Err(Fail::invalid(format!("unknown direction `{other}` (in, out)")));
+            }
+            (None, scale) => scale.unwrap_or(1.0),
+        };
+        let rotate = self.rotate.unwrap_or(0.0);
+        pinch::check_motion(scale, rotate).map_err(Fail::invalid)?;
+        Ok((scale, rotate))
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -942,6 +976,64 @@ impl Session {
             "from": [from.0, from.1],
             "to": [to.0, to.1],
         })
+    }
+
+    /// Two fingers pinching, spreading or turning around a point. Arguments
+    /// that cannot make a gesture, or a point with no room for one, fail
+    /// before anything is sent. `screen_changed: false` is a fair answer on a
+    /// screen that does not zoom.
+    pub async fn cmd_pinch(&mut self, args: PinchArgs) -> Res {
+        let (scale, rotate) = args.motion()?;
+        let duration = Duration::from_millis(args.duration_ms.unwrap_or(500).clamp(100, 10_000));
+        let target = (!args.at.is_null()).then(|| parse_target(&args.at)).transpose()?;
+        let read = match &target {
+            Some(target) => self.locate_ready(std::slice::from_ref(target)).await.map(|(screen, mut points)| {
+                let (x, y, _) = points.remove(0);
+                (screen, Some((x, y)))
+            }),
+            None => self
+                .screen(Fresh::MaxAge(reuse()), false, BuildOptions::default())
+                .await
+                .map(|(_, screen)| (screen, None)),
+        };
+        let (size, at, before) = match &read {
+            Ok((screen, _)) if screen.width <= 0.0 || screen.height <= 0.0 => {
+                return Err(Fail::not_sent("no_screen_size", "the reading has no application frame"));
+            }
+            Ok((screen, at)) => ((screen.width, screen.height), *at, Some(screen.signature())),
+            Err(read_failed) => {
+                // `unread_size`: only the middle or a point can be pinched without a reading.
+                let size = self.unread_size(read_failed).ok_or_else(|| read_failed.clone())?;
+                let at = match &target {
+                    None => None,
+                    Some(Target::Point(x, y)) => Some((*x, *y)),
+                    Some(Target::Selector(_)) => return Err(read_failed.clone()),
+                };
+                (size, at, None)
+            }
+        };
+        let center = at.unwrap_or((size.0 / 2.0, size.1 / 2.0));
+        let plan = pinch::plan(&pinch::Spec { screen: size, center, scale, rotate, duration }).map_err(Fail::invalid)?;
+        let span = [(plan.span.0 * 10.0).round() / 10.0, (plan.span.1 * 10.0).round() / 10.0];
+        let input_began = Instant::now();
+        self.send_gesture(Gesture::Pinch(plan)).await?;
+        let mut out = fields! {
+            "sent": true,
+            "center": [(center.0 * 10.0).round() / 10.0, (center.1 * 10.0).round() / 10.0],
+            "scale": scale,
+            "rotate": rotate,
+            "span": span,
+        };
+        let Some(before) = before else {
+            out.insert("verified".into(), json!(false));
+            out.insert("screen_changed".into(), json!(false));
+            out.insert("note".into(), json!(UNREAD_NOTE));
+            return Ok(out);
+        };
+        let after = self.observe(input_began, AFTER_DRAG).await.map(|(_, screen)| screen);
+        out.insert("verified".into(), json!(after.is_some()));
+        out.insert("screen_changed".into(), json!(after.is_some_and(|s| s.signature() != before)));
+        Ok(out)
     }
 
     /// Move the content one step. "down" shows what is further down.
@@ -1826,5 +1918,53 @@ mod launch_tests {
         assert_eq!(parse(json!({"app": "x", "environment": ["A=1"]})).unwrap_err().code, "invalid_argument");
         assert_eq!(parse(json!({"app": "x", "arguments": "-a"})).unwrap_err().code, "invalid_argument");
         assert_eq!(parse(json!({"app": "x", "arguments": [1]})).unwrap_err().code, "invalid_argument");
+    }
+}
+
+#[cfg(test)]
+mod pinch_tests {
+    use super::*;
+    use crate::{config::Config, reply::Outcome};
+
+    fn args(v: Value) -> PinchArgs {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn a_direction_means_a_scale() {
+        assert_eq!(args(json!({"direction": "in"})).motion().unwrap(), (0.5, 0.0));
+        assert_eq!(args(json!({"direction": "out"})).motion().unwrap(), (2.0, 0.0));
+        assert_eq!(args(json!({"direction": "out", "rotate": -30})).motion().unwrap(), (2.0, -30.0));
+        assert_eq!(args(json!({"scale": 1.5, "rotate": 90})).motion().unwrap(), (1.5, 90.0));
+        assert_eq!(args(json!({"rotate": 45})).motion().unwrap(), (1.0, 45.0));
+    }
+
+    #[test]
+    fn arguments_that_cannot_make_a_gesture_are_invalid() {
+        for bad in [
+            json!({}),
+            json!({"scale": 1}),
+            json!({"direction": "out", "scale": 2}),
+            json!({"direction": "sideways"}),
+            json!({"scale": 0.2}),
+            json!({"scale": 5}),
+            json!({"rotate": 181}),
+            json!({"direction": "in", "rotate": -181}),
+        ] {
+            let fail = args(bad.clone()).motion().unwrap_err();
+            assert_eq!((fail.code.as_str(), fail.outcome), ("invalid_argument", Outcome::NotSent), "{bad}");
+        }
+        assert!(serde_json::from_value::<PinchArgs>(json!({"scale": 2, "zoom": 1})).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_bad_request_fails_before_the_phone_is_asked_for_anything() {
+        let mut s = Session::new("00000000-TESTONLY-NOPHONE".into(), Config::default());
+        for bad in [json!({}), json!({"direction": "in", "scale": 2}), json!({"scale": 9})] {
+            let fail = s.cmd_pinch(args(bad.clone())).await.unwrap_err();
+            assert_eq!((fail.code.as_str(), fail.outcome), ("invalid_argument", Outcome::NotSent), "{bad}");
+        }
+        let fail = s.cmd_pinch(args(json!({"direction": "in", "at": 7}))).await.unwrap_err();
+        assert_eq!(fail.outcome, Outcome::NotSent);
     }
 }

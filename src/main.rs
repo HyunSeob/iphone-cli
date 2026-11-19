@@ -103,6 +103,23 @@ enum Cmd {
         #[arg(long)]
         drag: bool,
     },
+    /// Pinch in or out, or turn: two fingers around the middle of the screen or a target.
+    Pinch {
+        /// `in` or `out`; or give `--scale` and/or `--rotate` instead.
+        direction: Option<String>,
+        /// End span over start span, 0.25..4 (above 1 spreads the fingers).
+        #[arg(long)]
+        scale: Option<f64>,
+        /// Degrees, positive clockwise, -180..180.
+        #[arg(long, allow_negative_numbers = true)]
+        rotate: Option<f64>,
+        /// A selector or x,y where the fingers meet. Default: the middle of the screen.
+        #[arg(long)]
+        at: Option<String>,
+        /// Milliseconds the fingers move (default 500).
+        #[arg(long)]
+        duration: Option<u64>,
+    },
     /// Scroll the content up or down, optionally until an element shows.
     Scroll {
         direction: String,
@@ -364,6 +381,10 @@ async fn run(cli: Cli) -> i32 {
                 return exit_code(&v);
             }
         },
+        Cmd::Pinch { direction, scale, rotate, at, duration } => (
+            "pinch",
+            json!({ "direction": direction, "scale": scale, "rotate": rotate, "at": at, "duration_ms": duration }),
+        ),
         Cmd::Scroll { direction, until, max } => (
             "scroll",
             json!({ "direction": direction, "until": until, "max": max }),

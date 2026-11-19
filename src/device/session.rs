@@ -32,12 +32,13 @@ use crate::{
 const APP_SERVICE: &str = "com.apple.coredevice.appservice";
 
 /// One touch or button gesture, in normalized HID coordinates.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Gesture {
     Tap { x: u16, y: u16, hold: Duration },
     DoubleTap { x: u16, y: u16 },
     Drag { from: (u16, u16), to: (u16, u16), duration: Duration, motion: crate::device::input::Motion },
     Button { page: u64, usage: u64, hold: Duration },
+    Pinch(crate::device::pinch::Plan),
 }
 
 /// How fresh a reading must be.
@@ -676,11 +677,12 @@ impl Session {
         for attempt in 0..2 {
             let input = self.ensure_input().await?;
             let before = input.reports_sent();
-            let sent = match gesture {
-                Gesture::Tap { x, y, hold } => input.tap(x, y, hold).await,
-                Gesture::DoubleTap { x, y } => input.double_tap(x, y).await,
-                Gesture::Drag { from, to, duration, motion } => input.drag(from, to, duration, motion).await,
-                Gesture::Button { page, usage, hold } => input.button(page, usage, hold).await,
+            let sent = match &gesture {
+                Gesture::Tap { x, y, hold } => input.tap(*x, *y, *hold).await,
+                Gesture::DoubleTap { x, y } => input.double_tap(*x, *y).await,
+                Gesture::Drag { from, to, duration, motion } => input.drag(*from, *to, *duration, *motion).await,
+                Gesture::Button { page, usage, hold } => input.button(*page, *usage, *hold).await,
+                Gesture::Pinch(plan) => input.pinch(plan).await,
             };
             let Err(e) = sent else {
                 return Ok(());

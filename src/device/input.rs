@@ -24,13 +24,17 @@ use idevice::{
         build_start_audio_parameters, build_start_video_parameters,
         hid::{
             ButtonState, IndigoHidClient, KeyboardUsage, MainKeyboardService,
-            TOUCHSCREEN_STATE_CONTACT, TOUCHSCREEN_STATE_RELEASE, UniversalHidServiceClient,
+            TOUCHSCREEN_STATE_CONTACT, TOUCHSCREEN_STATE_RELEASE, TouchscreenContact,
+            UniversalHidServiceClient,
         },
     },
     rsd::RsdHandshake,
 };
 
-use crate::tcp::handle::{AdapterHandle, UdpSocketHandle};
+use crate::{
+    device::pinch,
+    tcp::handle::{AdapterHandle, UdpSocketHandle},
+};
 
 /// What the controller says it supports. Xcode's device window sends 140.
 const CLIENT_SUPPORTED_FEATURES: u64 = 140;
@@ -188,6 +192,8 @@ pub struct InputSession {
     last_release: Option<Instant>,
     /// Touch and button reports written so far.
     reports: u64,
+    /// The two fingers of a pinch while they may be down on the phone.
+    pair_held: Option<[TouchscreenContact; 2]>,
 }
 
 /// Normalized HID coordinate (0..=65535) for a point in logical screen points.
@@ -331,6 +337,7 @@ impl InputSession {
             started: Instant::now(),
             last_release: None,
             reports: 0,
+            pair_held: None,
         })
     }
 
@@ -472,6 +479,35 @@ impl InputSession {
         Ok(())
     }
 
+    /// Two fingers moving together or turning, then lifted. Every frame counts
+    /// in [`reports_sent`](Self::reports_sent).
+    pub async fn pinch(&mut self, plan: &pinch::Plan) -> Result<()> {
+        self.gap().await;
+        crate::device::ax::trace(|| format!("pinch {} frames, span {:?}", plan.frames.len(), plan.span));
+        let (hid, reports) = (&mut self.hid, &mut self.reports);
+        let played = pinch::play(plan, &mut self.pair_held, async |contacts: &[TouchscreenContact]| -> Result<()> {
+            hid.send_multitouch(contacts, None)
+                .await
+                .map_err(|e| anyhow!("touch pinch: {e:?}"))?;
+            *reports += 1;
+            Ok(())
+        })
+        .await;
+        self.last_release = Some(Instant::now());
+        played
+    }
+
+    /// Lift a pinch that was cut off, so no finger stays down on the phone.
+    /// Bounded: a session given up after an error may have a dead connection.
+    async fn lift_held(&mut self) {
+        let Some(pair) = self.pair_held.take() else {
+            return;
+        };
+        let lifted = pinch::lifted(&pair);
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.hid.send_multitouch(&lifted, None)).await;
+        self.last_release = Some(Instant::now());
+    }
+
     /// Press and release a hardware button (HID usage page / usage).
     pub async fn button(&mut self, usage_page: u64, usage: u64, hold: Duration) -> Result<()> {
         if self.indigo.is_none() {
@@ -606,6 +642,7 @@ impl InputSession {
     }
 
     pub async fn close(mut self) {
+        self.lift_held().await;
         let _ = self.keyboard_detach().await;
         self.settle_previous().await;
         let _ = tokio::time::timeout(Duration::from_secs(2), self.display.stop_media_stream()).await;
@@ -614,6 +651,7 @@ impl InputSession {
     /// Stop the stream of a session given up after an error, without the
     /// orderly wait. A stream nobody stops keeps the phone encoding video.
     pub async fn abandon(mut self) {
+        self.lift_held().await;
         let _ = tokio::time::timeout(Duration::from_secs(2), self.display.stop_media_stream()).await;
     }
 }

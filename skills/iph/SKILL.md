@@ -72,7 +72,7 @@ The result: `outputs` (what the script returned), `logs`, `calls`, `inputs_sent`
 
 A script is the body of a function, so `return` ends it. The commands are functions that take the same arguments and return the same result objects as the CLI:
 
-- `read(opts)`, `find(selector)`, `tap(target, opts)`, `swipe(direction | {from, to}, opts)`, `scroll(direction, {until, max})`, `type(text, {clear, submit})`, `key(name)`, `button(name)`, `launch(app, {restart, arguments, environment})`, `apps()`. For example `read({ app: true }).elements`, `tap("일반").screen_changed`, `find("label~=업데이트").count`.
+- `read(opts)`, `find(selector)`, `tap(target, opts)`, `swipe(direction | {from, to}, opts)`, `pinch(direction | {scale, rotate, at}, opts)`, `scroll(direction, {until, max})`, `type(text, {clear, submit})`, `key(name)`, `button(name)`, `launch(app, {restart, arguments, environment})`, `apps()`. For example `read({ app: true }).elements`, `tap("일반").screen_changed`, `find("label~=업데이트").count`.
 - `tap(selector)` waits up to 5 s for the element and taps once it holds still (a screen that has just come up may still shift its rows); `{timeout_ms, settle: false}` change that. Like the CLI it then waits for the screen to settle; `{no_wait: true}` skips that. `tap([a, b, c])` presses several targets in a row without re-reading, for keypads.
 - `waitFor(selector, {timeout_ms})` waits for an element (8 s by default) and sits out a system panel that covers the app for a moment.
 - `readField({selector, take, regex})` returns one text. `take`: `value` | `label` | `identifier` | `text`; `regex` keeps its first capture group.
@@ -109,13 +109,17 @@ After `launch`, that app must stay in front; if another one comes up, the script
 - Several matches are an error, never a guess. Read the `candidates` and narrow.
 - `id=` needs identifiers, which arrive about 0.5 s after the labels (`iph read --full`).
 
+## Zooming and rotating
+
+`iph pinch out` spreads two fingers (zoom in), `iph pinch in` pinches them (zoom out); `--scale 1.5` sets the ratio (0.25 to 4) and `--rotate 90` turns them (degrees, clockwise is positive), alone or together. They meet in the middle of the screen, or at `--at <selector | x,y>`, for example on the map or image to zoom. A screen that does not zoom answers `ok: true` with `screen_changed: false`, so check that the zoom happened (`find` the element and compare its frame, or `iph screenshot`) instead of assuming it. Fingers that land on a tappable row or button can activate it (a pinch from the middle of Settings opened the row under it once), so aim `--at` at the content to zoom. A point too close to the edge for both fingers fails with `not_sent`. Like any input, never repeat a pinch whose outcome is `unknown`.
+
 ## Typing
 
 `iph type "글"` pastes into the field that has the keyboard, so tap the field first. `--clear` replaces the content, `--submit` presses Return. The result has `value` (what the field shows now) and `clipboard_restored`. iph does not judge `value`: apps format, mask and correct what is pasted (`30000` shows as `₩ 30,000`), so you decide whether it is right. A `value` that is still what the field held before means the paste did not happen; before `--submit` sends something that matters, type without it, look at `value`, then `iph key return`. When the user had copied something in an app, it cannot be put back (`clipboard_restored: false`, `clipboard_note`); tell the user. The on-screen keyboard disappears for a moment while typing; that is expected.
 
 ## Commands at a glance
 
-`read`, `find`, `tap`, `swipe`, `scroll`, `type`, `key`, `button`, `launch`, `apps` (bundle ids), `screenshot`, `script`, `run`, `scripts`, `batch`, `dnd`, `doctor`, `connect --ip <IP>`, `devices`, `stop`. `iph <command> --help` has the flags; add `--human` to read a result yourself.
+`read`, `find`, `tap`, `swipe`, `pinch`, `scroll`, `type`, `key`, `button`, `launch`, `apps` (bundle ids), `screenshot`, `script`, `run`, `scripts`, `batch`, `dnd`, `doctor`, `connect --ip <IP>`, `devices`, `stop`. `iph <command> --help` has the flags; add `--human` to read a result yourself.
 
 ## When something is off
 
@@ -124,7 +128,7 @@ After `launch`, that app must stay in front; if another one comes up, the script
 - **Wi-Fi is missing even on the same network:** connect by USB and run `iph doctor`. It reads `SupportsWifi`, `SupportsWifiSyncing`, `EnableWifiConnections` and `EnableWifiDebugging` from `com.apple.mobile.wireless_lockdown`. Both enable flags must be `true`; disabled flags can prevent Bonjour `_apple-mobdev2._tcp.local.` advertising and usbmuxd `Network` discovery. Only with an explicit request, `iph setup --fix-wifi` or `iph doctor --fix-wifi` (MCP `iph_doctor`: `fix_wifi: true`) enables explicitly disabled flags when support is confirmed over USB, reads them back, and briefly checks for the same phone's `Network` entry. Ordinary setup and doctor do not change these flags. Manual alternatives: Finder/Apple Devices → “Show this iPhone when on Wi-Fi”, and Xcode → “Connect via network”. If both flags are on but no `Network` entry appears, check the subnet, AP/client isolation and mDNS filtering. Read/write/query failures are in `checks[].detail`; unknown flags are not treated as off. `auto_fixed: true` confirms a flag change, while `wifi.status: "ok"` confirms network discovery; an optional Wi-Fi warning does not prevent USB readiness.
 - **A reading takes about 20 s once and then things are normal again:** the phone's accessibility service had stopped answering and iph restarted it by itself. Nothing to do. This happens mostly over Wi-Fi.
 - **`ax_timeout` keeps coming back:** follow the error's hint. Over Control Center (or the home screen) it says to close it: `iph button home` or `iph launch <app>`, which go out without a reading; Control Center cannot be read at all while the screen is being recorded. Otherwise the phone is most likely locked, its screen is off, or the restart did not help; ask the user to look at the phone, or to lock and unlock it. Do not loop on `iph stop`.
-- **`verified: false` with a `note` that the screen could not be read:** a point tap, a swipe or a button went out on the last known screen size without a reading before or after. Read the screen before relying on what it did.
+- **`verified: false` with a `note` that the screen could not be read:** a point tap, a swipe, a pinch or a button went out on the last known screen size without a reading before or after. Read the screen before relying on what it did.
 - **`input_failed` or `input_unavailable` come back, or readings take many seconds every time:** stop sending input, because a late reading can show an earlier screen and a tap would then go to the wrong place. Read once more after a moment, and tell the user if it does not clear. Over Wi-Fi everything is slower and less steady than over the cable; if the cable is at hand, suggest plugging it in.
 - **The element list looks wrong for what the user describes:** `iph screenshot -o <file>` shows what is really on screen. Banners and system pop-ups are never in the list.
 - **The phone is locked:** nothing works until the user unlocks it.

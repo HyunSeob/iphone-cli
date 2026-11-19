@@ -16,7 +16,7 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 
 const SCRIPT_DOC: &str = "Run JavaScript that drives the phone, in one call: loops, conditions and several steps without a round trip each. \
 The commands are functions that return what the tool of the same name returns: read(opts), find(selector), tap(target, opts), swipe(direction | {from, to}, opts), \
-scroll(direction, {until, max}), type(text, {clear, submit}), key(name), button(name), launch(app, {restart, arguments, environment}), apps(). Also waitFor(selector, {timeout_ms}), \
+pinch(direction | {scale, rotate, at}, opts), scroll(direction, {until, max}), type(text, {clear, submit}), key(name), button(name), launch(app, {restart, arguments, environment}), apps(). Also waitFor(selector, {timeout_ms}), \
 readField({selector, take, regex}) → text, readList({row, columns, group, stop_below, max_scrolls}) → {rows, scrolls, ended}, sleep(ms), log(…), output(key, value). \
 tap(target) waits up to 5 s for a selector to appear and hold still; tap([a, b, c]) presses a keypad without re-reading. \
 A call that fails throws an Error with .code, .outcome, .hint and .result (the full result object); uncaught, it ends the script and the result says which call and line. \
@@ -95,6 +95,20 @@ fn tools() -> Vec<Value> {
             &[],
         ),
         tool(
+            "iph_pinch",
+            "Two fingers on the screen: pinch in or out to zoom, turn to rotate (a map, an image, a web page). Give a direction, or a scale and/or a rotation. \
+             The fingers meet in the middle of the screen, or at `at`. `screen_changed: false` is a fair answer on a screen that does not zoom. \
+             Never retry one whose outcome is \"unknown\".",
+            json!({
+                "direction": { "type": "string", "enum": ["in", "out"], "description": "in = scale 0.5, out = scale 2. Not together with scale." },
+                "scale": { "type": "number", "minimum": 0.25, "maximum": 4, "description": "End distance between the fingers over the start distance: above 1 spreads them (zoom in), below 1 pinches (zoom out)." },
+                "rotate": { "type": "number", "minimum": -180, "maximum": 180, "description": "Degrees, positive clockwise." },
+                "at": { "description": format!("Where the fingers meet: a selector, or \"x,y\" in points. Default: the middle of the screen. {SELECTOR_DOC}"), "type": ["string", "object"] },
+                "duration_ms": { "type": "integer", "description": "How long the fingers move (default 500, 100..10000)." },
+            }),
+            &[],
+        ),
+        tool(
             "iph_scroll",
             "Scroll the content. \"down\" shows what is further down. With `until`, keeps scrolling until that element is on screen.",
             json!({
@@ -163,7 +177,7 @@ fn tools() -> Vec<Value> {
         tool(
             "iph_batch",
             "Run several steps in one call, stopping at the first failure. Each step is a one-key object: \
-             {\"launch\": \"…\"}, {\"wait_for\": selector}, {\"tap\": selector}, {\"type\": {\"text\": \"…\"}}, {\"swipe\": \"up\"}, \
+             {\"launch\": \"…\"}, {\"wait_for\": selector}, {\"tap\": selector}, {\"type\": {\"text\": \"…\"}}, {\"swipe\": \"up\"}, {\"pinch\": \"out\"}, \
              {\"scroll_until\": selector}, {\"read_field\": {\"name\", \"selector\", \"take\"}}, {\"read_list\": {\"name\", \"row\", \"columns\"}}, \
              {\"assert\": selector}, {\"button\": \"home\"}, {\"key\": \"return\"}, {\"sleep\": ms}.",
             json!({ "steps": { "type": "array", "items": { "type": "object" } } }),
@@ -213,7 +227,7 @@ async fn call(udid: &str, name: &str, args: Value) -> Value {
             Ok(request) => client::request(udid, "script", request).await,
             Err(f) => envelope(Err(f), started),
         },
-        "iph_read" | "iph_find" | "iph_tap" | "iph_swipe" | "iph_scroll" | "iph_type" | "iph_key"
+        "iph_read" | "iph_find" | "iph_tap" | "iph_swipe" | "iph_pinch" | "iph_scroll" | "iph_type" | "iph_key"
         | "iph_button" | "iph_launch" | "iph_apps" | "iph_screenshot" | "iph_batch" | "iph_doctor"
         | "iph_dnd" => {
             let cmd = name.trim_start_matches("iph_");
@@ -361,7 +375,7 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap().to_string())
             .collect();
         for expected in [
-            "iph_read", "iph_find", "iph_tap", "iph_swipe", "iph_scroll", "iph_type", "iph_button",
+            "iph_read", "iph_find", "iph_tap", "iph_swipe", "iph_pinch", "iph_scroll", "iph_type", "iph_button",
             "iph_launch", "iph_batch", "iph_script", "iph_run", "iph_scripts", "iph_doctor", "iph_connect",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
@@ -370,6 +384,24 @@ mod tests {
             assert_eq!(t["inputSchema"]["type"], "object");
             assert!(!t["description"].as_str().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn the_pinch_tool_offers_what_the_command_accepts() {
+        let tool = tools().into_iter().find(|t| t["name"] == "iph_pinch").unwrap();
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["at", "direction", "duration_ms", "rotate", "scale"]);
+        assert_eq!(props["direction"]["enum"], json!(["in", "out"]));
+        assert!(tool["inputSchema"].get("required").is_none_or(|r| r.as_array().is_some_and(|r| r.is_empty())));
+        for args in [
+            json!({"direction": "out", "rotate": 30, "at": "Map", "duration_ms": 300}),
+            json!({"scale": 0.5, "at": {"x": 100, "y": 200}}),
+        ] {
+            assert!(serde_json::from_value::<crate::actions::PinchArgs>(args).is_ok());
+        }
+        assert!(serde_json::from_value::<crate::actions::PinchArgs>(json!({"direction": "out", "zoom": 2})).is_err());
     }
 
     #[test]

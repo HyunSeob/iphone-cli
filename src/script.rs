@@ -135,6 +135,7 @@ const PRELUDE: &str = r#"
   g.find = (selector, o) => call("find", { ...opts(o), selector });
   g.tap = (target, o) => call("tap", { ...opts(o), target });
   g.swipe = (how, o) => call("swipe", typeof how === "string" ? { ...opts(o), direction: how } : { ...opts(o), ...opts(how) });
+  g.pinch = (how, o) => call("pinch", typeof how === "string" ? { ...opts(o), direction: how } : { ...opts(o), ...opts(how) });
   g.scroll = (direction, o) => call("scroll", { ...opts(o), direction });
   g.type = (value, o) => call("type", { ...opts(o), text: String(value) });
   g.key = (name, o) => call("key", { ...opts(o), key: name });
@@ -429,11 +430,11 @@ pub async fn run<H: ScriptHost>(host: &mut H, code: &str, args: &Map<String, Val
 // ---------------------------------------------------------------------------
 
 /// Calls that send input to the phone.
-const INPUTS: [&str; 8] = ["launch", "tap", "swipe", "scroll", "type", "key", "button", "read_list"];
+const INPUTS: [&str; 9] = ["launch", "tap", "swipe", "pinch", "scroll", "type", "key", "button", "read_list"];
 /// Calls that may send several inputs before they fail.
 const MANY_INPUTS: [&str; 2] = ["scroll", "read_list"];
 /// Calls that act on the app the script launched, and so need it in front.
-const NEEDS_APP: [&str; 8] = ["tap", "swipe", "scroll", "type", "key", "button", "read_field", "read_list"];
+const NEEDS_APP: [&str; 9] = ["tap", "swipe", "pinch", "scroll", "type", "key", "button", "read_field", "read_list"];
 
 /// A call's arguments after the run's rules have been applied.
 #[derive(Debug)]
@@ -640,10 +641,11 @@ impl PhoneHost<'_> {
                 Ok(r)
             }
             "tap" => self.tap(args).await,
-            "swipe" | "scroll" | "type" | "key" | "button" | "read_list" => {
+            "swipe" | "pinch" | "scroll" | "type" | "key" | "button" | "read_list" => {
                 let s = &mut *self.session;
                 match cmd {
                     "swipe" => Box::pin(s.cmd_swipe(parse_args(&args)?)).await,
+                    "pinch" => Box::pin(s.cmd_pinch(parse_args(&args)?)).await,
                     "scroll" => Box::pin(s.cmd_scroll(parse_args(&args)?)).await,
                     "type" => Box::pin(s.cmd_type(parse_args(&args)?)).await,
                     "key" => Box::pin(s.cmd_key(parse_args(&args)?)).await,
@@ -666,7 +668,7 @@ impl PhoneHost<'_> {
                 Ok(fields! { "value": value })
             }
             other => Err(Fail::invalid(format!(
-                "a script has no `{other}` (read, find, tap, swipe, scroll, type, key, button, launch, apps, waitFor, readField, readList)"
+                "a script has no `{other}` (read, find, tap, swipe, pinch, scroll, type, key, button, launch, apps, waitFor, readField, readList)"
             ))),
         }
     }
@@ -850,6 +852,7 @@ mod tests {
             type("안녕", {submit: true}); key("return"); button("home");
             launch("com.apple.Preferences", {restart: true});
             find("label~=일"); waitFor("일반", {timeout_ms: 100});
+            pinch("out"); pinch({scale: 1.5, rotate: -30, at: "지도"}, {duration_ms: 300});
         "#;
         let (res, _) = go(&mut fake, code, json!({}), limits());
         res.unwrap();
@@ -862,7 +865,9 @@ mod tests {
         assert_eq!(asked[5], ("type", &json!({"submit": true, "text": "안녕"})));
         assert_eq!(asked[8], ("launch", &json!({"restart": true, "app": "com.apple.Preferences"})));
         assert_eq!(asked[10], ("wait_for", &json!({"timeout_ms": 100, "selector": "일반"})));
-        assert_eq!(fake.state.inputs_sent, 9);
+        assert_eq!(asked[11], ("pinch", &json!({"direction": "out"})));
+        assert_eq!(asked[12], ("pinch", &json!({"scale": 1.5, "rotate": -30, "at": "지도", "duration_ms": 300})));
+        assert_eq!(fake.state.inputs_sent, 11);
     }
 
     #[test]
@@ -899,6 +904,18 @@ mod tests {
         let code = "try { tap('x') } catch (e) { output('code', e.code); output('outcome', e.outcome) }\nreturn { after: read().ok }";
         let (res, _) = go(&mut fake, code, json!({}), limits());
         assert_eq!(res.unwrap()["outputs"], json!({"code": "not_found", "outcome": "not_sent", "after": true}));
+    }
+
+    #[test]
+    fn a_pinch_counts_as_input_so_a_later_failure_is_unknown() {
+        let not_found = json!({"ok": false, "outcome": "not_sent", "error": {"code": "not_found", "message": "no element matches"}});
+        let mut fake = Fake::default();
+        fake.answers.insert("tap".into(), not_found);
+        let (res, _) = go(&mut fake, "pinch('out');\ntap('no such label');", json!({}), limits());
+        let f = res.unwrap_err();
+        assert_eq!((f.code.as_str(), f.outcome), ("script_failed", Outcome::Unknown));
+        assert_eq!(f.extra["inputs_sent"], 1);
+        assert!(NEEDS_APP.contains(&"pinch"));
     }
 
     #[test]
