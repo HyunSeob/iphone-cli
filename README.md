@@ -130,7 +130,7 @@ Every command prints JSON; add `--human` for people. The device is chosen by `--
 | `iph type <text> [--clear] [--submit]` | Paste text into the field that has the keyboard (any language, emoji). The clipboard is put back and the field's value checked |
 | `iph key <key>` | `return`, `esc`, `tab`, `cmd+a` … |
 | `iph button <home\|lock\|volume_up\|volume_down>` | Hardware buttons |
-| `iph launch <bundle id \| name> [--restart]` / `iph apps` | Launch an app, list apps |
+| `iph launch <bundle id \| name> [--restart] [--env K=V]… [-- <arguments>…]` / `iph apps` | Launch an app, list apps. `--env` sets environment variables and what follows `--` goes to the app as launch arguments (`iph launch com.example.app --env TZ=UTC -- -AppleLanguages "(ko)"`). Either one restarts a running app, since only a new process takes them; the result says `restart_implied`, with the arguments and the variable names (never their values) |
 | `iph screenshot [-o file]` | PNG capture |
 | `iph batch <file \| ->` | A JSON array of steps in one call |
 | `iph script <file \| -> [--arg k=v]` | Run JavaScript as given (`-` reads stdin) |
@@ -253,7 +253,7 @@ iph scripts                            # list saved scripts
 | `tap([a, b, …])` | Tap several targets in a row on the screen as it is, without reading in between (keypads) |
 | `swipe(direction \| {from, to}, {duration_ms, drag})` · `scroll(direction, {until, max})` | Swipe, scroll |
 | `type(text, {clear, submit})` · `key(name)` · `button(name)` | Type, key, button |
-| `launch(app, {restart})` | Launch and check it is in front. `restart` quits it first so it starts on its first screen |
+| `launch(app, {restart, arguments, environment})` | Launch and check it is in front. `restart` quits it first so it starts on its first screen. `arguments` (array of strings) and `environment` (object of strings) go to the new process and imply `restart` |
 | `waitFor(selector, {timeout_ms})` | Until the element appears (8 s by default). It sits out a system panel (Face ID) that covers the app for a moment |
 | `readField({selector, take, regex})` | One value, as text. `take`: `value` (default), `label`, `identifier`, `text` |
 | `readList({row, columns, key, group, stop_below, until, max_scrolls, limit})` | Collect a list while scrolling, each row once; returns `{rows, scrolls, ended}` |
@@ -277,7 +277,7 @@ Examples: [`settings-version`](scripts/settings-version.js), [`calculator-multip
 
 | Step | What it does |
 |---|---|
-| `launch: <app>` or `{app, restart}` | Launch and check it is in front |
+| `launch: <app>` or `{app, restart, arguments, environment}` | Launch and check it is in front |
 | `wait_for: <selector>` or `{selector, timeout_ms}` | Until the element appears (8 s by default) |
 | `tap: <selector>` or `{selector, long_ms, double, timeout_ms}` · `tap: [selector, …]` | Tap, tap several in a row |
 | `type: <text>` or `{text, clear, submit}` · `swipe: <direction>` or `{from, to, duration_ms, drag}` | Type, swipe |
@@ -303,7 +303,7 @@ ln -s "$PWD/skills/iph" ~/.claude/skills/iph                    # Claude Code
 ln -s "$PWD/skills/iph" ~/.codex/skills/iph                     # Codex
 ```
 
-Tools: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`. Arguments and results are the same as the CLI's. `iph_script` takes `code` (JavaScript) and `args`; `iph_run` takes `name` and `args`. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
+Tools: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`. Arguments and results are the same as the CLI's; `iph_launch` takes `arguments` (array of strings) and `environment` (object of strings). `iph_script` takes `code` (JavaScript) and `args`; `iph_run` takes `name` and `args`. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
 
 ## Speed
 

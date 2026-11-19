@@ -72,7 +72,7 @@ The result: `outputs` (what the script returned), `logs`, `calls`, `inputs_sent`
 
 A script is the body of a function, so `return` ends it. The commands are functions that take the same arguments and return the same result objects as the CLI:
 
-- `read(opts)`, `find(selector)`, `tap(target, opts)`, `swipe(direction | {from, to}, opts)`, `scroll(direction, {until, max})`, `type(text, {clear, submit})`, `key(name)`, `button(name)`, `launch(app, {restart})`, `apps()`. For example `read({ app: true }).elements`, `tap("일반").screen_changed`, `find("label~=업데이트").count`.
+- `read(opts)`, `find(selector)`, `tap(target, opts)`, `swipe(direction | {from, to}, opts)`, `scroll(direction, {until, max})`, `type(text, {clear, submit})`, `key(name)`, `button(name)`, `launch(app, {restart, arguments, environment})`, `apps()`. For example `read({ app: true }).elements`, `tap("일반").screen_changed`, `find("label~=업데이트").count`.
 - `tap(selector)` waits up to 5 s for the element and taps once it holds still (a screen that has just come up may still shift its rows); `{timeout_ms, settle: false}` change that. Like the CLI it then waits for the screen to settle; `{no_wait: true}` skips that. `tap([a, b, c])` presses several targets in a row without re-reading, for keypads.
 - `waitFor(selector, {timeout_ms})` waits for an element (8 s by default) and sits out a system panel that covers the app for a moment.
 - `readField({selector, take, regex})` returns one text. `take`: `value` | `label` | `identifier` | `text`; `regex` keeps its first capture group.
@@ -96,6 +96,8 @@ The `outcome` of a script that stopped:
 - `not_sent`: nothing had been sent. Fix the cause and run it again.
 
 After `launch`, that app must stay in front; if another one comes up, the script stops with `unexpected_app`.
+
+`launch` can pass launch arguments and environment variables to the app (CLI: `iph launch <app> --env NAME=value -- -key value`). Only a new process receives them, so either one restarts a running app (`restart_implied` in the result). Use it to put the app in a state a test needs, such as `-AppleLanguages "(ko)"` or an app's own debug flags, instead of changing settings on the phone. Environment values are never echoed back, so a token can go there.
 
 `iph batch` (a JSON list of steps, MCP `iph_batch`) still works for a short fixed sequence, but a script does the same and more.
 

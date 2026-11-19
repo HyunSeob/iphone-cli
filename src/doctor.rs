@@ -530,7 +530,7 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
         let launched = if locked == Some(true) {
             None
         } else {
-            Some(match s.cmd_launch(LaunchArgs { app: SETTINGS.into(), restart: false }).await {
+            Some(match s.cmd_launch(LaunchArgs { app: SETTINGS.into(), ..Default::default() }).await {
                 Ok(r) => Ok((
                     r.get("foreground").and_then(|v| v.as_bool()) == Some(true),
                     r.get("pid").and_then(|v| v.as_i64()),
