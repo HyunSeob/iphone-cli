@@ -129,6 +129,7 @@ Apple 기기 연결 서비스가 필요합니다. CLI·MCP·스크립트는 선�
 | `iph find <셀렉터>` | 셀렉터에 맞는 요소 |
 | `iph tap <셀렉터 \| x,y> [--long ms] [--double]` | 요소 가운데(또는 좌표) 탭 |
 | `iph swipe <up\|down\|left\|right \| x1,y1,x2,y2> [--duration ms] [--drag]` | 밀기. `--drag`는 멈춘 뒤 손을 떼서 관성 없이 옮깁니다 |
+| `iph pinch [in\|out] [--scale F] [--rotate 각도] [--at 셀렉터 \| x,y] [--duration ms]` | 두 손가락 제스처. `out`은 벌려서(배율 2, 확대) `in`은 오므려서(배율 0.5, 축소) 움직이고, `--scale`은 0.25~4, `--rotate`는 도(°) 단위로 시계 방향이 양수입니다. 손가락은 화면 가운데나 `--at`에서 만납니다. 확대되지 않는 화면에서는 `screen_changed: false`가 정상입니다 |
 | `iph scroll <up\|down> [--until 셀렉터] [--max N]` | 한 칸 스크롤, 또는 요소가 보일 때까지 |
 | `iph type <글> [--clear] [--submit]` | 키보드가 올라온 칸에 붙여넣기로 입력 (한글 · 이모지 가능). 클립보드는 되돌리고, 칸의 값을 확인합니다 |
 | `iph key <키>` | `return`, `esc`, `tab`, `cmd+a` … |
@@ -255,6 +256,7 @@ iph scripts                            # 저장된 스크립트 목록
 | `tap(target, {long_ms, double, timeout_ms, settle})` | 셀렉터면 나타날 때까지 최대 5초 기다리고, 두 번 연속 같은 자리에 있을 때 누릅니다 (막 뜬 화면은 줄이 밀릴 수 있습니다). 끄려면 `settle: false` |
 | `tap([a, b, …])` | 지금 화면에서 여러 개를 이어서 탭. 중간에 다시 읽지 않습니다 (키패드용) |
 | `swipe(방향 \| {from, to}, {duration_ms, drag})` · `scroll(방향, {until, max})` | 밀기 · 스크롤 |
+| `pinch(방향 \| {scale, rotate, at}, {duration_ms})` | 두 손가락으로 오므리기 · 벌리기 · 돌리기 (`iph pinch`와 같음) |
 | `type(글, {clear, submit})` · `key(이름)` · `button(이름)` | 입력 · 키 · 버튼 |
 | `launch(앱, {restart})` | 실행하고 앞에 나왔는지 확인. `restart`는 껐다 켜서 첫 화면에서 시작 |
 | `waitFor(selector, {timeout_ms})` | 요소가 나올 때까지 (기본 8초). 시스템 창(Face ID 등)이 앱을 잠깐 덮어도 기다립니다 |
@@ -284,6 +286,7 @@ iph scripts                            # 저장된 스크립트 목록
 | `wait_for: <셀렉터>` 또는 `{selector, timeout_ms}` | 요소가 나올 때까지 (기본 8초) |
 | `tap: <셀렉터>` 또는 `{selector, long_ms, double, timeout_ms}` · `tap: [셀렉터, …]` | 탭 · 이어서 탭 |
 | `type: <글>` 또는 `{text, clear, submit}` · `swipe: <방향>` 또는 `{from, to, duration_ms, drag}` | 입력 · 밀기 |
+| `pinch: <in\|out>` 또는 `{direction, scale, rotate, at, duration_ms}` | 두 손가락으로 오므리기 · 벌리기 · 돌리기 |
 | `scroll_until: <셀렉터>` 또는 `{selector, direction, max}` | 보일 때까지 스크롤 |
 | `read_field: {name, selector, take, regex}` · `read_list: {name, row, columns, …}` | 값 하나 · 목록 읽기 (`readField` · `readList`와 같음) |
 | `assert: <셀렉터>` · `button: home` · `key: return` · `sleep: 500` | 있어야 진행 · 버튼 · 키 · 대기(ms) |
@@ -306,7 +309,7 @@ ln -s "$PWD/skills/iph" ~/.claude/skills/iph                    # Claude Code
 ln -s "$PWD/skills/iph" ~/.codex/skills/iph                     # Codex
 ```
 
-도구: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`. 인자와 결과는 CLI와 같습니다. `iph_script`는 `code`(자바스크립트)와 `args`를, `iph_run`은 `name`과 `args`를 받습니다. 에이전트용 안내는 [skills/iph/SKILL.md](skills/iph/SKILL.md)에 있습니다.
+도구: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`. 인자와 결과는 CLI와 같습니다. `iph_script`는 `code`(자바스크립트)와 `args`를, `iph_run`은 `name`과 `args`를 받습니다. 에이전트용 안내는 [skills/iph/SKILL.md](skills/iph/SKILL.md)에 있습니다.
 
 ## 속도
 

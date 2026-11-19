@@ -126,6 +126,7 @@ Every command prints JSON; add `--human` for people. The device is chosen by `--
 | `iph find <selector>` | Elements matching a selector |
 | `iph tap <selector \| x,y> [--long ms] [--double]` | Tap the middle of an element, or a point |
 | `iph swipe <up\|down\|left\|right \| x1,y1,x2,y2> [--duration ms] [--drag]` | Swipe. `--drag` slows to a stop before lifting, so nothing coasts |
+| `iph pinch [in\|out] [--scale F] [--rotate DEG] [--at selector \| x,y] [--duration ms]` | Two fingers. `out` spreads them (zoom in, scale 2), `in` pinches them (zoom out, scale 0.5); `--scale` takes 0.25 to 4, `--rotate` degrees (clockwise is positive). They meet in the middle of the screen or at `--at`. `screen_changed: false` is a fair answer on a screen that does not zoom |
 | `iph scroll <up\|down> [--until selector] [--max N]` | One step, or until an element shows |
 | `iph type <text> [--clear] [--submit]` | Paste text into the field that has the keyboard (any language, emoji). The clipboard is put back and the field's value checked |
 | `iph key <key>` | `return`, `esc`, `tab`, `cmd+a` … |
@@ -252,6 +253,7 @@ iph scripts                            # list saved scripts
 | `tap(target, {long_ms, double, timeout_ms, settle})` | For a selector: waits up to 5 s for it to appear and taps once it has been in the same place on two readings in a row (a screen that has just come up may still shift its rows). `settle: false` turns that off |
 | `tap([a, b, …])` | Tap several targets in a row on the screen as it is, without reading in between (keypads) |
 | `swipe(direction \| {from, to}, {duration_ms, drag})` · `scroll(direction, {until, max})` | Swipe, scroll |
+| `pinch(direction \| {scale, rotate, at}, {duration_ms})` | Pinch, spread or turn two fingers (as `iph pinch`) |
 | `type(text, {clear, submit})` · `key(name)` · `button(name)` | Type, key, button |
 | `launch(app, {restart})` | Launch and check it is in front. `restart` quits it first so it starts on its first screen |
 | `waitFor(selector, {timeout_ms})` | Until the element appears (8 s by default). It sits out a system panel (Face ID) that covers the app for a moment |
@@ -281,6 +283,7 @@ Examples: [`settings-version`](scripts/settings-version.js), [`calculator-multip
 | `wait_for: <selector>` or `{selector, timeout_ms}` | Until the element appears (8 s by default) |
 | `tap: <selector>` or `{selector, long_ms, double, timeout_ms}` · `tap: [selector, …]` | Tap, tap several in a row |
 | `type: <text>` or `{text, clear, submit}` · `swipe: <direction>` or `{from, to, duration_ms, drag}` | Type, swipe |
+| `pinch: <in\|out>` or `{direction, scale, rotate, at, duration_ms}` | Pinch, spread or turn two fingers |
 | `scroll_until: <selector>` or `{selector, direction, max}` | Scroll until it shows |
 | `read_field: {name, selector, take, regex}` · `read_list: {name, row, columns, …}` | Read one value, read a list (as `readField` and `readList`) |
 | `assert: <selector>` · `button: home` · `key: return` · `sleep: 500` | Continue only if it is there, button, key, wait (ms) |
@@ -303,7 +306,7 @@ ln -s "$PWD/skills/iph" ~/.claude/skills/iph                    # Claude Code
 ln -s "$PWD/skills/iph" ~/.codex/skills/iph                     # Codex
 ```
 
-Tools: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`. Arguments and results are the same as the CLI's. `iph_script` takes `code` (JavaScript) and `args`; `iph_run` takes `name` and `args`. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
+Tools: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`. Arguments and results are the same as the CLI's. `iph_script` takes `code` (JavaScript) and `args`; `iph_run` takes `name` and `args`. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
 
 ## Speed
 
