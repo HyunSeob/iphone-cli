@@ -233,6 +233,24 @@ fn find_bundle(apps: &[AppListEntry], bundle_id: &str) -> Option<AppBundle> {
     apps.iter().find(|a| a.bundle_identifier == bundle_id).and_then(|a| AppBundle::new(bundle_id, &a.path))
 }
 
+fn bundles_in(listed: &[AppListEntry], apps: &[String]) -> Res<Vec<AppBundle>> {
+    let mut found: Vec<AppBundle> = Vec::new();
+    for app in apps {
+        let bundle_id = crate::actions::bundle_id_in(listed, app)?;
+        if found.iter().any(|b| b.bundle_id == bundle_id) {
+            continue;
+        }
+        found.push(find_bundle(listed, &bundle_id).ok_or_else(|| {
+            Fail::not_sent("app_not_found", format!("no installed app has the bundle id {bundle_id}, or the phone gave no path for it"))
+                .hint(crate::i18n::t(
+                    "`iph apps`로 이름과 bundle id를 확인하세요.",
+                    "See names and bundle ids with `iph apps`.",
+                ))
+        })?);
+    }
+    Ok(found)
+}
+
 /// What is kept on this side. A pid is filtered by the phone instead.
 ///
 /// With neither `processes` nor `apps` every entry passes. With either, an
@@ -987,26 +1005,12 @@ impl Session {
 
     /// Each app, named as `iph launch` takes it, with where it is installed.
     async fn app_bundles(&mut self, apps: &[String]) -> Res<Vec<AppBundle>> {
-        let mut found: Vec<AppBundle> = Vec::new();
-        for app in apps {
-            let bundle_id = self.resolve_bundle(app).await?;
-            if found.iter().any(|b| b.bundle_id == bundle_id) {
-                continue;
-            }
-            // The list is cached; an app installed since is not in it.
-            let mut bundle = find_bundle(&self.list_apps(false).await?, &bundle_id);
-            if bundle.is_none() {
-                bundle = find_bundle(&self.list_apps(true).await?, &bundle_id);
-            }
-            found.push(bundle.ok_or_else(|| {
-                Fail::not_sent("app_not_found", format!("no installed app has the bundle id {bundle_id}, or the phone gave no path for it"))
-                    .hint(crate::i18n::t(
-                        "`iph apps`로 이름과 bundle id를 확인하세요.",
-                        "See names and bundle ids with `iph apps`.",
-                    ))
-            })?);
+        if apps.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(found)
+        // Not the cached list: a reinstall moves an app to a new container,
+        // and its old path would match no entry at all.
+        bundles_in(&self.list_apps(true).await?, apps)
     }
 
     /// End the capture, keeping it for `status`, `read` and `stop`.
@@ -1239,6 +1243,19 @@ mod tests {
         assert_eq!(find_bundle(&apps, "com.apple.Preferences").unwrap().path, "/Applications/Preferences.app");
         assert_eq!(find_bundle(&apps, "com.example.missing"), None);
         assert_eq!(find_bundle(&apps, "com.example.nopath"), None, "an empty path would match nothing useful");
+    }
+
+    #[test]
+    fn apps_named_either_way_resolve_to_one_bundle_from_the_same_list() {
+        let reinstalled = vec![
+            listed("com.apple.Preferences", "설정", "file:///Applications/Preferences.app/"),
+            listed("com.naver.papago", "Papago", "file:///private/var/containers/Bundle/Application/BBBB-2222/Papago.app/"),
+        ];
+        let bundles = bundles_in(&reinstalled, &["Papago".into(), "com.naver.papago".into()]).unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].path, "/var/containers/Bundle/Application/BBBB-2222/Papago.app");
+        assert_eq!(bundles_in(&reinstalled, &["Unknown".into()]).unwrap_err().code, "app_not_found");
+        assert_eq!(bundles_in(&reinstalled, &["com.example.missing".into()]).unwrap_err().code, "app_not_found");
     }
 
     #[test]
