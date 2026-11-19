@@ -110,7 +110,7 @@ jobs:
                 fi
                 echo "Changed files since $tag:"
                 echo "$changed"
-                if printf '%s\n' "$changed" | grep -Eq '^(src/|scripts/|Cargo\.toml$|Cargo\.lock$|LICENSE)'; then
+                if printf '%s\n' "$changed" | grep -Eq '^(src/|scripts/|Cargo\.toml$|Cargo\.lock$|server\.json$|LICENSE)'; then
                   bump_kind="patch"
                 else
                   echo "No release-relevant changes since $tag; skipping auto-bump."
@@ -120,7 +120,7 @@ jobs:
 
             if [[ -n "$bump_kind" ]]; then
               new_version=$(python3 - "$version" "$bump_kind" <<'PY'
-          import pathlib, re, sys
+          import json, pathlib, re, sys
 
           old_ver, kind = sys.argv[1], sys.argv[2]
           major, minor, patch = map(int, old_ver.split("."))
@@ -154,12 +154,21 @@ jobs:
           assert n2 == 1, f"Expected 1 version match in Cargo.lock, got {n2}"
           pathlib.Path("Cargo.lock").write_text(updated_lock)
 
+          server_json_path = pathlib.Path("server.json")
+          if server_json_path.exists():
+              server_data = json.loads(server_json_path.read_text())
+              server_data["version"] = new_ver
+              for pkg in server_data.get("packages", []):
+                  if pkg.get("registryType") == "cargo":
+                      pkg["version"] = new_ver
+              server_json_path.write_text(json.dumps(server_data, indent=2) + "\n")
+
           print(new_ver)
           PY
               )
               git config user.name "github-actions[bot]"
               git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git add Cargo.toml Cargo.lock
+              git add Cargo.toml Cargo.lock server.json
               git commit -m "Release $new_version"
               git push origin HEAD:main
               version="$new_version"
@@ -269,3 +278,53 @@ jobs:
       - run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  mcp_registry:
+    needs: [plan, crate]
+    if: needs.crate.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.9
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+      - name: Wait for crates.io README propagation
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 12); do
+            if curl -fsSL -A "$GITHUB_REPOSITORY release workflow" \
+              "https://crates.io/api/v1/crates/iphone-cli/${VERSION}/readme" | grep -q "mcp-name: io.github.HyunSeob/iphone-cli"; then
+              echo "crates.io README verified for ${VERSION}"
+              exit 0
+            fi
+            echo "Waiting for crates.io README CDN (${i}/12)..."
+            sleep 5
+          done
+          echo "::warning::Proceeding without confirmed crates.io README propagation"
+      - name: Validate and publish to Official MCP Registry
+        run: |
+          set -euo pipefail
+          ./mcp-publisher validate server.json
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

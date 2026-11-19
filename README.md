@@ -326,6 +326,8 @@ ln -s "$PWD/skills/iph" ~/.codex/skills/iph                     # Codex
 
 Tools: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`. Arguments and results are the same as the CLI's; `iph_launch` takes `arguments` (array of strings) and `environment` (object of strings). `iph_script` takes `code` (JavaScript) and `args`; `iph_run` takes `name` and `args`. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
 
+MCP Registry: `mcp-name: io.github.HyunSeob/iphone-cli`
+
 ## Speed
 
 iPhone 15 Pro Max, iOS 27.0.1, Wi-Fi, with the resident process connected (2026-11-11).
