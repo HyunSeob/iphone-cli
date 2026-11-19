@@ -162,6 +162,16 @@ enum Cmd {
         #[arg(short, long)]
         output: Option<String>,
     },
+    /// Record the screen to an MP4 file while other commands run: start, stop, status.
+    Record {
+        action: String,
+        /// start: the file to write (default: iph-record-<time>.mp4 in this directory).
+        #[arg(short, long)]
+        output: Option<String>,
+        /// start: the display to record (default: the first that shows the screen).
+        #[arg(long)]
+        display: Option<i64>,
+    },
     /// Run a JSON array of steps from a file or stdin (-).
     Batch { file: String },
     /// Run JavaScript from a file or stdin (-): read(), tap(), scroll() … as functions.
@@ -461,6 +471,14 @@ async fn run(cli: Cli) -> i32 {
                 .map(|p| p.display().to_string())
                 .unwrap_or(name);
             ("screenshot", json!({ "path": path }))
+        }
+        Cmd::Record { action, output, display } => {
+            let output = match (action.as_str(), output) {
+                ("start", None) => Some(format!("iph-record-{}.mp4", clock::file_stamp())),
+                (_, output) => output,
+            };
+            let path = output.map(|o| std::path::absolute(&o).map(|p| p.display().to_string()).unwrap_or(o));
+            ("record", json!({ "action": action, "path": path, "display": display }))
         }
         Cmd::Batch { file } => {
             let text = if file == "-" {

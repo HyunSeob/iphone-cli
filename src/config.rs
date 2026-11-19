@@ -57,6 +57,10 @@ pub struct DaemonConfig {
     /// When the phone's accessibility daemon stops answering, end it so the
     /// phone starts a new one, and read again.
     pub restart_accessibility: bool,
+    /// End a recording after this many seconds. The phone's video is up to
+    /// 6 Mbit/s, so 30 minutes is up to 1.4 GB, and a recording nobody
+    /// stopped ends within the daemon's own idle time.
+    pub record_max_secs: u64,
 }
 
 impl Default for DaemonConfig {
@@ -66,6 +70,7 @@ impl Default for DaemonConfig {
             idle_exit_secs: 1800,
             screen_video: false,
             restart_accessibility: true,
+            record_max_secs: 1800,
         }
     }
 }
@@ -92,6 +97,7 @@ mod tests {
         assert_eq!(c.udid.as_deref(), Some("X"));
         assert_eq!(c.daemon.input_idle_secs, 0);
         assert_eq!(c.daemon.idle_exit_secs, 1800);
+        assert_eq!(c.daemon.record_max_secs, 1800);
         assert_eq!((c.script.timeout_secs, c.script.memory_mb), (300, 64));
     }
 

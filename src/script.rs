@@ -32,7 +32,7 @@ use crate::{
     fields,
     i18n::t,
     paths,
-    reply::{Fail, Outcome, Res, envelope},
+    reply::{Fail, Fields, Outcome, Res, envelope},
     selector::Selector,
 };
 
@@ -146,6 +146,7 @@ const PRELUDE: &str = r#"
   g.readField = (spec) => call("read_field", opts(spec)).value;
   g.readList = (spec) => call("read_list", opts(spec));
   g.syslog = (action, o) => call("syslog", { ...opts(o), action });
+  g.record = (action, o) => call("record", { ...opts(o), action });
   g.sleep = (ms) => { __sleep(Number(ms) || 0); };
   g.log = (...xs) => { __emit("log", "", xs.map(text).join(" ")); };
   g.output = (key, value) => { __emit("output", String(key), JSON.stringify(value === undefined ? null : value)); };
@@ -452,6 +453,10 @@ pub struct RunState {
     pub expected_pid: Option<i64>,
     /// The call after which the run may not go on, and its result.
     pub unknown: Option<(String, Value)>,
+    /// The action of the `record` call being made.
+    record_action: Option<String>,
+    /// The run started a recording it has not stopped; the run's end stops it.
+    pub owns_recording: bool,
 }
 
 impl RunState {
@@ -463,6 +468,13 @@ impl RunState {
         if cmd == "syslog" && map.get("output").is_some_and(|v| !v.is_null()) {
             // Saved scripts come from anywhere; they do not get to write files.
             return Err(Fail::invalid("a script cannot write a file; read the log back with syslog(\"read\")"));
+        }
+        if cmd == "record" && map.contains_key("path") {
+            // Saved scripts come from anywhere; the file stays where iph keeps its own.
+            return Err(Fail::invalid("a script cannot choose the file; the recording goes to iph's state directory"));
+        }
+        if cmd == "record" {
+            self.record_action = map.get("action").and_then(|v| v.as_str()).map(String::from);
         }
         let hint = map.remove("hint").and_then(|v| v.as_str().map(String::from));
         Ok(Prepared { args: Value::Object(map), hint })
@@ -481,6 +493,13 @@ impl RunState {
         }
         if outcome == "unknown" {
             self.unknown = Some((cmd.to_string(), result.clone()));
+        }
+        if cmd == "record" {
+            match self.record_action.take().as_deref() {
+                Some("start") if result["ok"] == true => self.owns_recording = true,
+                Some("stop") => self.owns_recording = false,
+                _ => {}
+            }
         }
     }
 }
@@ -594,6 +613,18 @@ pub fn finish(ended: Ended, state: &RunState) -> Res {
         .with("inputs_sent", sent))
 }
 
+/// The run's result with the report of the recording its end stopped.
+fn with_recording(res: Res, recording: Option<Res<Fields>>) -> Res {
+    let Some(report) = recording.map(|r| Value::Object(crate::record::report_fields(r))) else { return res };
+    match res {
+        Ok(mut out) => {
+            out.insert("recording".into(), report);
+            Ok(out)
+        }
+        Err(f) => Err(f.with("recording", report)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The real phone
 // ---------------------------------------------------------------------------
@@ -673,8 +704,9 @@ impl PhoneHost<'_> {
                 Ok(fields! { "value": value })
             }
             "syslog" => Box::pin(self.session.cmd_syslog(&args)).await,
+            "record" => Box::pin(self.session.cmd_record(&args)).await,
             other => Err(Fail::invalid(format!(
-                "a script has no `{other}` (read, find, tap, swipe, pinch, scroll, type, key, button, launch, apps, waitFor, readField, readList, syslog)"
+                "a script has no `{other}` (read, find, tap, swipe, pinch, scroll, type, key, button, launch, apps, waitFor, readField, readList, syslog, record)"
             ))),
         }
     }
@@ -706,7 +738,7 @@ impl ScriptHost for PhoneHost<'_> {
 
     fn cut_off(&mut self, cmd: &str) {
         // Whatever was in flight is abandoned with its connections.
-        self.session.reset();
+        self.session.reset(&format!("the script ran out of time during `{cmd}`"));
         if INPUTS.contains(&cmd) {
             self.state.inputs_sent += 1;
         }
@@ -739,14 +771,21 @@ impl Session {
         let mut host = PhoneHost { session: self, state: RunState::default() };
         let ended = run(&mut host, code, args, &limits).await;
         let PhoneHost { session, state } = host;
-        finish(ended, &state).map_err(|mut f| {
+        // A recording the script started and did not stop ends with it,
+        // even when it threw.
+        let recording = match state.owns_recording {
+            true => session.collect_recording("the script ended").await,
+            false => None,
+        };
+        let res = finish(ended, &state).map_err(|mut f| {
             if !f.extra.contains_key("screen_summary")
                 && let Some(seen) = session.last_seen()
             {
                 f = f.with("screen_summary", seen);
             }
             f
-        })
+        });
+        with_recording(res, recording)
     }
 
     /// Serve a `script` request (see [`request`]).
@@ -920,6 +959,50 @@ mod tests {
         let mut run = RunState::default();
         assert!(run.prepare("syslog", json!({"action": "start", "output": null})).is_ok());
         assert!(run.prepare("syslog", json!({"action": "start", "output": "/tmp/x.jsonl"})).is_err());
+    }
+
+    #[test]
+    fn record_is_not_an_input_and_cannot_choose_its_file() {
+        let mut fake = Fake::default();
+        let code = r#"
+            record("start", {display: 0});
+            tap("일반");
+            const done = record("stop");
+            let refused = null;
+            try { record("start", {path: "/tmp/elsewhere.mp4"}); } catch (e) { refused = e.code; }
+            return { refused };
+        "#;
+        let (res, _) = go(&mut fake, code, json!({}), limits());
+        let out = res.unwrap();
+        let asked: Vec<(&str, &Value)> = fake.asked.iter().map(|(c, a)| (c.as_str(), a)).collect();
+        assert_eq!(asked[0], ("record", &json!({"display": 0, "action": "start"})));
+        assert_eq!(asked[2], ("record", &json!({"action": "stop"})));
+        assert_eq!(asked.len(), 3, "the refused start never reached the phone");
+        assert_eq!(out["outputs"]["refused"], "invalid_argument");
+        assert_eq!(out["inputs_sent"], 1);
+    }
+
+    #[test]
+    fn a_recording_the_script_started_and_left_running_is_its_to_end() {
+        let started = |code: &str| {
+            let mut fake = Fake::default();
+            let _ = go(&mut fake, code, json!({}), limits());
+            fake.state.owns_recording
+        };
+        assert!(started(r#"record("start"); throw new Error("boom");"#), "a throw leaves it to the run's end");
+        assert!(started(r#"record("start"); tap("일반");"#));
+        assert!(!started(r#"record("start"); record("stop");"#));
+        assert!(!started(r#"record("status");"#), "a recording someone else started is not the script's");
+        let mut refused = Fake::default();
+        refused.answers.insert("record".into(), json!({"ok": false, "outcome": "not_sent", "error": {"code": "recording_running"}}));
+        let _ = go(&mut refused, r#"try { record("start"); } catch (e) {}"#, json!({}), limits());
+        assert!(!refused.state.owns_recording, "a start that was refused started nothing");
+
+        let report = Some(Ok(fields! { "state": "stopped", "ended_reason": "the script ended" }));
+        assert_eq!(with_recording(Ok(fields! { "outputs": {} }), report.clone()).unwrap()["recording"]["state"], "stopped");
+        let failed = with_recording(Err(Fail::invalid("boom")), report).unwrap_err();
+        assert_eq!(failed.extra["recording"]["ended_reason"], "the script ended");
+        assert!(with_recording(Ok(Fields::new()), None).unwrap().get("recording").is_none());
     }
 
     #[test]

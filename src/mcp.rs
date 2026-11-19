@@ -19,6 +19,7 @@ The commands are functions that return what the tool of the same name returns: r
 pinch(direction | {scale, rotate, at}, opts), scroll(direction, {until, max}), type(text, {clear, submit}), key(name), button(name), launch(app, {restart, arguments, environment}), apps(). Also waitFor(selector, {timeout_ms}), \
 readField({selector, take, regex}) → text, readList({row, columns, group, stop_below, max_scrolls}) → {rows, scrolls, ended}, sleep(ms), log(…), output(key, value). \
 syslog(\"start\" | \"read\" | \"stop\" | \"status\", {app, process, pid, level, after, grep, max}) captures the phone's log as iph_syslog does and returns what it returns; a script cannot write a file. \
+record(\"start\" | \"stop\" | \"status\", {display}) records the screen as iph_record does; a script cannot choose the file. \
 tap(target) waits up to 5 s for a selector to appear and hold still; tap([a, b, c]) presses a keypad without re-reading. \
 A call that fails throws an Error with .code, .outcome, .hint and .result (the full result object); uncaught, it ends the script and the result says which call and line. \
 After a call whose outcome is \"unknown\" the script is stopped and cannot go on. \
@@ -201,6 +202,18 @@ fn tools() -> Vec<Value> {
             &["path"],
         ),
         tool(
+            "iph_record",
+            "Record the phone's screen to an MP4 file while other calls run, as evidence of a test. \
+             \"start\" (one recording at a time; taps keep working), \"stop\" (ends it and returns path, duration_s, frames, lost_packets; with first_loss_s and a packets_lost warning when packets were lost), \"status\". \
+             The phone shows its screen-sharing indicator while recording. Prefer USB: the phone sends one keyframe, so a packet lost over Wi-Fi damages the picture until the end.",
+            json!({
+                "action": { "type": "string", "enum": ["start", "stop", "status"] },
+                "path": { "type": "string", "description": "start: absolute path of the MP4 to write (default: in iph's state directory)." },
+                "display": { "type": "integer", "description": "start: the display to record (default: the first that shows the screen)." },
+            }),
+            &["action"],
+        ),
+        tool(
             "iph_batch",
             "Run several steps in one call, stopping at the first failure. Each step is a one-key object: \
              {\"launch\": \"…\"}, {\"wait_for\": selector}, {\"tap\": selector}, {\"type\": {\"text\": \"…\"}}, {\"swipe\": \"up\"}, {\"pinch\": \"out\"}, \
@@ -258,7 +271,7 @@ async fn call(udid: &str, name: &str, args: Value) -> Value {
         },
         "iph_read" | "iph_find" | "iph_tap" | "iph_swipe" | "iph_pinch" | "iph_scroll" | "iph_type" | "iph_key"
         | "iph_button" | "iph_launch" | "iph_apps" | "iph_screenshot" | "iph_batch" | "iph_doctor"
-        | "iph_dnd" | "iph_syslog" => {
+        | "iph_dnd" | "iph_syslog" | "iph_record" => {
             let cmd = name.trim_start_matches("iph_");
             let args = if cmd == "apps" { Value::Null } else { args };
             client::request(udid, cmd, args).await
@@ -418,6 +431,7 @@ mod tests {
         for expected in [
             "iph_read", "iph_find", "iph_tap", "iph_swipe", "iph_pinch", "iph_scroll", "iph_type", "iph_button",
             "iph_launch", "iph_batch", "iph_script", "iph_run", "iph_scripts", "iph_doctor", "iph_connect",
+            "iph_screenshot", "iph_record",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
@@ -443,6 +457,19 @@ mod tests {
             assert!(serde_json::from_value::<crate::actions::PinchArgs>(args).is_ok());
         }
         assert!(serde_json::from_value::<crate::actions::PinchArgs>(json!({"direction": "out", "zoom": 2})).is_err());
+    }
+
+    #[test]
+    fn iph_record_takes_an_action_and_an_absolute_path() {
+        let tools = tools();
+        let record = tools.iter().find(|t| t["name"] == "iph_record").unwrap();
+        let schema = &record["inputSchema"];
+        assert_eq!(schema["required"], json!(["action"]));
+        assert_eq!(schema["properties"]["action"]["enum"], json!(["start", "stop", "status"]));
+        assert_eq!(schema["properties"]["display"]["type"], "integer");
+        assert!(schema["properties"]["path"]["description"].as_str().unwrap().contains("absolute"));
+        let parsed = crate::record::parse(&json!({"action": "start", "path": "relative.mp4"}), crate::record::default_path);
+        assert_eq!(parsed.unwrap_err().message, "`path` must be an absolute path");
     }
 
     #[test]

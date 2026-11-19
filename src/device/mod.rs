@@ -4,6 +4,7 @@ pub(crate) mod discovery;
 pub(crate) mod identity;
 pub mod conn;
 pub mod input;
+pub mod media;
 pub mod pinch;
 pub mod session;
 pub mod wifi;

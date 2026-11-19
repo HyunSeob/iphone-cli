@@ -372,6 +372,11 @@ impl AdapterHandle {
         }
     }
 
+    /// Whether the background task has ended: a transport error or a close.
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+
     pub async fn close(&mut self) -> Result<(), std::io::Error> {
         if self.sender.send(HandleMessage::Die).is_err() {
             return Err(std::io::Error::new(

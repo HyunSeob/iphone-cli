@@ -48,6 +48,12 @@ pub fn socket(udid: &str) -> PathBuf {
     state_dir().join(format!("{udid}.sock"))
 }
 
+/// The input and recording sessions whose media streams may still run on
+/// the phone.
+pub fn media_session(udid: &str) -> PathBuf {
+    state_dir().join(format!("{udid}.media"))
+}
+
 pub fn daemon_pid(udid: &str) -> PathBuf {
     state_dir().join(format!("{udid}.pid"))
 }
