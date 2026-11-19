@@ -63,6 +63,7 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
         "find" => Box::pin(s.cmd_find(parse_args(args)?)).await,
         "tap" => Box::pin(s.cmd_tap(parse_args(args)?)).await,
         "swipe" => Box::pin(s.cmd_swipe(parse_args(args)?)).await,
+        "pinch" => Box::pin(s.cmd_pinch(parse_args(args)?)).await,
         "scroll" => Box::pin(s.cmd_scroll(parse_args(args)?)).await,
         "type" => Box::pin(s.cmd_type(parse_args(args)?)).await,
         "key" => Box::pin(s.cmd_key(parse_args(args)?)).await,
