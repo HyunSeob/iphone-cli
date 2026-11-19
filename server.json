@@ -3,7 +3,7 @@
   "name": "io.github.HyunSeob/iphone-cli",
   "title": "iphone-cli (iph)",
   "description": "Control any app on a real iPhone (iOS 27+) via accessibility tree. No Xcode or WebDriverAgent.",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "websiteUrl": "https://hyunseob.github.io/iphone-cli/",
   "repository": {
     "url": "https://github.com/HyunSeob/iphone-cli",
@@ -15,7 +15,7 @@
       "registryType": "cargo",
       "registryBaseUrl": "https://crates.io",
       "identifier": "iphone-cli",
-      "version": "0.1.6",
+      "version": "0.1.7",
       "transport": {
         "type": "stdio"
       },
