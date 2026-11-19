@@ -2,7 +2,7 @@
 //! as `waitFor`, `readField` and `readList`.
 //!
 //! A step is a one-key map. Kinds: `launch`, `wait_for`, `tap`, `type`,
-//! `swipe`, `scroll_until`, `read_field`, `read_list`, `assert`, `button`,
+//! `swipe`, `pinch`, `scroll_until`, `read_field`, `read_list`, `assert`, `button`,
 //! `key`, `sleep`. Any step may add `when: "a == b"` (run the
 //! step only then) and `hint: "…"` (what to tell the person if it fails). A
 //! step that fails stops the run; nothing is guessed.
@@ -16,7 +16,7 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 use crate::{
-    actions::{self, ButtonArgs, KeyArgs, LaunchArgs, ScrollArgs, SwipeArgs, TapArgs, TypeArgs, brief},
+    actions::{self, ButtonArgs, KeyArgs, LaunchArgs, PinchArgs, ScrollArgs, SwipeArgs, TapArgs, TypeArgs, brief},
     ax::{
         attrs,
         tree::{BuildOptions, Element, Rect, Screen},
@@ -34,6 +34,7 @@ const KINDS: &[&str] = &[
     "tap",
     "type",
     "swipe",
+    "pinch",
     "scroll_until",
     "read_field",
     "read_list",
@@ -1179,6 +1180,14 @@ impl Session {
                 let r = Box::pin(self.cmd_swipe(args)).await?;
                 no_value(fields! { "screen_changed": r.get("screen_changed").cloned().unwrap_or(Value::Null) })
             }
+            "pinch" => {
+                let args: PinchArgs = match body {
+                    Value::String(s) => PinchArgs { direction: Some(s.clone()), ..Default::default() },
+                    other => actions::parse_args(other)?,
+                };
+                let r = Box::pin(self.cmd_pinch(args)).await?;
+                no_value(fields! { "screen_changed": r.get("screen_changed").cloned().unwrap_or(Value::Null) })
+            }
             "scroll_until" => {
                 let (_, options) = selector_and_options(body)?;
                 let until = match body.as_object() {
@@ -1279,7 +1288,7 @@ impl Session {
                     }
                     if matches!(
                         kind,
-                        "launch" | "tap" | "type" | "swipe" | "scroll_until" | "read_list" | "button" | "key"
+                        "launch" | "tap" | "type" | "swipe" | "pinch" | "scroll_until" | "read_list" | "button" | "key"
                     ) {
                         inputs_sent += 1;
                     }
@@ -1324,6 +1333,19 @@ mod tests {
         assert!(split_step(&json!({"tap": "a", "type": "b"})).unwrap_err().contains("exactly one kind"));
         assert!(split_step(&json!({"tap": "a", "hint": "look"})).is_ok());
         assert!(split_step(&json!({"tap": "a", "confirm": true})).is_err());
+    }
+
+    #[test]
+    fn a_pinch_step_is_a_kind_and_takes_a_direction_or_its_options() {
+        for step in [json!({"pinch": "out"}), json!({"pinch": {"scale": 1.5, "rotate": 30, "at": "Map", "duration_ms": 300}})] {
+            let (kind, body) = split_step(&step).unwrap();
+            assert_eq!(kind, "pinch");
+            if body.is_object() {
+                assert!(actions::parse_args::<PinchArgs>(body).is_ok());
+            }
+        }
+        let unknown = actions::parse_args::<PinchArgs>(&json!({"zoom": 2})).unwrap_err();
+        assert_eq!((unknown.code.as_str(), unknown.outcome), ("invalid_argument", crate::reply::Outcome::NotSent));
     }
 
     #[test]
