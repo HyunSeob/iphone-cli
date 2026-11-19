@@ -73,7 +73,7 @@ It downloads the universal binary (Apple silicon and Intel) from the latest [rel
 - **Windows:** Apple's device service must be installed: the **Apple Devices** app from the Microsoft Store, or just the service with `winget install Apple.AppleMobileDeviceSupport`. Then plug the phone in and tap Trust.
 - **Developer disk image:** when the phone lacks it, `iph doctor` installs it. It uses Xcode's copy when the Mac has one, and otherwise fetches one once from the public [doronz88/DeveloperDiskImage](https://github.com/doronz88/DeveloperDiskImage) repository (about 18 MB, pinned commit and SHA-256). The iph repository contains no Apple files.
 
-With Rust 1.88 or later, the crate on [crates.io](https://crates.io/crates/iphone-cli) installs the same `iph` (building it takes a few minutes; on Windows it needs Visual Studio Build Tools (C++)):
+With Rust 1.93 or later, the crate on [crates.io](https://crates.io/crates/iphone-cli) installs the same `iph` (building it takes a few minutes; on Windows it needs Visual Studio Build Tools (C++)):
 
 ```sh
 cargo install iphone-cli      # ~/.cargo/bin/iph
@@ -151,6 +151,7 @@ Every command prints JSON; add `--human` for people. The device is chosen by `--
 | `iph button <home\|lock\|volume_up\|volume_down>` | Hardware buttons |
 | `iph launch <bundle id \| name> [--restart] [--env K=V]… [-- <arguments>…]` / `iph apps` | Launch an app, list apps. `--env` sets environment variables and what follows `--` goes to the app as launch arguments (`iph launch com.example.app --env TZ=UTC -- -AppleLanguages "(ko)"`). Either one restarts a running app, since only a new process takes them; the result says `restart_implied`, with the arguments and the variable names (never their values) |
 | `iph screenshot [-o file]` | PNG capture |
+| `iph record <start\|stop\|status> [-o file.mp4] [--display N]` | Record the screen to an MP4 file while other commands run |
 | `iph batch <file \| ->` | A JSON array of steps in one call |
 | `iph script <file \| -> [--arg k=v]` | Run JavaScript as given (`-` reads stdin) |
 | `iph run <name> [--arg k=v]` / `iph scripts` | Run a saved script, list saved scripts |
@@ -219,6 +220,7 @@ input_idle_secs = 120    # close the input session after this long unused; 0 clo
 idle_exit_secs = 1800    # the resident process exits after this long without requests
 screen_video = false     # also take the screen video while sending input. Touches do not need it, and over Wi-Fi it clogs the tunnel
 restart_accessibility = true  # when the phone's accessibility daemon stops answering or answers only with empty readings, end it so the phone starts a new one (takes about 20 s)
+record_max_secs = 1800   # `iph record` ends a recording after this long (up to 1.4 GB at the phone's 6 Mbit/s)
 
 [script]
 timeout_secs = 300       # how long one script may run (840 at most)
@@ -266,6 +268,21 @@ iph syslog stop                               # or: stop --grep "general" --max 
 - **After a dropped connection** the phone sends nothing to the next capture for about 20 to 30 s. `status` and `read` say so in a `hint` while nothing has arrived.
 - **Private values:** values an app marks private in its log calls arrive as `<private>`, as in Console. In one app's launch, about a fifth of its entries carried one.
 - Also in scripts as `syslog(action, opts)` and over MCP as `iph_syslog`. A script cannot write a file. Not in `batch`: a capture outlives the call that started it.
+
+## Recordings
+
+Visual evidence for a test run, made by `iph` itself: no ffmpeg is needed.
+
+**Recording.** `iph record start -o run.mp4` starts writing the screen to an MP4 (HEVC, as the phone sends it), and `iph record stop` ends it and returns `{path, duration_s, frames, keyframes, lost_packets, bytes, width, height}`, with `first_loss_s` and a `packets_lost` warning when packets were lost. `iph record status` shows the state. Taps, swipes and reads keep working while it runs (tap latency was the same with and without a recording). One recording at a time: a second `start` fails with `recording_running` and a `stop` with nothing running with `no_recording`, and neither changes anything.
+
+- **How:** the recorder opens a screen-sharing session of its own with the phone, the video of one display, next to the input session's audio, so the phone shows its screen-sharing indicator. Each session stops only its own streams: input sessions open, close and retry as usual while a recording runs, and `stop` leaves the input session alone.
+- **Use USB.** The phone sends one keyframe, at the start, and never another, so a lost packet damages the picture from there to the end of the file. Players still open such a file. When packets were lost, the result has `lost_packets` above 0, `first_loss_s` (seconds into the file where the damage starts) and a `warning` with code `packets_lost`; the result stays `ok`. On an iPhone 16 Pro over Wi-Fi, 2 of 9 short recordings lost packets (9 and 51). Over USB no packet was lost in the runs measured.
+- **Still screens:** the phone sends few frames or none while nothing moves. The last frame then lasts until `stop`, so the file is as long as the recording.
+- **Which display:** without `--display`, displays 1, 0 and 2 are tried and the first whose video has the shape of the screen being read is kept: its width and height in pixels must match the points of `iph read` to within 1%, else `display_mismatch`. A display whose video does not start (`record_failed`) is passed over too, and the displays are tried for at most 45 s, after which `start` fails with `start_timeout`. On an iPhone Duo folded, displays 0 and 1 both show the cover screen and display 2 sends nothing.
+- **The file:** frames go to `<file>.part` as they come, and `stop` adds the index and renames it. If the resident process stops (`iph stop`), the file is completed too. If it is killed, only `<file>.part` is left, without the index; the stream it left running on the phone is stopped within seconds after the next command connects to the phone. So is the video of a start that was cut off, or of a recording that ended because the connection was reset; a stream still left when the resident process exits is stopped on its way out. Streams another client started, such as Xcode's screen view, are left alone.
+- **Ending on its own:** a recording also ends, and its file is completed with what came, when the connection to the phone is closed, or reset after a connection error, an accessibility service that would not open, or a command that ran out of time (not when only the accessibility connection or the input session is made again), when the phone stops sending the video (none for 2.5 s, and the phone no longer lists the stream or did not answer three checks in a row), when the phone changes the video's parameter sets, or after `record_max_secs` (`[daemon]` in `config.toml`, default 1800: at the phone's cap of 6 Mbit/s, 30 minutes is up to 1.4 GB). The reason is in `ended_reason`. `stop` returns that report, or else the next `start` does, under `previous`. The resident process does not exit for being idle while it records, nor for its idle time after a recording ended with nobody told.
+- **Scripts:** a recording a script started and did not stop ends with the script, also when the script throws, and the script's result has its report under `recording`.
+- Measured on an iPhone Duo (iOS 27.2.1, folded, USB): 1408x2048, 50 to 52 fps while the screen moves, about 0.5 Mbit/s.
 
 ## Scripts
 
@@ -339,7 +356,7 @@ Examples: [`settings-version`](scripts/settings-version.js), [`calculator-multip
 | `assert: <selector>` · `button: home` · `key: return` · `sleep: 500` | Continue only if it is there, button, key, wait (ms) |
 | (on any step) `when: "a == b"` · `hint: "…"` | Condition, what to say if it stops |
 
-A failing step returns `{failed_step, reason, screen_summary, inputs_sent}`; each step's `elapsed_ms` is in `steps`.
+A failing step returns `{failed_step, reason, screen_summary, inputs_sent}`; each step's `elapsed_ms` is in `steps`. Recording is not a step: a recording spans requests, and a failing batch would leave it running. Scripts have `record()`.
 
 ## MCP
 
@@ -356,7 +373,7 @@ ln -s "$PWD/skills/iph" ~/.claude/skills/iph                    # Claude Code
 ln -s "$PWD/skills/iph" ~/.codex/skills/iph                     # Codex
 ```
 
-Tools: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`, `iph_syslog`. Arguments and results are the same as the CLI's; `iph_launch` takes `arguments` (array of strings) and `environment` (object of strings). `iph_script` takes `code` (JavaScript) and `args`; `iph_run` takes `name` and `args`. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
+Tools: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_record`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`, `iph_syslog`. Arguments and results are the same as the CLI's; `iph_launch` takes `arguments` (array of strings) and `environment` (object of strings). `iph_script` takes `code` (JavaScript) and `args`; `iph_run` takes `name` and `args`. Guidance for agents: [skills/iph/SKILL.md](skills/iph/SKILL.md).
 
 MCP Registry: `mcp-name: io.github.HyunSeob/iphone-cli`
 
@@ -384,6 +401,7 @@ A reading takes more than a second because of the phone: after a request it wait
 - Notification banners and system pop-ups are not in the app's tree. `iph dnd on` keeps most banners away, but not what comes through Do Not Disturb.
 - The screen-reading service can stop answering. iph attempts a restart at most every two minutes, except when the last screen was a system panel or a previous restart did not help. If Control Center cannot be read while recording, close it with `iph button home` or bring an app up with `iph launch`, then read again. See [recovery behavior](docs/how-it-works.md#6-연결과-화면-읽기-복구) (Korean).
 - Portrait only.
+- Record over USB. Over Wi-Fi, 2 of 9 short recordings lost packets in testing, and with one keyframe per stream a lost packet damages the rest of the file (`warning.code` is `packets_lost`).
 - `iph apps` shows the names the phone reports (usually English). Launch by bundle id to be sure.
 - `iph type` puts back the clipboard's text (or one image). **Content copied in an app (text from Notes, which comes with formatting) is not put back.** Reading it from the computer stalls the phone's clipboard for about a minute, so it is left unread and the clipboard is emptied after typing. The result says `clipboard_restored: false` with a `clipboard_note`.
 - Nothing works on a locked phone. Face ID and passcode prompts are never answered for you.
