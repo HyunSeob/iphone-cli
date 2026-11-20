@@ -84,38 +84,16 @@ impl MediaControl {
             .map_err(|e| anyhow!("display service: {e:?}"))
     }
 
-    /// One CoreDevice invocation, built the way the device library builds it.
+    /// One CoreDevice invocation.
     async fn invoke(&mut self, feature: &str, input: Dictionary, action: Option<&str>) -> Result<plist::Value> {
-        let mut version = Dictionary::new();
-        version.insert("originalComponentsCount".into(), XPCObject::Int64(CORE_DEVICE_VERSION.len() as i64));
-        version.insert("components".into(), XPCObject::Array(CORE_DEVICE_VERSION.map(XPCObject::UInt64).to_vec()));
-        version.insert(
-            "stringValue".into(),
-            XPCObject::String(CORE_DEVICE_VERSION.map(|c| c.to_string()).join(".")),
-        );
-        let mut req = Dictionary::new();
-        req.insert("CoreDevice.CoreDeviceDDIProtocolVersion".into(), XPCObject::Int64(if action.is_some() { 2 } else { 0 }));
-        req.insert("CoreDevice.action".into(), XPCObject::Dictionary(Dictionary::new()));
-        req.insert("CoreDevice.coreDeviceVersion".into(), XPCObject::Dictionary(version));
-        req.insert("CoreDevice.deviceIdentifier".into(), XPCObject::String(uuid::Uuid::new_v4().to_string()));
-        req.insert("CoreDevice.featureIdentifier".into(), XPCObject::String(feature.into()));
-        req.insert("CoreDevice.input".into(), XPCObject::Dictionary(input));
-        req.insert("CoreDevice.invocationIdentifier".into(), XPCObject::String(uuid::Uuid::new_v4().to_string()));
-        if let Some(action) = action {
-            req.insert("CoreDevice.actionIdentifier".into(), XPCObject::String(action.into()));
-        }
         let mut link = match self.link.take() {
             Some(link) => link,
             None => self.open_link().await?,
         };
-        link.0.send_object(req, true).await.map_err(|e| anyhow!("{e:?}"))?;
+        link.0.send_object(request(feature, input, action), true).await.map_err(|e| anyhow!("{e:?}"))?;
         let res = link.0.recv().await.map_err(|e| anyhow!("{e:?}"))?;
         self.link = Some(link);
-        let mut res = res.into_dictionary().ok_or_else(|| anyhow!("the answer is not a dictionary"))?;
-        match res.remove("CoreDevice.output") {
-            Some(out) => Ok(out),
-            None => Err(anyhow!("{:?}", res.get("CoreDevice.error").unwrap_or(&plist::Value::Dictionary(res.clone())))),
-        }
+        output(res)
     }
 
     /// Start one stream.
@@ -180,6 +158,39 @@ impl MediaControl {
             unmark(marker, id);
         }
         stopped
+    }
+}
+
+/// A CoreDevice invocation of `feature`, built the way the device library
+/// builds it.
+pub(crate) fn request(feature: &str, input: Dictionary, action: Option<&str>) -> Dictionary {
+    let mut version = Dictionary::new();
+    version.insert("originalComponentsCount".into(), XPCObject::Int64(CORE_DEVICE_VERSION.len() as i64));
+    version.insert("components".into(), XPCObject::Array(CORE_DEVICE_VERSION.map(XPCObject::UInt64).to_vec()));
+    version.insert(
+        "stringValue".into(),
+        XPCObject::String(CORE_DEVICE_VERSION.map(|c| c.to_string()).join(".")),
+    );
+    let mut req = Dictionary::new();
+    req.insert("CoreDevice.CoreDeviceDDIProtocolVersion".into(), XPCObject::Int64(if action.is_some() { 2 } else { 0 }));
+    req.insert("CoreDevice.action".into(), XPCObject::Dictionary(Dictionary::new()));
+    req.insert("CoreDevice.coreDeviceVersion".into(), XPCObject::Dictionary(version));
+    req.insert("CoreDevice.deviceIdentifier".into(), XPCObject::String(uuid::Uuid::new_v4().to_string()));
+    req.insert("CoreDevice.featureIdentifier".into(), XPCObject::String(feature.into()));
+    req.insert("CoreDevice.input".into(), XPCObject::Dictionary(input));
+    req.insert("CoreDevice.invocationIdentifier".into(), XPCObject::String(uuid::Uuid::new_v4().to_string()));
+    if let Some(action) = action {
+        req.insert("CoreDevice.actionIdentifier".into(), XPCObject::String(action.into()));
+    }
+    req
+}
+
+/// The output of a CoreDevice invocation's answer, or its error.
+pub(crate) fn output(answer: plist::Value) -> Result<plist::Value> {
+    let mut res = answer.into_dictionary().ok_or_else(|| anyhow!("the answer is not a dictionary"))?;
+    match res.remove("CoreDevice.output") {
+        Some(out) => Ok(out),
+        None => Err(anyhow!("{:?}", res.get("CoreDevice.error").unwrap_or(&plist::Value::Dictionary(res.clone())))),
     }
 }
 

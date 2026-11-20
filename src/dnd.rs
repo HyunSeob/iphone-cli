@@ -22,7 +22,8 @@ use crate::{
     config::DndConfig,
     device::{
         ax::trace,
-        input::{Motion, normalize},
+        display::Space,
+        input::Motion,
         session::{Fresh, Gesture, Session},
     },
     fields,
@@ -260,29 +261,27 @@ fn no_list() -> Fail {
 }
 
 impl Session {
-    async fn dnd_touch(&mut self, size: (f64, f64), touch: Touch) -> Res<()> {
-        let (w, h) = size;
-        let at = |x: f64, y: f64| (normalize(x, w), normalize(y, h));
+    /// `start`: the screen from before the pull, for its size. The pull is a
+    /// direction on the screen as turned; Control Center belongs to the
+    /// system, so its frames are the panel's.
+    async fn dnd_touch(&mut self, start: &Screen, touch: Touch) -> Res<()> {
         let gesture = match touch {
             // Slowing to a stop keeps the pull on Control Center's first
             // page; a flick of the same length landed on its second.
             Touch::Pull => {
+                let on = start.canvas(Space::Screen);
+                let (w, h) = on.size;
                 let x = (w - 30.0).max(w * 0.9);
                 Gesture::Drag {
-                    from: at(x, 2.0),
-                    to: at(x, h * 0.32),
+                    on,
+                    from: (x, 2.0),
+                    to: (x, h * 0.32),
                     duration: Duration::from_millis(350),
                     motion: Motion::Place,
                 }
             }
-            Touch::Hold(x, y) => {
-                let (x, y) = at(x, y);
-                Gesture::Tap { x, y, hold: HOLD }
-            }
-            Touch::Tap(x, y) => {
-                let (x, y) = at(x, y);
-                Gesture::Tap { x, y, hold: Duration::from_millis(50) }
-            }
+            Touch::Hold(x, y) => Gesture::Tap { on: start.canvas(Space::Panel), at: (x, y), hold: HOLD },
+            Touch::Tap(x, y) => Gesture::Tap { on: start.canvas(Space::Panel), at: (x, y), hold: Duration::from_millis(50) },
             Touch::Home => {
                 let (page, usage, hold) = crate::keys::button("home").map_err(Fail::invalid)?;
                 Gesture::Button { page, usage, hold: Duration::from_millis(hold) }
@@ -335,7 +334,6 @@ impl Session {
         labels: &Labels,
         mut seen: Option<(Screen, View)>,
     ) -> Res<Screen> {
-        let size = (start.width, start.height);
         // Home closes one panel at a time, and the list lies over Control
         // Center: two presses, without the reading in between (Control
         // Center takes 3 to 7 s to answer).
@@ -370,7 +368,7 @@ impl Session {
                 if i > 0 {
                     tokio::time::sleep(BETWEEN_HOME).await;
                 }
-                self.dnd_touch(size, Touch::Home).await?;
+                self.dnd_touch(start, Touch::Home).await?;
                 presses += 1;
             }
         }
@@ -412,7 +410,6 @@ impl Session {
     /// The steps of `focus_switch` from the pull to the closed panel. On
     /// failure the panel is left as it is, for the caller to close.
     async fn focus_steps(&mut self, want: &Want, labels: &Labels, start: &Screen) -> Res<Switch> {
-        let size = (start.width, start.height);
         let front = start.apps.first().map(|a| a.pid);
         // A button of that name already on screen is something else (an app
         // icon); the control is the one that appears with the pull.
@@ -436,7 +433,7 @@ impl Session {
                 // at all (cause unknown). Try again on a new session.
                 self.close_input().await;
             }
-            self.dnd_touch(size, Touch::Pull).await?;
+            self.dnd_touch(start, Touch::Pull).await?;
             let (ok, screen, seen) = self
                 .dnd_until(AFTER_DRAG, labels, |v| control_of(v).is_some() || matches!(v, View::List { .. }))
                 .await?;
@@ -448,7 +445,7 @@ impl Session {
         let (mut screen, mut seen) = last.expect("the loop ran");
         if matches!(seen, View::List { .. }) {
             // The pull met a list that was open; one step back are the controls.
-            self.dnd_touch(size, Touch::Home).await?;
+            self.dnd_touch(start, Touch::Home).await?;
             (_, screen, seen) = self.dnd_until(AFTER_HOME, labels, |v| control_of(v).is_some()).await?;
         }
         let Some((control, active)) = control_of(&seen) else {
@@ -465,7 +462,7 @@ impl Session {
         let mut changed = false;
         if !nothing_to_do {
             let (x, y) = control.center();
-            self.dnd_touch(size, Touch::Hold(x, y)).await?;
+            self.dnd_touch(start, Touch::Hold(x, y)).await?;
             (_, screen, seen) = self
                 .dnd_until(AFTER_TAP, labels, |v| matches!(v, View::List { .. }))
                 .await?;
@@ -488,7 +485,7 @@ impl Session {
                         .map_err(|e| Fail::unknown("state_write_failed", format!("{e}")))?;
                     self.dnd.record = Some(record);
                 }
-                self.dnd_touch(size, Touch::Tap(x, y)).await?;
+                self.dnd_touch(start, Touch::Tap(x, y)).await?;
                 let ok;
                 (ok, screen, seen) = self
                     .dnd_until(AFTER_TAP, labels, |v| {
