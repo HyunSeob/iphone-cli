@@ -83,6 +83,7 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
         "doctor" => Box::pin(doctor::run(s, parse_args(args)?)).await,
         "dnd" => Box::pin(s.cmd_dnd(parse_args(args)?)).await,
         "syslog" => Box::pin(s.cmd_syslog(args)).await,
+        "record" => Box::pin(s.cmd_record(args)).await,
         "status" => Ok(fields! {
             "udid": s.udid.clone(),
             "connection": s.connection(),
@@ -92,6 +93,7 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
             "connects": s.connects,
             "ax_restarts": s.ax_restarts,
             "capture": s.capture_state(),
+            "recording": s.recorder.status().get("state").cloned(),
             "pid": std::process::id(),
             "build": build_stamp(),
         }),
@@ -103,6 +105,14 @@ async fn dispatch(s: &mut Session, cmd: &str, args: &Value) -> Res {
                 None => false,
             };
             Ok(fields! { "closed": closed })
+        }
+        // For testing `iph record`: what the phone says about its media
+        // streams, asked on a new connection.
+        "debug_media_status" if std::env::var("IPH_DEBUG").is_ok_and(|v| v == "1") => {
+            let mut display: idevice::core_device::DisplayServiceClient<Box<dyn idevice::ReadWrite>> =
+                s.rsd_client().await?;
+            let status = display.get_media_stream_server_status().await;
+            Ok(fields! { "status": format!("{status:?}") })
         }
         other => Err(Fail::invalid(format!("unknown command `{other}`"))),
     }
@@ -170,7 +180,7 @@ async fn handle(stream: ipc::Stream, shared: Arc<Shared>) -> Result<()> {
                 Ok(r) => r,
                 Err(_) => {
                     // Whatever was in flight is abandoned with its connections.
-                    session.reset();
+                    session.reset(&format!("`{cmd}` did not finish within {} s", budget(cmd).as_secs()));
                     Err(Fail::unknown(
                         "timeout",
                         format!("`{cmd}` did not finish within {} s", budget(cmd).as_secs()),
@@ -240,8 +250,14 @@ pub async fn run(udid: String) -> Result<()> {
                     let idle = keeper.last_request.lock().unwrap().elapsed();
                     if let Ok(mut session) = keeper.session.try_lock() {
                         session.sweep().await;
+                        session.check_recording().await;
                         session.close_idle_input().await;
-                        if idle > idle_exit {
+                        session.reap_media().await;
+                        // A recording runs without requests, for at most
+                        // `record_max_secs`; exiting would end it. One that
+                        // ended on its own keeps its report for as long as a
+                        // request would keep the daemon.
+                        if idle > idle_exit && !session.recorder.holds_daemon(idle_exit) {
                             log("idle, exiting");
                             session.end_capture_before_exit("the daemon exited after its idle time").await;
                             session.shutdown().await;

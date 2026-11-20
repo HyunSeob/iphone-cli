@@ -76,7 +76,7 @@ iph setup                     # 폰 준비 상태를 차례로 확인하고, 할
 - **윈도:** 애플의 기기 연결 서비스가 있어야 합니다. Microsoft Store의 **Apple 기기**(Apple Devices) 앱을 깔거나, `winget install Apple.AppleMobileDeviceSupport`로 서비스만 깔면 됩니다. 그 뒤 폰을 USB로 꽂고 '신뢰'를 누르세요.
 - **개발자 디스크 이미지:** 폰에 없으면 `iph doctor`가 연결합니다. 맥에 Xcode가 있으면 Xcode의 이미지를 쓰고, 없으면 공개 저장소 [doronz88/DeveloperDiskImage](https://github.com/doronz88/DeveloperDiskImage)에서 처음 한 번 받아 옵니다 (약 18 MB, 커밋과 SHA-256 고정). iph 저장소에는 애플 파일이 들어 있지 않습니다.
 
-Rust 1.88 이상이 있으면 [crates.io](https://crates.io/crates/iphone-cli)의 크레이트로도 같은 `iph`를 깔 수 있습니다 (빌드에 몇 분 걸리고, 윈도는 Visual Studio Build Tools(C++)가 필요합니다).
+Rust 1.93 이상이 있으면 [crates.io](https://crates.io/crates/iphone-cli)의 크레이트로도 같은 `iph`를 깔 수 있습니다 (빌드에 몇 분 걸리고, 윈도는 Visual Studio Build Tools(C++)가 필요합니다).
 
 ```sh
 cargo install iphone-cli      # ~/.cargo/bin/iph
@@ -154,6 +154,7 @@ Apple 기기 연결 서비스가 필요합니다. CLI·MCP·스크립트는 선�
 | `iph button <home\|lock\|volume_up\|volume_down>` | 하드웨어 버튼 |
 | `iph launch <bundle id \| 이름> [--restart] [--env K=V]… [-- <인자>…]` / `iph apps` | 앱 실행 · 목록. `--env`는 환경 변수를, `--` 뒤는 앱의 실행 인자를 넘깁니다 (`iph launch com.example.app --env TZ=UTC -- -AppleLanguages "(ko)"`). 새 프로세스만 이 값을 받으므로 둘 중 하나라도 있으면 켜져 있던 앱도 껐다 켭니다. 결과의 `restart_implied`로 알 수 있고, 인자와 환경 변수 이름(값은 제외)이 함께 나옵니다 |
 | `iph screenshot [-o 파일]` | PNG 캡처 |
+| `iph record <start\|stop\|status> [-o 파일.mp4] [--display N]` | 다른 명령을 쓰는 동안 화면을 MP4 파일로 녹화 |
 | `iph batch <파일 \| ->` | JSON 단계 배열을 한 번에 |
 | `iph script <파일 \| -> [--arg k=v]` | 자바스크립트를 바로 실행 (`-`는 표준 입력) |
 | `iph run <이름> [--arg k=v]` / `iph scripts` | 저장된 스크립트 실행 · 목록 |
@@ -222,6 +223,7 @@ input_idle_secs = 120    # 입력 세션을 이만큼 안 쓰면 닫음. 0이면
 idle_exit_secs = 1800    # 요청이 이만큼 없으면 상주 프로세스 종료
 screen_video = false     # 입력 중 화면 영상도 받을지. 터치에는 필요 없고, 무선에서는 터널을 막아 느려집니다
 restart_accessibility = true  # 폰의 접근성 서비스가 답을 멈추거나 빈 답만 보내면 끝내서 폰이 새로 띄우게 함 (약 20초 걸림)
+record_max_secs = 1800   # `iph record` 녹화를 이만큼 지나면 끝냄 (폰의 6 Mbit/s로 1.4 GB까지)
 
 [script]
 timeout_secs = 300       # 스크립트 하나가 돌 수 있는 시간 (최대 840)
@@ -269,6 +271,21 @@ iph syslog stop                               # 또는 stop --grep "general" --m
 - **연결이 끊긴 직후**에는 폰이 다음 기록에 약 20~30초 동안 아무것도 보내지 않습니다. 그동안 `status`와 `read`의 `hint`가 이를 알려 줍니다.
 - **비공개 값:** 앱이 로그에서 비공개로 표시한 값은 콘솔 앱에서처럼 `<private>`로 옵니다. 한 앱을 띄울 때 받은 항목 가운데 약 5분의 1에 들어 있었습니다.
 - 스크립트에서는 `syslog(action, opts)`, MCP에서는 `iph_syslog`입니다. 스크립트는 파일을 쓰지 못합니다. `batch`에는 없습니다. 기록은 그것을 시작한 호출보다 오래가기 때문입니다.
+
+## 화면 녹화
+
+테스트 결과를 눈으로 확인할 증거를 `iph`가 직접 만듭니다. ffmpeg는 필요 없습니다.
+
+**녹화.** `iph record start -o run.mp4`로 화면을 MP4(폰이 보내는 그대로 HEVC)에 쓰기 시작하고, `iph record stop`으로 끝내면 `{path, duration_s, frames, keyframes, lost_packets, bytes, width, height}`가 나옵니다. 패킷이 빠졌으면 `first_loss_s`와 `packets_lost` 경고도 함께 나옵니다. `iph record status`는 지금 상태를 보여 줍니다. 녹화 중에도 탭 · 스와이프 · 읽기는 그대로 됩니다 (탭 지연은 녹화할 때와 안 할 때가 같았습니다). 녹화는 한 번에 하나입니다. 녹화 중에 `start`를 또 부르면 `recording_running`, 녹화가 없는데 `stop`을 부르면 `no_recording`이 나오고, 어느 쪽도 아무것도 바꾸지 않습니다.
+
+- **방법:** 녹화는 폰과 따로 화면 공유 세션을 열어 디스플레이 하나의 영상을 받습니다. 입력 세션의 오디오와 나란히 돌고, 폰에는 화면 공유 표시가 뜹니다. 두 세션은 저마다 자기 스트림만 멈춥니다. 그래서 녹화 중에도 입력 세션은 평소처럼 열고 닫고 다시 열 수 있고, `stop`은 입력 세션을 건드리지 않습니다.
+- **USB로 녹화하세요.** 폰은 키프레임을 처음에 한 번만 보내고 다시는 보내지 않습니다. 그래서 패킷이 하나라도 빠지면 그 지점부터 파일 끝까지 화면이 깨집니다. 이렇게 깨진 파일도 플레이어에서는 그대로 열립니다. 패킷이 빠지면 결과의 `lost_packets`가 0보다 크고, 깨지기 시작하는 지점(파일 앞에서부터 초)이 `first_loss_s`에, 코드가 `packets_lost`인 경고가 `warning`에 나옵니다. 결과는 그대로 `ok`입니다. iPhone 16 Pro를 Wi-Fi로 연결해 짧게 9번 녹화했을 때 2번 패킷이 빠졌습니다(9개, 51개). USB로 잰 녹화에서는 빠진 패킷이 없었습니다.
+- **멈춘 화면:** 화면이 움직이지 않는 동안 폰은 프레임을 거의 또는 전혀 보내지 않습니다. 마지막 프레임이 `stop`까지 이어지므로 파일 길이는 녹화한 시간과 같습니다.
+- **어느 디스플레이:** `--display`를 주지 않으면 1, 0, 2 순서로 시도해, 읽고 있는 화면과 모양이 같은 영상을 처음 보낸 디스플레이를 씁니다. 영상의 가로 · 세로 픽셀이 `iph read`의 포인트와 1% 안에서 맞아야 하고, 아니면 `display_mismatch`입니다. 영상이 시작되지 않는 디스플레이(`record_failed`)도 건너뛰고, 디스플레이를 고르는 데는 최대 45초를 쓰고, 넘으면 `start`가 `start_timeout`으로 실패합니다. iPhone Duo를 접은 상태에서는 0과 1이 모두 바깥 화면을 보여 주고 2는 아무것도 보내지 않았습니다.
+- **파일:** 프레임은 오는 대로 `<파일>.part`에 쓰고, `stop` 때 색인을 붙여 이름을 바꿉니다. 상주 프로세스가 끝날 때(`iph stop`)도 파일을 마무리합니다. 강제로 죽으면 색인 없는 `<파일>.part`만 남고, 그 프로세스가 폰에 남긴 스트림은 다음 명령이 폰에 다시 연결하고 몇 초 안에 멈춥니다. 시작하다 끊긴 녹화의 영상, 연결을 다시 맺느라 끝난 녹화의 영상도 마찬가지이고, 상주 프로세스가 끝날 때까지 남은 스트림은 끝나기 전에 멈춥니다. Xcode 화면 보기처럼 다른 프로그램이 연 스트림은 건드리지 않습니다.
+- **저절로 끝날 때:** 폰과의 연결이 끊기거나, 연결 오류 · 열리지 않는 접근성 서비스 · 시간 안에 끝나지 않은 명령 때문에 연결을 다시 맺을 때(접근성 연결이나 입력 세션만 다시 맺을 때는 아님), 폰이 영상을 더 보내지 않을 때(2.5초 동안 오지 않았고, 폰의 스트림 목록에도 없거나 폰이 세 번 잇달아 답하지 않을 때), 폰이 영상의 파라미터 세트를 바꿀 때, `record_max_secs`(`config.toml`의 `[daemon]`, 기본 1800초)가 지났을 때도 녹화가 끝나고, 받은 데까지로 파일을 마무리합니다. 폰은 영상을 최대 6 Mbit/s로 보내므로 30분이면 1.4 GB까지 됩니다. 끝난 이유는 `ended_reason`에 나옵니다. 그 결과는 `stop`이 돌려주고, `stop`을 부르지 않았다면 다음 `start`가 `previous`에 담아 돌려줍니다. 녹화하는 동안, 그리고 녹화가 저절로 끝났는데 아직 아무도 결과를 받지 않았다면 그 뒤로 대기 시간만큼, 상주 프로세스는 쓰지 않아도 끝나지 않습니다.
+- **스크립트:** 스크립트가 시작하고 멈추지 않은 녹화는 스크립트가 끝날 때 함께 끝납니다. 스크립트가 예외를 던져도 마찬가지이고, 스크립트 결과의 `recording`에 그 녹화의 결과가 담깁니다.
+- iPhone Duo(iOS 27.2.1, 접은 상태, USB)에서 잰 값: 1408x2048, 화면이 움직일 때 초당 50~52프레임, 약 0.5 Mbit/s.
 
 ## 스크립트
 
@@ -342,7 +359,7 @@ iph scripts                            # 저장된 스크립트 목록
 | `assert: <셀렉터>` · `button: home` · `key: return` · `sleep: 500` | 있어야 진행 · 버튼 · 키 · 대기(ms) |
 | (어느 단계든) `when: "a == b"` · `hint: "…"` | 조건 · 멈췄을 때 안내 |
 
-단계가 실패하면 `{failed_step, reason, screen_summary, inputs_sent}`를 돌려주고, 단계별 `elapsed_ms`가 `steps`에 들어 있습니다.
+단계가 실패하면 `{failed_step, reason, screen_summary, inputs_sent}`를 돌려주고, 단계별 `elapsed_ms`가 `steps`에 들어 있습니다. 녹화는 단계로 넣을 수 없습니다. 녹화는 여러 요청에 걸쳐 이어지는데, 중간에 실패한 batch가 녹화를 켜 둔 채 끝날 수 있기 때문입니다. 스크립트에는 `record()`가 있습니다.
 
 ## MCP
 
@@ -359,7 +376,7 @@ ln -s "$PWD/skills/iph" ~/.claude/skills/iph                    # Claude Code
 ln -s "$PWD/skills/iph" ~/.codex/skills/iph                     # Codex
 ```
 
-도구: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`, `iph_syslog`. 인자와 결과는 CLI와 같고, `iph_launch`는 `arguments`(글자 배열)와 `environment`(글자 값 객체)를 받습니다. `iph_script`는 `code`(자바스크립트)와 `args`를, `iph_run`은 `name`과 `args`를 받습니다. 에이전트용 안내는 [skills/iph/SKILL.md](skills/iph/SKILL.md)에 있습니다.
+도구: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch`, `iph_scroll`, `iph_type`, `iph_key`, `iph_button`, `iph_launch`, `iph_apps`, `iph_screenshot`, `iph_record`, `iph_batch`, `iph_script`, `iph_run`, `iph_scripts`, `iph_doctor`, `iph_dnd`, `iph_syslog`. 인자와 결과는 CLI와 같고, `iph_launch`는 `arguments`(글자 배열)와 `environment`(글자 값 객체)를 받습니다. `iph_script`는 `code`(자바스크립트)와 `args`를, `iph_run`은 `name`과 `args`를 받습니다. 에이전트용 안내는 [skills/iph/SKILL.md](skills/iph/SKILL.md)에 있습니다.
 
 ## 속도
 
@@ -385,6 +402,7 @@ iPhone 15 Pro Max · iOS 27.0.1 · Wi-Fi, 상주 프로세스가 붙어 있는 �
 - 알림 배너 · 시스템 팝업은 앱의 트리에 나오지 않습니다. 배너는 `iph dnd on`으로 줄일 수 있지만, 방해금지 모드에서도 뜨는 것은 막지 못합니다.
 - 화면 읽기 서비스가 응답하지 않을 수 있습니다. 마지막 화면이 시스템 패널이거나 이전 재시작이 도움이 되지 않은 경우를 제외하고, 최대 2분에 한 번 재시작을 시도합니다. 화면 녹화 중 제어 센터를 읽지 못하면 `iph button home`으로 닫거나 `iph launch`로 앱을 앞으로 가져온 뒤 다시 읽으세요. [복구 동작](docs/how-it-works.md#6-연결과-화면-읽기-복구)을 참고하세요.
 - 세로 화면만 다룹니다.
+- 녹화는 USB로 하세요. 시험해 보니 Wi-Fi로 짧게 9번 녹화한 중 2번 패킷이 빠졌습니다. 스트림마다 키프레임이 하나뿐이라 패킷이 하나라도 빠지면 그 뒤 영상이 끝까지 깨집니다(`warning.code`가 `packets_lost`).
 - `iph apps`의 이름은 폰이 알려 주는 이름(대개 영어)입니다. 실행은 bundle id가 확실합니다.
 - `iph type`은 클립보드의 글자(또는 그림 한 장)만 되돌립니다. **앱에서 복사한 내용(메모의 글처럼 서식이 함께 있는 것)은 되돌리지 못합니다.** 그 내용은 컴퓨터에서 읽으려 하면 폰의 클립보드가 1분쯤 멈추기 때문에 읽지 않고, 입력이 끝나면 클립보드를 비웁니다. 결과에 `clipboard_restored: false`와 `clipboard_note`가 나옵니다.
 - 잠긴 폰에서는 동작하지 않습니다. Face ID · 암호 입력은 대신하지 않습니다.

@@ -9,6 +9,7 @@
 //! tool in jkcoxson/idevice (MIT, see LICENSE.idevice).
 
 use std::{
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -20,8 +21,7 @@ use anyhow::{Result, anyhow};
 use idevice::{
     ReadWrite, RsdService,
     core_device::{
-        CallInfoBlob, DisplayServiceClient, build_screen_audio_offer, build_screen_video_offer,
-        build_start_audio_parameters, build_start_video_parameters,
+        build_screen_audio_offer, build_start_audio_parameters,
         hid::{
             ButtonState, IndigoHidClient, KeyboardUsage, MainKeyboardService,
             TOUCHSCREEN_STATE_CONTACT, TOUCHSCREEN_STATE_RELEASE, TouchscreenContact,
@@ -32,12 +32,12 @@ use idevice::{
 };
 
 use crate::{
-    device::pinch,
+    device::{
+        media::{self, CLIENT_SUPPORTED_FEATURES, MediaControl},
+        pinch,
+    },
     tcp::handle::{AdapterHandle, UdpSocketHandle},
 };
-
-/// What the controller says it supports. Xcode's device window sends 140.
-const CLIENT_SUPPORTED_FEATURES: u64 = 140;
 
 /// Longest wait for the phone to make a new connection's HID devices.
 const DEVICES_READY: Duration = Duration::from_secs(5);
@@ -175,7 +175,7 @@ pub enum Motion {
 }
 
 pub struct InputSession {
-    display: DisplayServiceClient<Box<dyn ReadWrite>>,
+    media: MediaControl,
     hid: UniversalHidServiceClient<Box<dyn ReadWrite>>,
     /// A second connection for the keyboard, so its request/response traffic
     /// stays off the touch connection. Opened on the first key.
@@ -194,6 +194,9 @@ pub struct InputSession {
     reports: u64,
     /// The two fingers of a pinch while they may be down on the phone.
     pair_held: Option<[TouchscreenContact; 2]>,
+    /// Names `session_id` while this session's streams may be running.
+    marker: PathBuf,
+    session_id: uuid::Uuid,
 }
 
 /// Normalized HID coordinate (0..=65535) for a point in logical screen points.
@@ -211,34 +214,26 @@ impl InputSession {
     /// without the video; 24 of 24 first drags on a new session either way).
     /// The video is up to 6 Mbit/s while the screen moves. Over Wi-Fi the
     /// tunnel carried a seventh of that, and everything else queued behind it.
-    pub async fn open(adapter: &mut AdapterHandle, rsd: &mut RsdHandshake, video: bool) -> Result<Self> {
+    ///
+    /// `marker`: the file that names the sessions whose streams may run on
+    /// the phone (see [`media::marked`]).
+    pub async fn open(adapter: &mut AdapterHandle, rsd: &mut RsdHandshake, video: bool, marker: PathBuf) -> Result<Self> {
         let began = Instant::now();
         let began_ms = now_ms();
-        let mut display = DisplayServiceClient::connect_rsd(adapter, rsd)
-            .await
-            .map_err(|e| anyhow!("display service: {e:?}"))?;
+        let mut media = MediaControl::connect(adapter, rsd).await?;
 
         let audio_udp = adapter.bind_udp(0).await?;
-        let video_udp = adapter.bind_udp(0).await?;
         let receiver_ip = adapter.host_ip().to_string();
         let sender_ip = adapter.peer_ip().to_string();
 
-        let call_info = CallInfoBlob {
-            call_id: 0,
-            client_version: 1,
-            device_type: "Mac17,7".into(),
-            framework_version: "2205.3.1".into(),
-            os_version: "25F71".into(),
-            device_name: None,
-            audio_device_uid: None,
-        };
         let session_id = uuid::Uuid::new_v4();
+        media::mark(&marker, &session_id.to_string());
 
         let audio_call = uuid::Uuid::new_v4().to_string().to_uppercase();
-        let audio_offer = build_screen_audio_offer(&audio_call, &call_info)
+        let audio_offer = build_screen_audio_offer(&audio_call, &media::call_info())
             .map_err(|e| anyhow!("audio offer: {e:?}"))?;
-        let audio = display
-            .start_media_stream(build_start_audio_parameters(
+        let audio = media
+            .start(build_start_audio_parameters(
                 &receiver_ip,
                 audio_udp.local_port(),
                 &sender_ip,
@@ -248,10 +243,10 @@ impl InputSession {
                 session_id,
             ))
             .await;
-        let mut streams = Vec::new();
+        let mut sockets = Vec::new();
         let mut video = video;
         match audio {
-            Ok(_) => streams.push(audio_udp),
+            Ok(()) => sockets.push(audio_udp),
             // CoreDevice 9022 "The device microphone or camera is currently
             // in use" (a call, a recording): the phone refuses the audio
             // stream, so the video stream alone sets up the session.
@@ -259,27 +254,10 @@ impl InputSession {
             Err(e) => return Err(anyhow!("start audio stream: {e:?}")),
         }
         if video {
-            let video_call = uuid::Uuid::new_v4().to_string().to_uppercase();
-            let ssrc = uuid::Uuid::new_v4().as_u128() as u32;
-            let video_offer = build_screen_video_offer(&video_call, &call_info, ssrc)
-                .map_err(|e| anyhow!("video offer: {e:?}"))?;
-            display
-                .start_media_stream(build_start_video_parameters(
-                    &receiver_ip,
-                    video_udp.local_port(),
-                    &sender_ip,
-                    50001,
-                    video_offer,
-                    CLIENT_SUPPORTED_FEATURES,
-                    1,
-                    session_id,
-                ))
-                .await
-                .map_err(|e| anyhow!("start video stream: {e:?}"))?;
-            streams.push(video_udp);
+            sockets.push(media::start_video(&mut media, adapter, 1, session_id).await?);
         }
 
-        let drain = Drain::start(streams);
+        let drain = Drain::start(sockets);
 
         // Only the touch connection now: every HID connection makes its own
         // five devices on the phone (a touchscreen, a keyboard, buttons...),
@@ -326,7 +304,7 @@ impl InputSession {
         }
 
         Ok(Self {
-            display,
+            media,
             hid,
             keyboard: None,
             board: None,
@@ -338,7 +316,13 @@ impl InputSession {
             last_release: None,
             reports: 0,
             pair_held: None,
+            marker,
+            session_id,
         })
+    }
+
+    pub(crate) fn session_id(&self) -> String {
+        self.session_id.to_string()
     }
 
     /// Milliseconds since the phone last sent a media packet, if it ever did.
@@ -645,13 +629,20 @@ impl InputSession {
         self.lift_held().await;
         let _ = self.keyboard_detach().await;
         self.settle_previous().await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), self.display.stop_media_stream()).await;
+        self.stop_media().await;
     }
 
     /// Stop the stream of a session given up after an error, without the
     /// orderly wait. A stream nobody stops keeps the phone encoding video.
     pub async fn abandon(mut self) {
         self.lift_held().await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), self.display.stop_media_stream()).await;
+        self.stop_media().await;
+    }
+
+    /// Stop this session's streams and no other session's: a recording's
+    /// video goes on.
+    async fn stop_media(&mut self) {
+        let stopped = self.media.stop_own(&self.session_id.to_string(), &self.marker).await;
+        crate::device::ax::trace(|| format!("input: streams of session {} stopped: {stopped:?}", self.session_id));
     }
 }

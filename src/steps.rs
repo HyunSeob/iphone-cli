@@ -1333,6 +1333,8 @@ mod tests {
         assert!(split_step(&json!({"tap": "a", "type": "b"})).unwrap_err().contains("exactly one kind"));
         assert!(split_step(&json!({"tap": "a", "hint": "look"})).is_ok());
         assert!(split_step(&json!({"tap": "a", "confirm": true})).is_err());
+        // A recording spans requests; a batch that stops halfway would leave one running.
+        assert!(split_step(&json!({"record": "start"})).unwrap_err().contains("unknown step kind"));
     }
 
     #[test]

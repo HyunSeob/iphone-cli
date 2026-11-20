@@ -40,6 +40,13 @@ Frequent `error.code`s: `not_found` (`screen_summary.labels` shows what is on sc
 
 A notification banner drops over the top of the screen, is not in the element list, and takes the tap meant for what is under it. iph does not switch Focus by itself, and you do not need to either: start the work without it. Only when a banner has taken a tap in this work, turn Do Not Disturb on with `iph dnd on` (MCP: `iph_dnd` with `"action": "on"`; 11 to 36 s, Control Center shows for a moment), and put the user's Focus back with `iph dnd off` when the work is done; until then the user misses notifications.
 
+## Evidence: recordings
+
+For a test run whose result someone will review, keep visual evidence:
+
+- `iph record start -o <abs path>.mp4` before the steps and `iph record stop` after (MCP: `iph_record` with `"action"`). Everything else keeps working in between. `stop` returns `path`, `duration_s`, `frames` and `lost_packets`, plus `first_loss_s` and a `warning` (`packets_lost`) when packets were lost. The phone shows its screen-sharing indicator while it records. Recordings show the user's data, so keep them where the user asked.
+- Record over USB. The phone sends one keyframe, at the start, so a single lost packet damages the rest of the file, though players still open it. Over Wi-Fi, 2 of 9 short recordings lost packets in testing. On a `packets_lost` warning, report that the video is likely damaged from `first_loss_s` on, and record again over USB if the evidence matters. Stop every recording you start: one left running keeps the phone encoding video until `record_max_secs` (30 minutes by default) ends it. A recording that ended on its own (`ended_reason`) is reported by `stop`, or by the next `start` under `previous`. A command that times out, or a connection error, resets the connection and ends a running recording with it; start a new one if the evidence still matters.
+
 ## Money, messages, orders
 
 iph has no guard: it presses pay, send and order buttons like any other, in any app. What to press follows the user's instructions. After such a tap comes back `unknown`, read the screen before anything else: a second press is a second payment or a second message. A Face ID, passcode or payment-authentication prompt waits for the user.
@@ -77,6 +84,7 @@ A script is the body of a function, so `return` ends it. The commands are functi
 - `waitFor(selector, {timeout_ms})` waits for an element (8 s by default) and sits out a system panel that covers the app for a moment.
 - `readField({selector, take, regex})` returns one text. `take`: `value` | `label` | `identifier` | `text`; `regex` keeps its first capture group.
 - `readList({row, columns, key, group, stop_below, max_scrolls})` scrolls a list and returns `{rows, scrolls, ended}` with each row once. `columns: {name: {take, regex}}`, or `{name: {value: "…"}}` for a constant. `group: {selector, regex, as}` gives each row the heading it stands under (a date line), and `stop_below: N` stops once a heading's number falls below N. `key: "column"` names the column that identifies a row; use it when rows change while the list is read (a clock, time left).
+- `record("start" | "stop" | "status", {display})` records the screen as `iph record` does, into iph's state directory (a script cannot choose the file; `stop` returns the path). It is not an input. A recording the script leaves running ends with the script, also on a throw, and the result has its report under `recording`.
 - `args` holds the `--arg k=v` values as text (`Number(args.n)` for a number). Return an object, or call `output(key, value)`, and it comes back as `outputs`. `log(…)` lines come back as `logs`. `sleep(ms)` waits.
 - Any call takes `hint: "…"`: what to tell the person if the script stops there. A screen that waits for Face ID: `waitFor(sel, { timeout_ms: 40000, hint: "폰을 봐 주세요" })`.
 - `syslog(action, {app, process, pid, level, after, grep, max})` captures the phone's log and returns what `iph syslog` does below (`syslog("read", {after: cursor})` for what is new). A script cannot write a file.
@@ -140,7 +148,7 @@ iph syslog stop
 
 ## Commands at a glance
 
-`read`, `find`, `tap`, `swipe`, `pinch`, `scroll`, `type`, `key`, `button`, `launch`, `apps` (bundle ids), `screenshot`, `script`, `run`, `scripts`, `batch`, `dnd`, `syslog`, `doctor`, `connect --ip <IP>`, `devices`, `stop`. `iph <command> --help` has the flags; add `--human` to read a result yourself.
+`read`, `find`, `tap`, `swipe`, `pinch`, `scroll`, `type`, `key`, `button`, `launch`, `apps` (bundle ids), `screenshot`, `record`, `script`, `run`, `scripts`, `batch`, `dnd`, `syslog`, `doctor`, `connect --ip <IP>`, `devices`, `stop`. `iph <command> --help` has the flags; add `--human` to read a result yourself.
 
 ## When something is off
 

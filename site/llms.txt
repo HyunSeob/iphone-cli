@@ -14,7 +14,7 @@
   - Reads Apple's native accessibility tree (`axAuditDaemon.remoteAXService`) as structured JSON instead of OCR/screenshots
   - Sends touch/keyboard input directly via iOS 27 CoreDevice services (`displayservice` + `universalhid`) with no Xcode or WebDriverAgent
   - Embedded QuickJS runtime (`iph script`, `iph run`) for multi-step loops, conditionals, and list extraction (`readList`) in a single agent call
-  - Built-in stdio MCP server (`iph mcp`, 19 `iph_*` tools) + Claude Code / Codex Agent Skill (`skills/iph/SKILL.md`)
+  - Built-in stdio MCP server (`iph mcp`, 21 `iph_*` tools) + Claude Code / Codex Agent Skill (`skills/iph/SKILL.md`)
   - Safety-first outcome contract (`done`, `not_sent`, `unknown`) to prevent accidental double taps or duplicate submissions
 
 ## Quick Install & Agent Setup

@@ -470,7 +470,7 @@ pub async fn run(s: &mut Session, args: DoctorArgs) -> Res {
                 }
             }
             if mounted_from.is_some() {
-                s.reset();
+                s.reset("the developer disk image was mounted");
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 missing = missing_services(s).await;
             }

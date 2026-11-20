@@ -387,8 +387,14 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    pub(crate) fn is_closed(&self) -> bool {
-        self.heartbeat.as_ref().is_some_and(Heartbeat::is_closed)
+    /// Why the tunnel carries nothing more: its heartbeat ended (Wi-Fi), or
+    /// its packet task did (any connection, USB included).
+    pub(crate) fn closed(&self) -> Option<&'static str> {
+        if self.heartbeat.as_ref().is_some_and(Heartbeat::is_closed) {
+            Some("heartbeat ended")
+        } else {
+            self.adapter.is_closed().then_some("tunnel task ended")
+        }
     }
 }
 
@@ -651,12 +657,13 @@ mod tests {
                     }
                     drop(phone);
                     tokio::time::timeout(Duration::from_secs(1), async {
-                        while !session.tunnel.as_ref().unwrap().is_closed() {
+                        while session.tunnel.as_ref().unwrap().closed().is_none() {
                             tokio::task::yield_now().await;
                         }
                     })
                     .await
                     .unwrap();
+                    assert_eq!(session.tunnel.as_ref().unwrap().closed(), Some("heartbeat ended"));
                     session.refresh_connection();
                     assert!(session.tunnel.is_none());
                     assert!(session.connection().is_none());
