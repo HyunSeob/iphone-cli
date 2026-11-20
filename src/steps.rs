@@ -785,6 +785,7 @@ impl Session {
         let (changed, _) = Box::pin(self.drag_points(
             (w / 2.0, from),
             (w / 2.0, to),
+            Some(crate::device::display::Space::Screen),
             duration,
             crate::device::input::Motion::Place,
         ))
