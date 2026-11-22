@@ -393,7 +393,7 @@ impl Screen {
     }
 
     pub fn canvas(&self, space: Space) -> Canvas {
-        Canvas { space, size: self.size(space) }
+        Canvas { space, size: self.size(space), display: self.display.clone() }
     }
 
     /// A point of `space` on the panel, where frames of both spaces compare.
@@ -604,6 +604,16 @@ mod tests {
         assert_eq!(screen.space_of(row), Space::Screen);
         assert_eq!(screen.panel_frame(row), row.frame);
         assert_eq!(screen.element_in(Space::Screen, 800.0, 520.0).map(|e| e.id.as_str()), Some(row.id.as_str()));
+    }
+
+    #[test]
+    fn the_points_of_a_reading_are_on_the_display_it_was_read_on() {
+        let on = Screen::build_on(&duo_dump(true), BuildOptions::default(), Some(inner_rot270()));
+        for space in [Space::Screen, Space::Panel] {
+            assert_eq!(on.canvas(space), inner_rot270().canvas(space), "{space:?}");
+        }
+        let unaware = Screen::build(&duo_dump(true), BuildOptions::default());
+        assert_eq!(unaware.canvas(Space::Screen).display, None);
     }
 
     #[test]

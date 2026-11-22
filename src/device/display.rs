@@ -36,6 +36,16 @@ pub enum Rotation {
 }
 
 impl Rotation {
+    /// The name the phone gives it: `rot0`, `rot90`, `rot180` or `rot270`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::R0 => "rot0",
+            Self::R90 => "rot90",
+            Self::R180 => "rot180",
+            Self::R270 => "rot270",
+        }
+    }
+
     /// `currentOrientation` of a display: `rot0`, `rot90`, `rot180` or `rot270`.
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
@@ -68,12 +78,38 @@ pub enum Space {
     Screen,
 }
 
-/// The space a gesture's points are in, with that space's size as the
-/// reading the points came from saw it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// The space a gesture's points are in, as the reading the points came from
+/// saw it: that space's size, and the display in use when a phone with
+/// several was read. A different display, or the same one turned, lays
+/// the points out differently even where the size is the same: rot90 and
+/// rot270 give the same screen size.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Canvas {
     pub space: Space,
     pub size: (f64, f64),
+    /// `None` when the reading did not say which display was in use: on a
+    /// phone with one display, or when it could not be told.
+    pub display: Option<ActiveDisplay>,
+}
+
+impl Canvas {
+    /// Whether `now`, the display in use, is the one the points were read on,
+    /// turned as it was, with the size the space had then.
+    pub fn is_on(&self, now: &ActiveDisplay) -> bool {
+        let size = now.size(self.space);
+        self.display.as_ref().is_some_and(|read| read.unique_id == now.unique_id && read.rotation == now.rotation)
+            && (size.0 - self.size.0).abs() <= 0.5
+            && (size.1 - self.size.1).abs() <= 0.5
+    }
+
+    /// For messages: the size, and the display and turn it was read on.
+    pub fn describe(&self) -> String {
+        let (w, h) = self.size;
+        match &self.display {
+            Some(d) => format!("{w}x{h} on display {} turned {}", d.unique_id, d.rotation.name()),
+            None => format!("{w}x{h} on a display that was not known"),
+        }
+    }
 }
 
 /// The display in use.
@@ -97,6 +133,11 @@ impl ActiveDisplay {
             (Space::Screen, Rotation::R90 | Rotation::R270) => (h, w),
             _ => (w, h),
         }
+    }
+
+    /// `space` as it is now.
+    pub fn canvas(&self, space: Space) -> Canvas {
+        Canvas { space, size: self.size(space), display: Some(self.clone()) }
     }
 
     /// Where a point of `space` lies on the panel, as shares of its width
@@ -279,6 +320,37 @@ mod tests {
         let on_panel = d.on_panel(Space::Screen, on_screen);
         assert_eq!(report_point(on_panel, Space::Panel, &d), report_point(on_screen, Space::Screen, &d));
         assert_eq!(d.on_panel(Space::Panel, (10.0, 20.0)), (10.0, 20.0));
+    }
+
+    #[test]
+    fn points_are_on_the_display_and_the_turn_they_were_read_on() {
+        for space in [Space::Screen, Space::Panel] {
+            let read = inner(Rotation::R90).canvas(space);
+            assert!(read.is_on(&inner(Rotation::R90)), "{space:?}: unchanged");
+            // rot90 and rot270 are the same size and lay points out upside down to each other.
+            assert_eq!(read.size, inner(Rotation::R270).size(space));
+            assert!(!read.is_on(&inner(Rotation::R270)), "{space:?}: turned the other way");
+            assert!(!read.is_on(&inner(Rotation::R0)), "{space:?}: turned upright");
+            assert!(!read.is_on(&cover()), "{space:?}: folded");
+        }
+        let alike = ActiveDisplay { unique_id: "987-654-321".into(), ..inner(Rotation::R90) };
+        assert!(!inner(Rotation::R90).canvas(Space::Screen).is_on(&alike), "another display of the same size and turn");
+        let unaware = Canvas { space: Space::Screen, size: (951.0, 669.0), display: None };
+        assert!(!unaware.is_on(&inner(Rotation::R90)), "a reading that did not know its display");
+    }
+
+    #[test]
+    fn a_canvas_whose_size_differs_from_the_display_is_not_on_it() {
+        let mut read = inner(Rotation::R270).canvas(Space::Screen);
+        read.size = (669.0, 951.0);
+        assert!(!read.is_on(&inner(Rotation::R270)));
+    }
+
+    #[test]
+    fn the_description_names_the_display_and_the_turn() {
+        assert_eq!(inner(Rotation::R270).canvas(Space::Screen).describe(), "951x669 on display 123-456-789 turned rot270");
+        let unaware = Canvas { space: Space::Screen, size: (402.0, 874.0), display: None };
+        assert_eq!(unaware.describe(), "402x874 on a display that was not known");
     }
 
     #[test]

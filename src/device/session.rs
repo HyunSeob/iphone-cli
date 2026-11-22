@@ -24,7 +24,7 @@ use crate::{
     device::{
         ax::{ANSWER_AT_LEAST, AxSub},
         conn::{self, Tunnel},
-        display::{ActiveDisplay, Canvas, DisplayInfo},
+        display::{ActiveDisplay, Canvas, DisplayInfo, Space},
         input::{InputSession, Unaimed},
         media::{self, MediaControl},
     },
@@ -131,8 +131,9 @@ pub struct Session {
     /// quiet moment (`sweep`).
     abandoned: Vec<(InputSession, Option<Tunnel>)>,
     apps: Option<Vec<AppListEntry>>,
-    /// Logical screen size from the last complete reading.
-    pub(crate) screen_size: Option<(f64, f64)>,
+    /// The screen of the last complete reading: its size in points, and the
+    /// display in use then.
+    pub(crate) last_screen: Option<Canvas>,
     /// Readings that arrived before this moment no longer describe the
     /// screen (something changed it after they were taken).
     stale_before: Option<Instant>,
@@ -258,7 +259,7 @@ impl Session {
             input_suspect: false,
             abandoned: Vec::new(),
             apps: None,
-            screen_size: None,
+            last_screen: None,
             stale_before: None,
             connects: 0,
             ax_restarts: 0,
@@ -710,16 +711,15 @@ impl Session {
             self.ax_restart_unhelpful = false;
             self.system_in_front = crate::dnd::system_ui(&screen);
             if screen.width > 0.0 && screen.height > 0.0 {
-                self.screen_size = Some((screen.width, screen.height));
+                self.last_screen = Some(screen.canvas(Space::Screen));
                 return Ok((seq, screen));
             }
             last = Some((seq, screen));
             fresh = Fresh::Force;
         }
         let (seq, mut screen) = last.unwrap();
-        if let Some((w, h)) = self.screen_size {
-            screen.width = w;
-            screen.height = h;
+        if let Some(last) = &self.last_screen {
+            (screen.width, screen.height) = last.size;
         }
         Ok((seq, screen))
     }
@@ -805,11 +805,11 @@ impl Session {
             let input = self.ensure_input().await?;
             let before = input.reports_sent();
             let sent = match &gesture {
-                Gesture::Tap { on, at, hold } => input.tap(*on, *at, *hold).await,
-                Gesture::DoubleTap { on, at } => input.double_tap(*on, *at).await,
-                Gesture::Drag { on, from, to, duration, motion } => input.drag(*on, *from, *to, *duration, *motion).await,
+                Gesture::Tap { on, at, hold } => input.tap(on, *at, *hold).await,
+                Gesture::DoubleTap { on, at } => input.double_tap(on, *at).await,
+                Gesture::Drag { on, from, to, duration, motion } => input.drag(on, *from, *to, *duration, *motion).await,
                 Gesture::Button { page, usage, hold } => input.button(*page, *usage, *hold).await,
-                Gesture::Pinch { on, plan } => input.pinch(*on, plan).await,
+                Gesture::Pinch { on, plan } => input.pinch(on, plan).await,
             };
             let Err(e) = sent else {
                 return Ok(());

@@ -200,7 +200,7 @@ pub enum TouchTarget {
 
 impl TouchTarget {
     /// Report coordinates for `at`, a point on `on`.
-    fn place(&self, on: Canvas, at: (f64, f64)) -> (u16, u16) {
+    fn place(&self, on: &Canvas, at: (f64, f64)) -> (u16, u16) {
         match self {
             Self::Single => (normalize(at.0, on.size.0), normalize(at.1, on.size.1)),
             Self::Display { display, .. } => report_point(at, on.space, display),
@@ -209,7 +209,7 @@ impl TouchTarget {
 
     /// `plan`, whose contacts are normalized on `on`, in report coordinates.
     /// `None` when they already are.
-    fn place_plan(&self, on: Canvas, plan: &pinch::Plan) -> Option<pinch::Plan> {
+    fn place_plan(&self, on: &Canvas, plan: &pinch::Plan) -> Option<pinch::Plan> {
         if matches!(self, Self::Single) {
             return None;
         }
@@ -229,8 +229,9 @@ pub enum Unaimed {
     /// Which display is in use, or which touchscreen is its.
     Unknown(String),
     /// The display is not as the reading the points came from saw it: the
-    /// phone was folded, unfolded or turned since.
-    Changed { read: (f64, f64), now: (f64, f64) },
+    /// phone was folded, unfolded or turned since, or the reading did not
+    /// know the display.
+    Changed { read: String, now: String },
 }
 
 impl std::fmt::Display for Unaimed {
@@ -238,7 +239,7 @@ impl std::fmt::Display for Unaimed {
         match self {
             Self::Unknown(why) => write!(f, "the display in use is not known: {why}"),
             Self::Changed { read, now } => {
-                write!(f, "the screen was read as {}x{} and is {}x{} now", read.0, read.1, now.0, now.1)
+                write!(f, "the screen was read as {read} and is {now} now")
             }
         }
     }
@@ -264,18 +265,18 @@ fn several(touchscreens: Option<&[(u64, String)]>, several_known: bool) -> bool 
 }
 
 /// The touchscreen of `display`, for points of `on`, the space of the
-/// reading they came from, which must still have the size it had then.
-fn aim_at(touchscreens: &[(u64, String)], display: ActiveDisplay, on: Option<Canvas>) -> Result<TouchTarget, Unaimed> {
+/// reading they came from, which must have been read on this display,
+/// turned as it is, and still have the size it had then.
+fn aim_at(touchscreens: &[(u64, String)], display: ActiveDisplay, on: Option<&Canvas>) -> Result<TouchTarget, Unaimed> {
     let service = touchscreens
         .iter()
         .find(|(_, id)| *id == display.unique_id)
         .map(|(service, _)| *service)
         .ok_or_else(|| Unaimed::Unknown(format!("no touchscreen belongs to display {}", display.unique_id)))?;
-    if let Some(on) = on {
-        let now = display.size(on.space);
-        if (now.0 - on.size.0).abs() > 0.5 || (now.1 - on.size.1).abs() > 0.5 {
-            return Err(Unaimed::Changed { read: on.size, now });
-        }
+    if let Some(on) = on
+        && !on.is_on(&display)
+    {
+        return Err(Unaimed::Changed { read: on.describe(), now: display.canvas(on.space).describe() });
     }
     Ok(TouchTarget::Display { service, display })
 }
@@ -285,7 +286,7 @@ fn aim_at(touchscreens: &[(u64, String)], display: ActiveDisplay, on: Option<Can
 async fn aim_with(
     touchscreens: Option<&[(u64, String)]>,
     several_known: bool,
-    on: Option<Canvas>,
+    on: Option<&Canvas>,
     ask: impl AsyncFnOnce() -> Result<ActiveDisplay, String>,
 ) -> Result<TouchTarget, Unaimed> {
     if !several(touchscreens, several_known) {
@@ -511,9 +512,9 @@ impl InputSession {
 
     /// Where a gesture's touches go. A phone with one touchscreen needs no
     /// asking. On one with several, the display in use is asked for now, and
-    /// `on`, the space of the reading the points came from, must still have
-    /// the size it had then.
-    async fn aim(&mut self, on: Option<Canvas>) -> Result<TouchTarget, Unaimed> {
+    /// `on`, the space of the reading the points came from, must have been
+    /// read on it, turned as it is, and still have the size it had then.
+    async fn aim(&mut self, on: Option<&Canvas>) -> Result<TouchTarget, Unaimed> {
         let (touchscreens, several_known) = (self.touchscreens.clone(), self.several_known);
         let target = aim_with(touchscreens.as_deref(), several_known, on, async || self.active_display().await).await?;
         crate::device::ax::trace(|| match &target {
@@ -593,7 +594,7 @@ impl InputSession {
     }
 
     /// One finger down at `at`, a point on `on`, held for `hold`, then lifted.
-    pub async fn tap(&mut self, on: Canvas, at: (f64, f64), hold: Duration) -> Result<()> {
+    pub async fn tap(&mut self, on: &Canvas, at: (f64, f64), hold: Duration) -> Result<()> {
         let target = self.aim(Some(on)).await?;
         let (x, y) = target.place(on, at);
         self.gap().await;
@@ -603,7 +604,7 @@ impl InputSession {
         self.release(&target, x, y).await
     }
 
-    pub async fn double_tap(&mut self, on: Canvas, at: (f64, f64)) -> Result<()> {
+    pub async fn double_tap(&mut self, on: &Canvas, at: (f64, f64)) -> Result<()> {
         let target = self.aim(Some(on)).await?;
         let (x, y) = target.place(on, at);
         self.gap().await;
@@ -626,7 +627,7 @@ impl InputSession {
     /// stays there (a scroll step, a drag-and-drop).
     pub async fn drag(
         &mut self,
-        on: Canvas,
+        on: &Canvas,
         from: (f64, f64),
         to: (f64, f64),
         duration: Duration,
@@ -684,7 +685,7 @@ impl InputSession {
     /// Two fingers moving together or turning, then lifted. Every frame counts
     /// in [`reports_sent`](Self::reports_sent). The plan's contacts are
     /// normalized on `on`.
-    pub async fn pinch(&mut self, on: Canvas, plan: &pinch::Plan) -> Result<()> {
+    pub async fn pinch(&mut self, on: &Canvas, plan: &pinch::Plan) -> Result<()> {
         let target = self.aim(Some(on)).await?;
         let placed = target.place_plan(on, plan);
         let plan = placed.as_ref().unwrap_or(plan);
@@ -899,6 +900,15 @@ mod tests {
         ActiveDisplay { unique_id: "123-456-789".into(), display_id: Some(2), panel: (669.0, 951.0), rotation }
     }
 
+    fn cover() -> ActiveDisplay {
+        ActiveDisplay { unique_id: "987-654-321".into(), display_id: Some(1), panel: (466.0, 678.0), rotation: Rotation::R0 }
+    }
+
+    /// A reading of a phone with one display, which does not say which one.
+    fn unaware(space: Space, size: (f64, f64)) -> Canvas {
+        Canvas { space, size, display: None }
+    }
+
     #[test]
     fn a_phone_with_one_display_lists_one_touchscreen_and_a_duo_one_per_display() {
         let one = touchscreens(&[
@@ -923,9 +933,14 @@ mod tests {
     #[test]
     fn touches_go_to_the_touchscreen_of_the_display_in_use() {
         let list = touchscreens(&duo());
-        let on = Canvas { space: Space::Screen, size: (951.0, 669.0) };
-        let aimed = aim_at(&list, inner(Rotation::R270), Some(on)).unwrap();
-        assert_eq!(aimed, TouchTarget::Display { service: 258, display: inner(Rotation::R270) });
+        for space in [Space::Screen, Space::Panel] {
+            let on = inner(Rotation::R270).canvas(space);
+            let aimed = aim_at(&list, inner(Rotation::R270), Some(&on)).unwrap();
+            assert_eq!(aimed, TouchTarget::Display { service: 258, display: inner(Rotation::R270) }, "{space:?}");
+        }
+        let on = cover().canvas(Space::Screen);
+        let aimed = aim_at(&list, cover(), Some(&on)).unwrap();
+        assert_eq!(aimed, TouchTarget::Display { service: 257, display: cover() });
     }
 
     #[test]
@@ -940,14 +955,47 @@ mod tests {
     fn points_read_before_a_fold_or_a_turn_are_not_sent() {
         let list = touchscreens(&duo());
         // Read folded, on the cover display.
-        let cover = Canvas { space: Space::Screen, size: (466.0, 678.0) };
-        assert!(matches!(aim_at(&list, inner(Rotation::R270), Some(cover)), Err(Unaimed::Changed { .. })));
+        let on = cover().canvas(Space::Screen);
+        assert!(matches!(aim_at(&list, inner(Rotation::R270), Some(&on)), Err(Unaimed::Changed { .. })));
         // Read upright, then turned: the screen's width and height swap.
-        let upright = Canvas { space: Space::Screen, size: (669.0, 951.0) };
-        assert!(matches!(aim_at(&list, inner(Rotation::R270), Some(upright)), Err(Unaimed::Changed { .. })));
-        // The panel does not turn with the display.
-        let panel = Canvas { space: Space::Panel, size: (669.0, 951.0) };
-        assert!(aim_at(&list, inner(Rotation::R270), Some(panel)).is_ok());
+        let on = inner(Rotation::R0).canvas(Space::Screen);
+        assert!(matches!(aim_at(&list, inner(Rotation::R270), Some(&on)), Err(Unaimed::Changed { .. })));
+        // The panel's own points do not swap, but the home screen lays its icons
+        // out again when the display turns.
+        let on = inner(Rotation::R0).canvas(Space::Panel);
+        assert_eq!(on.size, inner(Rotation::R90).size(Space::Panel));
+        assert!(matches!(aim_at(&list, inner(Rotation::R90), Some(&on)), Err(Unaimed::Changed { .. })));
+    }
+
+    #[test]
+    fn a_turn_between_the_two_landscapes_keeps_the_size_and_is_still_a_change() {
+        let list = touchscreens(&duo());
+        for space in [Space::Screen, Space::Panel] {
+            let on = inner(Rotation::R90).canvas(space);
+            assert_eq!(on.size, inner(Rotation::R270).size(space), "{space:?}");
+            match aim_at(&list, inner(Rotation::R270), Some(&on)) {
+                Err(Unaimed::Changed { read, now }) => assert_ne!(read, now, "{space:?}"),
+                other => panic!("{space:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn another_display_of_the_same_size_is_a_change() {
+        let list = touchscreens(&duo());
+        let read = ActiveDisplay { unique_id: "987-654-321".into(), ..inner(Rotation::R270) };
+        let on = read.canvas(Space::Screen);
+        assert_eq!(on.size, inner(Rotation::R270).size(Space::Screen));
+        assert!(matches!(aim_at(&list, inner(Rotation::R270), Some(&on)), Err(Unaimed::Changed { .. })));
+    }
+
+    #[test]
+    fn a_reading_that_did_not_know_the_display_is_not_sent_on_a_phone_with_several() {
+        let list = touchscreens(&duo());
+        for space in [Space::Screen, Space::Panel] {
+            let on = unaware(space, inner(Rotation::R270).size(space));
+            assert!(matches!(aim_at(&list, inner(Rotation::R270), Some(&on)), Err(Unaimed::Changed { .. })), "{space:?}");
+        }
     }
 
     fn not_asked() -> Result<ActiveDisplay, String> {
@@ -957,7 +1005,8 @@ mod tests {
     #[tokio::test]
     async fn a_phone_with_one_touchscreen_is_never_asked_which_display_is_in_use() {
         let one = touchscreens(&[surface(257, "CoreDevice touchscreen(nil)")]);
-        let on = Some(Canvas { space: Space::Screen, size: (402.0, 874.0) });
+        let on = unaware(Space::Screen, (402.0, 874.0));
+        let on = Some(&on);
         let asked = std::cell::Cell::new(0);
         let ask = async || {
             asked.set(asked.get() + 1);
@@ -972,7 +1021,8 @@ mod tests {
             asked.set(asked.get() + 1);
             Ok(inner(Rotation::R0))
         };
-        let aimed = aim_with(Some(&duo), false, Some(Canvas { space: Space::Screen, size: (669.0, 951.0) }), answer).await;
+        let on = inner(Rotation::R0).canvas(Space::Screen);
+        let aimed = aim_with(Some(&duo), false, Some(&on), answer).await;
         assert_eq!(aimed.unwrap(), TouchTarget::Display { service: 258, display: inner(Rotation::R0) });
         assert_eq!(asked.get(), 1);
     }
@@ -1000,10 +1050,10 @@ mod tests {
     fn with_one_touchscreen_points_scale_by_the_reading_as_before() {
         // iph 0.1.9 sent 17615,40569 for a tap at this point of a 402x874
         // screen (IPH_TRACE, iPhone 16 Pro).
-        let on = Canvas { space: Space::Screen, size: (402.0, 874.0) };
-        assert_eq!(TouchTarget::Single.place(on, (68.7 + 78.7 / 2.0, 495.7 + 90.7 / 2.0)), (17615, 40569));
+        let on = unaware(Space::Screen, (402.0, 874.0));
+        assert_eq!(TouchTarget::Single.place(&on, (68.7 + 78.7 / 2.0, 495.7 + 90.7 / 2.0)), (17615, 40569));
         for at in [(0.0, 0.0), (201.0, 437.0), (37.3, 811.9), (402.0, 874.0), (-3.0, 900.0)] {
-            assert_eq!(TouchTarget::Single.place(on, at), (normalize(at.0, 402.0), normalize(at.1, 874.0)), "{at:?}");
+            assert_eq!(TouchTarget::Single.place(&on, at), (normalize(at.0, 402.0), normalize(at.1, 874.0)), "{at:?}");
         }
         let plan = pinch::plan(&pinch::Spec {
             screen: on.size,
@@ -1013,12 +1063,12 @@ mod tests {
             duration: Duration::from_millis(100),
         })
         .unwrap();
-        assert!(TouchTarget::Single.place_plan(on, &plan).is_none());
+        assert!(TouchTarget::Single.place_plan(&on, &plan).is_none());
     }
 
     #[test]
     fn a_pinch_on_a_turned_display_has_its_contacts_turned() {
-        let on = Canvas { space: Space::Screen, size: (951.0, 669.0) };
+        let on = inner(Rotation::R270).canvas(Space::Screen);
         let plan = pinch::plan(&pinch::Spec {
             screen: on.size,
             center: (951.0 * 0.4, 669.0 * 0.6),
@@ -1028,7 +1078,7 @@ mod tests {
         })
         .unwrap();
         let target = TouchTarget::Display { service: 258, display: inner(Rotation::R270) };
-        let placed = target.place_plan(on, &plan).unwrap();
+        let placed = target.place_plan(&on, &plan).unwrap();
         assert_eq!(placed.frames.len(), plan.frames.len());
         for (a, b) in plan.frames.iter().zip(&placed.frames) {
             for (c, d) in a.contacts.iter().zip(&b.contacts) {
