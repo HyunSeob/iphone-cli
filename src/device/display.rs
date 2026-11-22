@@ -49,7 +49,7 @@ impl Rotation {
 
     /// Where a point of the turned screen, given as shares of its width and
     /// height, lies on the panel. `R180` is not measured.
-    fn turn(self, (u, v): (f64, f64)) -> (f64, f64) {
+    pub(crate) fn turn(self, (u, v): (f64, f64)) -> (f64, f64) {
         match self {
             Self::R0 => (u, v),
             Self::R90 => (v, 1.0 - u),
@@ -81,6 +81,9 @@ pub struct Canvas {
 pub struct ActiveDisplay {
     /// Also in the name of the display's touchscreen.
     pub unique_id: String,
+    /// The number the screen-sharing service streams the display's video
+    /// by, when the phone gives one.
+    pub display_id: Option<i64>,
     /// The panel's size in points: its pixel bounds over its point scale.
     pub panel: (f64, f64),
     pub rotation: Rotation,
@@ -156,6 +159,7 @@ pub fn parse(answer: plist::Value) -> Result<ActiveDisplay, String> {
     let (w, h) = size(display).ok_or("the active display has no bounds")?;
     Ok(ActiveDisplay {
         unique_id: text("uniqueId")?.to_string(),
+        display_id: display.get("displayId").and_then(|v| v.as_signed_integer()),
         panel: (w / scale, h / scale),
         rotation: Rotation::parse(text("currentOrientation")?)?,
     })
@@ -201,12 +205,12 @@ mod tests {
 
     /// The inner display of an iPhone Duo: 2007x2853 pixels at 3x.
     fn inner(rotation: Rotation) -> ActiveDisplay {
-        ActiveDisplay { unique_id: "123-456-789".into(), panel: (669.0, 951.0), rotation }
+        ActiveDisplay { unique_id: "123-456-789".into(), display_id: Some(2), panel: (669.0, 951.0), rotation }
     }
 
     /// The cover display: 1398x2034 pixels at 3x, never turned.
     fn cover() -> ActiveDisplay {
-        ActiveDisplay { unique_id: "987-654-321".into(), panel: (466.0, 678.0), rotation: Rotation::R0 }
+        ActiveDisplay { unique_id: "987-654-321".into(), display_id: Some(1), panel: (466.0, 678.0), rotation: Rotation::R0 }
     }
 
     /// Shares of the panel in report coordinates. 0.2 and its multiples land
@@ -287,11 +291,12 @@ mod tests {
         plist::Value::Array(vec![plist::Value::Real(a), plist::Value::Real(b)])
     }
 
-    fn display(id: Option<&str>, size: (f64, f64), active: Option<bool>, orientation: &str) -> plist::Value {
+    fn display(id: Option<&str>, number: i64, size: (f64, f64), active: Option<bool>, orientation: &str) -> plist::Value {
         let mut d = plist::Dictionary::new();
         if let Some(id) = id {
             d.insert("uniqueId".into(), plist::Value::String(id.into()));
         }
+        d.insert("displayId".into(), plist::Value::Integer(number.into()));
         d.insert("bounds".into(), plist::Value::Array(vec![real_pair(0.0, 0.0), real_pair(size.0, size.1)]));
         d.insert("pointScale".into(), plist::Value::Integer(3.into()));
         if let Some(active) = active {
@@ -312,9 +317,9 @@ mod tests {
     #[test]
     fn folded_the_cover_display_is_the_active_one() {
         let folded = answer(vec![
-            display(Some("987-654-321"), (1398.0, 2034.0), Some(true), "rot0"),
-            display(Some("123-456-789"), (2007.0, 2853.0), Some(false), "rot90"),
-            display(None, (0.0, 0.0), None, "rot0"),
+            display(Some("987-654-321"), 1, (1398.0, 2034.0), Some(true), "rot0"),
+            display(Some("123-456-789"), 2, (2007.0, 2853.0), Some(false), "rot90"),
+            display(None, 4, (0.0, 0.0), None, "rot0"),
         ]);
         assert_eq!(parse(folded), Ok(cover()));
     }
@@ -322,27 +327,34 @@ mod tests {
     #[test]
     fn unfolded_the_inner_display_is_the_active_one_with_its_own_turn() {
         let unfolded = answer(vec![
-            display(Some("987-654-321"), (1398.0, 2034.0), Some(false), "rot90"),
-            display(Some("123-456-789"), (2007.0, 2853.0), Some(true), "rot270"),
-            display(None, (0.0, 0.0), Some(true), "rot0"),
+            display(Some("987-654-321"), 1, (1398.0, 2034.0), Some(false), "rot90"),
+            display(Some("123-456-789"), 2, (2007.0, 2853.0), Some(true), "rot270"),
+            display(None, 4, (0.0, 0.0), Some(true), "rot0"),
         ]);
         assert_eq!(parse(unfolded), Ok(inner(Rotation::R270)));
     }
 
     #[test]
     fn no_active_display_two_active_displays_or_an_unknown_turn_is_an_error() {
-        let none = answer(vec![display(Some("987-654-321"), (1398.0, 2034.0), Some(false), "rot0")]);
+        let none = answer(vec![display(Some("987-654-321"), 1, (1398.0, 2034.0), Some(false), "rot0")]);
         assert!(parse(none).is_err());
         let two = answer(vec![
-            display(Some("987-654-321"), (1398.0, 2034.0), Some(true), "rot0"),
-            display(Some("123-456-789"), (2007.0, 2853.0), Some(true), "rot0"),
+            display(Some("987-654-321"), 1, (1398.0, 2034.0), Some(true), "rot0"),
+            display(Some("123-456-789"), 2, (2007.0, 2853.0), Some(true), "rot0"),
         ]);
         assert!(parse(two).is_err());
-        let odd = answer(vec![display(Some("987-654-321"), (1398.0, 2034.0), Some(true), "rot45")]);
+        let odd = answer(vec![display(Some("987-654-321"), 1, (1398.0, 2034.0), Some(true), "rot45")]);
         assert!(parse(odd).is_err());
-        let nameless = answer(vec![display(None, (1398.0, 2034.0), Some(true), "rot0")]);
+        let nameless = answer(vec![display(None, 1, (1398.0, 2034.0), Some(true), "rot0")]);
         assert!(parse(nameless).is_err());
         let failed = plist::Value::Dictionary(plist::Dictionary::new());
         assert!(parse(failed).is_err());
+    }
+
+    #[test]
+    fn an_active_display_without_a_number_is_still_the_display_in_use() {
+        let mut unnumbered = display(Some("987-654-321"), 1, (1398.0, 2034.0), Some(true), "rot0");
+        unnumbered.as_dictionary_mut().unwrap().remove("displayId");
+        assert_eq!(parse(answer(vec![unnumbered])), Ok(ActiveDisplay { display_id: None, ..cover() }));
     }
 }

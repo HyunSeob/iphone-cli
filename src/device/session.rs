@@ -293,7 +293,7 @@ impl Session {
     }
 
     /// The display in use, on a phone with more than one; `None` on any other.
-    async fn active_display(&mut self) -> Res<Option<ActiveDisplay>> {
+    pub(crate) async fn active_display(&mut self) -> Res<Option<ActiveDisplay>> {
         if !self.several_displays() {
             return Ok(None);
         }
@@ -978,8 +978,9 @@ impl Session {
     }
 
     pub async fn screenshot_png(&mut self) -> Res<Vec<u8>> {
+        let display = self.active_display().await?;
         let mut svc: ScreenCaptureServiceClient<Box<dyn ReadWrite>> = self.rsd_client().await?;
-        bounded("screenshot", 20, svc.take_screenshot(None, ImageFormat::Png))
+        bounded("screenshot", 20, svc.take_screenshot(display.as_ref().map(|d| d.unique_id.as_str()), ImageFormat::Png))
             .await
             .map_err(|e| Fail::not_sent("screenshot_failed", e))
     }

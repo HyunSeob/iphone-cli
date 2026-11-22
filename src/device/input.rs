@@ -896,7 +896,7 @@ mod tests {
     }
 
     fn inner(rotation: Rotation) -> ActiveDisplay {
-        ActiveDisplay { unique_id: "123-456-789".into(), panel: (669.0, 951.0), rotation }
+        ActiveDisplay { unique_id: "123-456-789".into(), display_id: Some(2), panel: (669.0, 951.0), rotation }
     }
 
     #[test]

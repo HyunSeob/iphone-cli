@@ -573,7 +573,7 @@ mod tests {
 
     fn inner_rot270() -> ActiveDisplay {
         use crate::device::display::Rotation;
-        ActiveDisplay { unique_id: "123-456-789".into(), panel: (669.0, 951.0), rotation: Rotation::R270 }
+        ActiveDisplay { unique_id: "123-456-789".into(), display_id: Some(2), panel: (669.0, 951.0), rotation: Rotation::R270 }
     }
 
     fn labelled<'a>(screen: &'a Screen, label: &str) -> Option<&'a Element> {

@@ -90,7 +90,7 @@ Wi-Fi: 발견·저장 주소 → 직접 TCP + iph heartbeat
 
 ## 5. 앱·스크립트·목록
 
-앱 실행은 `appservice`의 `launchapplication`, 목록은 `streamapplist`를 씁니다. 실행 후 화면에서 해당 pid가 앞에 나왔는지 확인합니다. 스크린샷은 `screencaptureservice`에서 PNG로 받습니다.
+앱 실행은 `appservice`의 `launchapplication`, 목록은 `streamapplist`를 씁니다. 실행 후 화면에서 해당 pid가 앞에 나왔는지 확인합니다. 스크린샷은 `screencaptureservice`에서 PNG로 받습니다. 화면이 둘인 폰에서는 지금 쓰는 화면의 `uniqueId`를 넘겨 그 화면을 받고, 폰이 화면이 돌아간 방향 그대로 그려 주므로 돌리지 않습니다.
 
 스크립트는 내장 QuickJS에서 실행합니다. 개인 스크립트를 기본 예제보다 먼저 찾고, 파일·네트워크·다른 프로세스에 접근하는 기능은 제공하지 않습니다. 실행 시간과 메모리는 `[script] timeout_secs`(기본 300초)와 `memory_mb`(기본 64MB)로 제한합니다.
 
