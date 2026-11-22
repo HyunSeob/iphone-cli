@@ -167,6 +167,9 @@ pub struct Session {
     /// How many touchscreens the phone has, one per display, once an input
     /// session has listed them. Kept across daemons.
     touchscreens: Option<usize>,
+    /// To ask which display is in use, kept between questions. Gone after an
+    /// error and with the tunnel it runs on.
+    displays: Option<DisplayInfo>,
 }
 
 /// A file URL or path as a plain path without a trailing slash.
@@ -269,6 +272,7 @@ impl Session {
             dnd,
             capture: None,
             touchscreens,
+            displays: None,
         }
     }
 
@@ -299,11 +303,17 @@ impl Session {
             return Ok(None);
         }
         let tunnel = self.ensure_tunnel().await?;
-        let read = match DisplayInfo::open(&tunnel.adapter, &tunnel.rsd).await {
-            Ok(mut link) => link.active().await,
-            Err(e) => Err(e),
+        let (adapter, rsd) = (tunnel.adapter.clone(), tunnel.rsd.clone());
+        let kept = self.displays.take();
+        let reused = kept.is_some();
+        let mut link = match kept {
+            Some(link) => link,
+            None => DisplayInfo::open(&adapter, &rsd).await.map_err(|e| unaimed(&Unaimed::Unknown(e)))?,
         };
-        read.map(Some).map_err(|e| unaimed(&Unaimed::Unknown(e)))
+        let display = link.active().await.map_err(|e| unaimed(&Unaimed::Unknown(e)))?;
+        self.displays = Some(link);
+        crate::device::ax::trace(|| format!("display: {} {:?}, link {}", display.unique_id, display.rotation, if reused { "kept" } else { "opened" }));
+        Ok(Some(display))
     }
 
     /// Mark every reading taken so far as out of date.
@@ -357,6 +367,7 @@ impl Session {
         // Its video is stopped once a tunnel is up again (`reap_media`).
         drop(self.recorder.end(&format!("the connection to the phone was reset: {cause}")));
         self.ax = None;
+        self.displays = None;
     }
 
     /// The accessibility connection closed. A recording keeps the tunnel
