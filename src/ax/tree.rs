@@ -134,6 +134,11 @@ pub struct Screen {
     /// than one.
     #[serde(skip)]
     pub display: Option<ActiveDisplay>,
+    /// Why the display in use could not be told, on a phone with several.
+    /// Such a reading has no `display`: its size is as the application
+    /// frames gave it, and points on it are not sent.
+    #[serde(skip)]
+    pub display_unknown: Option<String>,
 }
 
 /// Role, label, value and rounded frame of one element.
@@ -215,6 +220,7 @@ impl Screen {
             apps: Vec::new(),
             elements: Vec::new(),
             display,
+            display_unknown: None,
         };
         // The screen is as large as the largest application frame.
         for key in &dump.applications {

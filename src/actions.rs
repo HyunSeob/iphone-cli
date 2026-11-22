@@ -371,6 +371,19 @@ fn daemon_silent(read_failed: &Fail) -> bool {
     read_failed.code == "ax_timeout" && !locked
 }
 
+/// What a reading says when it was taken without knowing which display of the
+/// phone is in use.
+fn display_warning(why: &str) -> Value {
+    json!({
+        "code": "display_unknown",
+        "message": format!("the display in use could not be told ({why}); the screen size may be that of the other display"),
+        "hint": t(
+            "폰을 접거나 펴는 중이면 잠시 뒤 `iph read`로 다시 읽으세요. 제스처는 보내기 전에 화면을 다시 확인하며, 이 읽기의 좌표는 화면을 다시 읽기 전까지 보내지 않습니다.",
+            "If the phone is folding or unfolding, wait a moment and read again with `iph read`. Gestures check the display again before they are sent, and points from this reading are not sent until the screen is read again.",
+        ),
+    })
+}
+
 pub fn parse_target(v: &Value) -> Res<Target> {
     if let Some(obj) = v.as_object()
         && let (Some(x), Some(y)) = (
@@ -545,14 +558,18 @@ impl Session {
                 screen.apps.retain(|a| a.pid == front);
             }
         let has_ids = screen.elements.iter().any(|e| e.identifier.is_some());
-        Ok(fields! {
+        let mut out = fields! {
             "screen": {"width": screen.width, "height": screen.height},
             "apps": screen.apps,
             "count": screen.elements.len(),
             "pass": if args.full || args.raw || has_ids { "full" } else { "initial" },
             "seq": seq,
             "elements": screen.elements,
-        })
+        };
+        if let Some(why) = &screen.display_unknown {
+            out.insert("warning".into(), display_warning(why));
+        }
+        Ok(out)
     }
 
     pub async fn cmd_find(&mut self, args: FindArgs) -> Res {
@@ -1866,6 +1883,19 @@ mod type_tests {
         assert!(out["submit_sent"].is_null());
         assert_eq!(out["value_changed"], true);
         assert_eq!(out["clipboard_restored"], false);
+    }
+}
+
+#[cfg(test)]
+mod display_warning_tests {
+    use super::*;
+
+    #[test]
+    fn a_reading_that_could_not_tell_the_display_says_why_and_what_to_do() {
+        let warning = display_warning("display info: no answer within 5 s");
+        assert_eq!(warning["code"], "display_unknown");
+        assert!(warning["message"].as_str().unwrap().contains("no answer within 5 s"));
+        assert!(warning["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
     }
 }
 

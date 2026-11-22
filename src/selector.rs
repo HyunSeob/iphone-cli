@@ -424,6 +424,7 @@ mod tests {
                 el("e", "button", "일반 정보", (20.0, 750.0, 390.0, 49.0)),
             ],
             display: None,
+            display_unknown: None,
         }
     }
 
