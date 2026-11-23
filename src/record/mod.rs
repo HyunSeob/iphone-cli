@@ -24,8 +24,10 @@ use crate::{
     ax::tree::BuildOptions,
     clock,
     device::{
+        display::{ActiveDisplay, Rotation, Space},
+        input::Unaimed,
         media::{self, MediaControl},
-        session::{Fresh, Session, bounded, reuse},
+        session::{Fresh, Session, bounded, reuse, unaimed},
     },
     fields,
     geometry::Geometry,
@@ -69,6 +71,8 @@ pub struct Track {
     /// Why frames are no longer written, when that happened before `stop`,
     /// and the arrival of the frame that was not written.
     ended: Option<(String, u64)>,
+    /// How the file turns the frames to play them as the screen looks.
+    turn: Rotation,
 }
 
 pub struct Summary {
@@ -94,7 +98,13 @@ impl Track {
             last_arrival_us: None,
             keyframes: 0,
             ended: None,
+            turn: Rotation::R0,
         })
+    }
+
+    /// Play the frames turned by `turn`.
+    pub fn turn(&mut self, turn: Rotation) {
+        self.turn = turn;
     }
 
     /// One datagram from the video socket.
@@ -201,7 +211,7 @@ impl Track {
         let frames = writer.samples().len() as u64;
         let duration_s = seconds(writer.total_ticks());
         let target = writer.path().to_path_buf();
-        let bytes = writer.finish(&params).map_err(|e| format!("writing {}: {e}", target.display()))?;
+        let bytes = writer.finish(&params, self.turn).map_err(|e| format!("writing {}: {e}", target.display()))?;
         Ok(Summary {
             path: target,
             bytes,
@@ -587,8 +597,9 @@ pub fn default_path() -> PathBuf {
     crate::paths::state_dir().join(format!("iph-record-{}.mp4", clock::file_stamp()))
 }
 
-/// Displays tried in order when `start` names none. The first whose video
-/// has the shape of the screen being read is recorded.
+/// Displays tried in order when `start` names none, on a phone with one
+/// display. The first whose video has the shape of the screen being read is
+/// recorded.
 pub const DEFAULT_DISPLAYS: [i64; 3] = [1, 0, 2];
 /// The longest `start` tries displays. With the screen read before and the
 /// last attempt's stop after, it stays within the daemon's 90 s for a
@@ -596,6 +607,44 @@ pub const DEFAULT_DISPLAYS: [i64; 3] = [1, 0, 2];
 const START_WITHIN: Duration = Duration::from_secs(45);
 /// Longest wait for the phone to start one display's video.
 const OPEN_WITHIN: Duration = Duration::from_secs(20);
+
+/// The displays `start` tries, in order: the one the caller named, alone;
+/// on a phone with several displays, the one in use; else
+/// [`DEFAULT_DISPLAYS`].
+fn candidates(named: Option<i64>, active: Option<&ActiveDisplay>) -> Res<Vec<i64>> {
+    match (named, active) {
+        (Some(display), _) => Ok(vec![display]),
+        (None, None) => Ok(DEFAULT_DISPLAYS.to_vec()),
+        (None, Some(active)) => active
+            .display_id
+            .map(|display| vec![display])
+            .ok_or_else(|| unaimed(&Unaimed::Unknown("the phone gave no number for the display in use".into()))),
+    }
+}
+
+/// What the video of the recorded display must have the shape of.
+enum Shape {
+    /// The screen as read, on a phone with one display.
+    Screen((f64, f64)),
+    /// The display in use, on a phone with several. It sends its frames
+    /// the way its panel lies (an iPhone Duo's inner display sent 1408x2016
+    /// with its screen in landscape), and the file turns them as the display
+    /// is.
+    Panel(ActiveDisplay),
+}
+
+impl Shape {
+    /// The geometry of a video of `pixels`, and how the file turns it.
+    fn fit(&self, pixels: (u32, u32)) -> Res<(Geometry, Rotation)> {
+        match self {
+            Self::Screen(points) => Ok((Geometry::fit(*points, pixels)?, Rotation::R0)),
+            Self::Panel(display) => match Geometry::fit(display.size(Space::Panel), pixels) {
+                Ok(geometry) => Ok((geometry, display.rotation)),
+                Err(_) => Ok((Geometry::fit(display.size(Space::Screen), pixels)?, Rotation::R0)),
+            },
+        }
+    }
+}
 
 
 impl Session {
@@ -664,10 +713,16 @@ impl Session {
     }
 
     async fn start_recording(&mut self, path: &Path, display: Option<i64>) -> Res {
-        let (_, screen) = self.screen(Fresh::MaxAge(reuse()), false, BuildOptions::default()).await?;
-        let points = (screen.width, screen.height);
+        let active = self.active_display().await?;
         // A display the caller named is tried alone; its failure is the answer.
-        let candidates = display.map_or(DEFAULT_DISPLAYS.to_vec(), |d| vec![d]);
+        let candidates = candidates(display, active.as_ref())?;
+        let shape = match active {
+            Some(active) => Shape::Panel(active),
+            None => {
+                let (_, screen) = self.screen(Fresh::MaxAge(reuse()), false, BuildOptions::default()).await?;
+                Shape::Screen((screen.width, screen.height))
+            }
+        };
         let deadline = Instant::now() + START_WITHIN;
         let mut tried = Vec::new();
         let mut refused = None;
@@ -675,7 +730,7 @@ impl Session {
             if Instant::now() >= deadline {
                 return Err(start_timeout().with("tried", tried));
             }
-            match self.start_on(path, candidate, points, deadline).await {
+            match self.start_on(path, candidate, &shape, deadline).await {
                 Ok(live) => {
                     self.recorder = Recorder::Recording(live);
                     return Ok(self.recorder.status());
@@ -704,7 +759,7 @@ impl Session {
 
     /// Start the video of `display` going to a new file, and wait for the
     /// first keyframe, giving up at `deadline`.
-    async fn start_on(&mut self, path: &Path, display: i64, points: (f64, f64), deadline: Instant) -> Res<Live<VideoStream>> {
+    async fn start_on(&mut self, path: &Path, display: i64, shape: &Shape, deadline: Instant) -> Res<Live<VideoStream>> {
         let track = Track::create(path)
             .map_err(|e| Fail::not_sent("write_failed", format!("{}: {e}", path.display())))?;
         let track = Arc::new(Mutex::new(track));
@@ -731,18 +786,21 @@ impl Session {
             None if until == deadline => Err(start_timeout()),
             None => Err(Fail::not_sent("no_video", format!("display {display} sent no video"))
                 .hint(t("다른 디스플레이를 `--display`로 고르세요.", "Pick another display with `--display`."))),
-            Some(pixels) => Geometry::fit(points, pixels),
+            Some(pixels) => shape.fit(pixels),
         };
         match checked {
-            Ok(geometry) => Ok(Live {
-                display,
-                path: path.to_path_buf(),
-                started_at: clock::now_utc(),
-                started: Instant::now(),
-                track,
-                geometry,
-                stream,
-            }),
+            Ok((geometry, turn)) => {
+                track.lock().unwrap().turn(turn);
+                Ok(Live {
+                    display,
+                    path: path.to_path_buf(),
+                    started_at: clock::now_utc(),
+                    started: Instant::now(),
+                    track,
+                    geometry,
+                    stream,
+                })
+            }
             Err(f) => {
                 // Now, not when the receiving task lets go of it: the next
                 // display's attempt writes the same file.
@@ -831,6 +889,52 @@ mod tests {
     }
 
     const LONG: Duration = Duration::from_secs(3600);
+
+    /// An iPhone Duo's inner display (2007x2853 pixels at 3x), and its cover
+    /// display (1398x2034 at 3x).
+    fn inner(rotation: Rotation) -> ActiveDisplay {
+        ActiveDisplay { unique_id: "123-456-789".into(), display_id: Some(2), panel: (669.0, 951.0), rotation }
+    }
+
+    fn cover() -> ActiveDisplay {
+        ActiveDisplay { unique_id: "987-654-321".into(), display_id: Some(1), panel: (466.0, 678.0), rotation: Rotation::R0 }
+    }
+
+    #[test]
+    fn a_phone_with_one_display_tries_the_displays_as_before_and_one_with_two_the_one_in_use() {
+        assert_eq!(candidates(None, None).unwrap(), vec![1, 0, 2]);
+        assert_eq!(candidates(Some(0), None).unwrap(), vec![0]);
+        assert_eq!(candidates(None, Some(&inner(Rotation::R90))).unwrap(), vec![2]);
+        assert_eq!(candidates(None, Some(&cover())).unwrap(), vec![1]);
+        assert_eq!(candidates(Some(0), Some(&inner(Rotation::R90))).unwrap(), vec![0], "a named display wins");
+        let unnumbered = ActiveDisplay { display_id: None, ..inner(Rotation::R90) };
+        assert_eq!(candidates(None, Some(&unnumbered)).unwrap_err().code, "display_unknown");
+    }
+
+    #[test]
+    fn a_phone_with_one_display_checks_the_video_against_the_screen_as_read() {
+        let (geometry, turn) = Shape::Screen((402.0, 874.0)).fit((1206, 2622)).unwrap();
+        assert_eq!((geometry, turn), (Geometry::fit((402.0, 874.0), (1206, 2622)).unwrap(), Rotation::R0));
+        assert_eq!(Shape::Screen((951.0, 669.0)).fit((1408, 2016)).unwrap_err().code, "display_mismatch");
+    }
+
+    #[test]
+    fn the_inner_display_sends_its_panel_and_the_file_turns_it_as_the_display_is() {
+        // Measured unfolded at rot90: the screen reads 951x669, the video is 1408x2016.
+        for rotation in [Rotation::R90, Rotation::R270] {
+            let (geometry, turn) = Shape::Panel(inner(rotation)).fit((1408, 2016)).unwrap();
+            assert_eq!((geometry.width, geometry.height, turn), (1408, 2016, rotation));
+        }
+        // Frames already turned would need no turn.
+        let (_, turn) = Shape::Panel(inner(Rotation::R90)).fit((2016, 1408)).unwrap();
+        assert_eq!(turn, Rotation::R0);
+        // Folded: the cover display's video (measured 1408x2048) is not turned.
+        let (_, turn) = Shape::Panel(cover()).fit((1408, 2048)).unwrap();
+        assert_eq!(turn, Rotation::R0);
+        // Each display's video does not fit the other's panel.
+        assert_eq!(Shape::Panel(cover()).fit((1408, 2016)).unwrap_err().code, "display_mismatch");
+        assert_eq!(Shape::Panel(inner(Rotation::R0)).fit((1408, 2048)).unwrap_err().code, "display_mismatch");
+    }
 
     #[test]
     fn a_start_that_ran_out_of_time_is_its_own_failure_and_no_display_miss() {

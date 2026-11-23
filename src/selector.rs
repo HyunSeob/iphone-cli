@@ -423,6 +423,8 @@ mod tests {
                 el("d", "button", "일반", (20.0, 700.0, 390.0, 49.0)),
                 el("e", "button", "일반 정보", (20.0, 750.0, 390.0, 49.0)),
             ],
+            display: None,
+            display_unknown: None,
         }
     }
 

@@ -168,7 +168,7 @@ enum Cmd {
         /// start: the file to write (default: iph-record-<time>.mp4 in this directory).
         #[arg(short, long)]
         output: Option<String>,
-        /// start: the display to record (default: the first that shows the screen).
+        /// start: the display to record (default: the one in use on a phone with two displays, else the first that shows the screen).
         #[arg(long)]
         display: Option<i64>,
     },

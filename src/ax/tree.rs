@@ -9,6 +9,7 @@ use super::{
     attrs::{self, traits},
     dump::{Dump, ObjKey, RawElement},
 };
+use crate::device::display::{ActiveDisplay, Canvas, Space};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
@@ -129,6 +130,15 @@ pub struct Screen {
     pub height: f64,
     pub apps: Vec<AppInfo>,
     pub elements: Vec<Element>,
+    /// The display in use when the reading was taken, on a phone with more
+    /// than one.
+    #[serde(skip)]
+    pub display: Option<ActiveDisplay>,
+    /// Why the display in use could not be told, on a phone with several.
+    /// Such a reading has no `display`: its size is as the application
+    /// frames gave it, and points on it are not sent.
+    #[serde(skip)]
+    pub display_unknown: Option<String>,
 }
 
 /// Role, label, value and rounded frame of one element.
@@ -196,11 +206,21 @@ pub(crate) fn children_of(raw: &RawElement, include_offscreen: bool) -> Vec<ObjK
 
 impl Screen {
     pub fn build(dump: &Dump, opts: BuildOptions) -> Screen {
+        Self::build_on(dump, opts, None)
+    }
+
+    /// `display`: the display in use on a phone with more than one. It gives
+    /// the size, which the application frames there do not: the home
+    /// screen's says the cover display's size also when the inner one is in
+    /// use.
+    pub fn build_on(dump: &Dump, opts: BuildOptions, display: Option<ActiveDisplay>) -> Screen {
         let mut screen = Screen {
             width: 0.0,
             height: 0.0,
             apps: Vec::new(),
             elements: Vec::new(),
+            display,
+            display_unknown: None,
         };
         // The screen is as large as the largest application frame.
         for key in &dump.applications {
@@ -209,12 +229,9 @@ impl Screen {
                 screen.height = screen.height.max(f.y + f.h);
             }
         }
-        let bounds = Rect {
-            x: 0.0,
-            y: 0.0,
-            w: screen.width,
-            h: screen.height,
-        };
+        if let Some(display) = &screen.display {
+            (screen.width, screen.height) = display.size(Space::Screen);
+        }
 
         let mut seen: HashSet<ObjKey> = HashSet::new();
         let mut used_ids: HashSet<String> = HashSet::new();
@@ -260,11 +277,6 @@ impl Screen {
                 .unwrap_or(0);
             let role_num = raw.attrs.get(&attrs::ROLE).and_then(|v| v.as_i64());
             let frame = frame_of(raw);
-            let on_screen = match (&frame, bounds.area() > 0.0) {
-                (Some(f), true) => f.intersection(&bounds).is_some(),
-                (Some(f), false) => f.area() > 0.0,
-                (None, _) => raw.is_application,
-            };
 
             let mut id = handle(&key);
             while !used_ids.insert(id.clone()) {
@@ -281,6 +293,13 @@ impl Screen {
                     bundle_id: None,
                 });
             }
+            let (w, h) = screen.size(screen.space_of_pid(key.pid));
+            let bounds = Rect { x: 0.0, y: 0.0, w, h };
+            let on_screen = match (&frame, bounds.area() > 0.0) {
+                (Some(f), true) => f.intersection(&bounds).is_some(),
+                (Some(f), false) => f.area() > 0.0,
+                (None, _) => raw.is_application,
+            };
             if !on_screen && !opts.include_offscreen && !raw.is_application {
                 continue;
             }
@@ -350,12 +369,73 @@ impl Screen {
         self.elements.iter().find(|e| e.id == id)
     }
 
-    /// The smallest on-screen element whose frame contains the point.
+    /// The space the frames of process `pid` are in. The system's own
+    /// surfaces are the applications without a name. With one display there
+    /// is one space.
+    fn space_of_pid(&self, pid: i64) -> Space {
+        let system = self.apps.iter().any(|a| a.pid == pid && a.name.is_none());
+        match &self.display {
+            Some(_) if system => Space::Panel,
+            _ => Space::Screen,
+        }
+    }
+
+    /// The space `el`'s frame is in.
+    pub fn space_of(&self, el: &Element) -> Space {
+        self.space_of_pid(el.pid)
+    }
+
+    /// The space of a point given by hand: that of the app in front.
+    pub fn point_space(&self) -> Space {
+        self.apps.first().map_or(Space::Screen, |a| self.space_of_pid(a.pid))
+    }
+
+    /// The size of `space` in points.
+    pub fn size(&self, space: Space) -> (f64, f64) {
+        match &self.display {
+            Some(display) => display.size(space),
+            None => (self.width, self.height),
+        }
+    }
+
+    pub fn canvas(&self, space: Space) -> Canvas {
+        Canvas { space, size: self.size(space), display: self.display.clone() }
+    }
+
+    /// A point of `space` on the panel, where frames of both spaces compare.
+    fn on_panel(&self, space: Space, p: (f64, f64)) -> (f64, f64) {
+        match &self.display {
+            Some(display) => display.on_panel(space, p),
+            None => p,
+        }
+    }
+
+    /// `el`'s frame on the panel.
+    pub fn panel_frame(&self, el: &Element) -> Option<Rect> {
+        let f = el.frame?;
+        let Some(display) = &self.display else {
+            return Some(f);
+        };
+        let space = self.space_of(el);
+        let (x1, y1) = display.on_panel(space, (f.x, f.y));
+        let (x2, y2) = display.on_panel(space, (f.x + f.w, f.y + f.h));
+        Some(Rect { x: x1.min(x2), y: y1.min(y2), w: (x2 - x1).abs(), h: (y2 - y1).abs() })
+    }
+
+    /// The smallest on-screen element whose frame contains the point, a point
+    /// given by hand (see [`point_space`](Self::point_space)).
     pub fn element_at(&self, x: f64, y: f64) -> Option<&Element> {
+        self.element_in(self.point_space(), x, y)
+    }
+
+    /// The smallest on-screen element whose frame contains the point, a point
+    /// of `space`.
+    pub fn element_in(&self, space: Space, x: f64, y: f64) -> Option<&Element> {
+        let (x, y) = self.on_panel(space, (x, y));
         self.elements
             .iter()
             .filter(|e| e.role != "application")
-            .filter_map(|e| e.frame.map(|f| (e, f)))
+            .filter_map(|e| self.panel_frame(e).map(|f| (e, f)))
             .filter(|(_, f)| f.contains(x, y))
             .min_by(|a, b| a.1.area().total_cmp(&b.1.area()))
             .map(|(e, _)| e)
@@ -460,5 +540,100 @@ mod tests {
         let partly = Rect { x: 20.0, y: 900.0, w: 390.0, h: 50.0 };
         assert!(below.intersection(&screen).is_none());
         assert!(partly.intersection(&screen).is_some());
+    }
+
+    /// An iPhone Duo unfolded, the inner display at rot270, with the home
+    /// screen (no name) and an app: the home screen's application frame says
+    /// the cover display's size, as measured.
+    fn duo_dump(home_in_front: bool) -> Dump {
+        use crate::ax::dump::DumpKind;
+        let rect = |x: f64, y: f64, w: f64, h: f64| Ka::Obj {
+            class: "NSValue".into(),
+            fields: vec![("NS.rectval".into(), Ka::Str(format!("{{{{{x}, {y}}}, {{{w}, {h}}}}}")))],
+        };
+        let element = |label: Option<&str>, frame: Ka, is_application: bool| {
+            let mut raw = RawElement { is_application, ..Default::default() };
+            raw.attrs.insert(attrs::FRAME, frame);
+            if let Some(label) = label {
+                raw.attrs.insert(attrs::LABEL, Ka::Str(label.into()));
+            }
+            raw
+        };
+        let key = |pid: i64, object_id: u64| ObjKey { pid, object_id };
+        let (home, app) = (key(50, 1), key(60, 1));
+        let elements = [
+            (home, element(None, rect(0.0, 0.0, 466.0, 678.0), true)),
+            (app, element(Some("Settings"), rect(0.0, 0.0, 951.0, 669.0), true)),
+            (key(50, 2), element(Some("Settings icon"), rect(600.0, 900.0, 60.0, 60.0), false)),
+            (key(60, 2), element(Some("General"), rect(700.0, 500.0, 200.0, 40.0), false)),
+            (key(60, 3), element(Some("Below"), rect(700.0, 700.0, 200.0, 40.0), false)),
+        ];
+        let order: Vec<ObjKey> = elements.iter().map(|(k, _)| *k).collect();
+        Dump {
+            kind: DumpKind::Initial,
+            applications: if home_in_front { vec![home, app] } else { vec![app, home] },
+            elements: elements.into(),
+            order,
+        }
+    }
+
+    fn inner_rot270() -> ActiveDisplay {
+        use crate::device::display::Rotation;
+        ActiveDisplay { unique_id: "123-456-789".into(), display_id: Some(2), panel: (669.0, 951.0), rotation: Rotation::R270 }
+    }
+
+    fn labelled<'a>(screen: &'a Screen, label: &str) -> Option<&'a Element> {
+        screen.elements.iter().find(|e| e.label.as_deref() == Some(label))
+    }
+
+    #[test]
+    fn on_a_turned_inner_display_each_element_is_clipped_to_its_own_space() {
+        let screen = Screen::build_on(&duo_dump(true), BuildOptions::default(), Some(inner_rot270()));
+        assert_eq!((screen.width, screen.height), (951.0, 669.0));
+        let icon = labelled(&screen, "Settings icon").expect("the home screen's icon is inside the panel");
+        assert_eq!(screen.space_of(icon), Space::Panel);
+        assert_eq!(screen.size(Space::Panel), (669.0, 951.0));
+        let row = labelled(&screen, "General").expect("the app's row is inside the turned screen");
+        assert_eq!(screen.space_of(row), Space::Screen);
+        assert!(labelled(&screen, "Below").is_none(), "below the turned screen");
+        assert_eq!(screen.point_space(), Space::Panel, "the home screen is in front");
+        let app_in_front = Screen::build_on(&duo_dump(false), BuildOptions::default(), Some(inner_rot270()));
+        assert_eq!(app_in_front.point_space(), Space::Screen);
+    }
+
+    #[test]
+    fn without_a_display_the_size_comes_from_the_application_frames_as_before() {
+        let screen = Screen::build(&duo_dump(true), BuildOptions::default());
+        assert_eq!((screen.width, screen.height), (951.0, 678.0));
+        assert!(labelled(&screen, "Settings icon").is_none());
+        let row = labelled(&screen, "General").unwrap();
+        assert_eq!(screen.space_of(row), Space::Screen);
+        assert_eq!(screen.panel_frame(row), row.frame);
+        assert_eq!(screen.element_in(Space::Screen, 800.0, 520.0).map(|e| e.id.as_str()), Some(row.id.as_str()));
+    }
+
+    #[test]
+    fn the_points_of_a_reading_are_on_the_display_it_was_read_on() {
+        let on = Screen::build_on(&duo_dump(true), BuildOptions::default(), Some(inner_rot270()));
+        for space in [Space::Screen, Space::Panel] {
+            assert_eq!(on.canvas(space), inner_rot270().canvas(space), "{space:?}");
+        }
+        let unaware = Screen::build(&duo_dump(true), BuildOptions::default());
+        assert_eq!(unaware.canvas(Space::Screen).display, None);
+    }
+
+    #[test]
+    fn frames_of_both_spaces_meet_on_the_panel() {
+        let screen = Screen::build_on(&duo_dump(true), BuildOptions::default(), Some(inner_rot270()));
+        let row = labelled(&screen, "General").unwrap();
+        // rot270 puts (u, v) of the screen at (1 - v, u) of the panel.
+        let f = screen.panel_frame(row).unwrap();
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        assert!(near(f.x, 669.0 - 540.0) && near(f.y, 700.0) && near(f.w, 40.0) && near(f.h, 200.0), "{f:?}");
+        assert_eq!(screen.element_in(Space::Screen, 800.0, 520.0).map(|e| e.id.as_str()), Some(row.id.as_str()));
+        assert_eq!(screen.element_in(Space::Panel, 149.0, 800.0).map(|e| e.id.as_str()), Some(row.id.as_str()));
+        let icon = labelled(&screen, "Settings icon").unwrap();
+        // The icon's panel point (630, 930) seen from the turned screen.
+        assert_eq!(screen.element_in(Space::Screen, 930.0, 39.0).map(|e| e.id.as_str()), Some(icon.id.as_str()));
     }
 }

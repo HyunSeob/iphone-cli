@@ -24,7 +24,8 @@ use crate::{
     device::{
         ax::{ANSWER_AT_LEAST, AxSub},
         conn::{self, Tunnel},
-        input::InputSession,
+        display::{ActiveDisplay, Canvas, DisplayInfo, Space},
+        input::{InputSession, Unaimed},
         media::{self, MediaControl},
     },
     i18n::t,
@@ -34,14 +35,15 @@ use crate::{
 
 const APP_SERVICE: &str = "com.apple.coredevice.appservice";
 
-/// One touch or button gesture, in normalized HID coordinates.
+/// One touch or button gesture. A touch's points are on `on`.
 #[derive(Debug, Clone)]
 pub enum Gesture {
-    Tap { x: u16, y: u16, hold: Duration },
-    DoubleTap { x: u16, y: u16 },
-    Drag { from: (u16, u16), to: (u16, u16), duration: Duration, motion: crate::device::input::Motion },
+    Tap { on: Canvas, at: (f64, f64), hold: Duration },
+    DoubleTap { on: Canvas, at: (f64, f64) },
+    Drag { on: Canvas, from: (f64, f64), to: (f64, f64), duration: Duration, motion: crate::device::input::Motion },
     Button { page: u64, usage: u64, hold: Duration },
-    Pinch(crate::device::pinch::Plan),
+    /// The plan's contacts are normalized on `on`.
+    Pinch { on: Canvas, plan: crate::device::pinch::Plan },
 }
 
 /// How fresh a reading must be.
@@ -129,8 +131,9 @@ pub struct Session {
     /// quiet moment (`sweep`).
     abandoned: Vec<(InputSession, Option<Tunnel>)>,
     apps: Option<Vec<AppListEntry>>,
-    /// Logical screen size from the last complete reading.
-    pub(crate) screen_size: Option<(f64, f64)>,
+    /// The screen of the last complete reading: its size in points, and the
+    /// display in use then.
+    pub(crate) last_screen: Option<Canvas>,
     /// Readings that arrived before this moment no longer describe the
     /// screen (something changed it after they were taken).
     stale_before: Option<Instant>,
@@ -161,6 +164,12 @@ pub struct Session {
     pub dnd: crate::dnd::State,
     /// `iph syslog`: the log capture, running or ended and not yet stopped.
     pub capture: Option<crate::syslog::Capture>,
+    /// How many touchscreens the phone has, one per display, once an input
+    /// session has listed them. Kept across daemons.
+    touchscreens: Option<usize>,
+    /// To ask which display is in use, kept between questions. Gone after an
+    /// error and with the tunnel it runs on.
+    displays: Option<DisplayInfo>,
 }
 
 /// A file URL or path as a plain path without a trailing slash.
@@ -206,6 +215,21 @@ fn is_transport_error(msg: &str) -> bool {
     .any(|needle| m.contains(needle))
 }
 
+/// A gesture not sent, or a reading not taken, because the display in use
+/// on a phone with several is not known, or changed after the reading.
+pub(crate) fn unaimed(why: &Unaimed) -> Fail {
+    match why {
+        Unaimed::Unknown(_) => Fail::not_sent("display_unknown", why.to_string()).hint(t(
+            "이 폰은 화면이 둘인데 지금 쓰는 화면을 알 수 없습니다. 폰을 접거나 펴는 중일 수 있으니 잠시 뒤 다시 시도하세요.",
+            "This phone has two displays and iph could not tell which one is in use. The phone may be folding or unfolding; wait a moment and try again.",
+        )),
+        Unaimed::Changed { .. } => Fail::not_sent("display_changed", why.to_string()).hint(t(
+            "화면을 읽은 뒤 폰을 접거나 펴거나 돌렸거나, 읽을 때 지금 쓰는 화면을 알 수 없어서 보내지 않았습니다. `iph read`로 다시 읽고 시도하세요.",
+            "The phone was folded, unfolded or turned after the screen was read, or the reading could not tell which display was in use, so nothing was sent. Read it again with `iph read` and retry.",
+        )),
+    }
+}
+
 /// Bound a device call that has no time limit of its own.
 pub(crate) async fn bounded<T, E: std::fmt::Debug>(
     what: &str,
@@ -222,6 +246,9 @@ pub(crate) async fn bounded<T, E: std::fmt::Debug>(
 impl Session {
     pub fn new(udid: String, config: Config) -> Self {
         let dnd = crate::dnd::State::load(&udid);
+        let touchscreens = std::fs::read_to_string(crate::paths::touchscreens(&udid))
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
         Self {
             udid,
             config,
@@ -235,7 +262,7 @@ impl Session {
             input_suspect: false,
             abandoned: Vec::new(),
             apps: None,
-            screen_size: None,
+            last_screen: None,
             stale_before: None,
             connects: 0,
             ax_restarts: 0,
@@ -244,7 +271,63 @@ impl Session {
             system_in_front: false,
             dnd,
             capture: None,
+            touchscreens,
+            displays: None,
         }
+    }
+
+    /// The phone has more than one display, each with its own touchscreen.
+    pub(crate) fn several_displays(&self) -> bool {
+        self.touchscreens.is_some_and(|n| n > 1)
+    }
+
+    /// The phone has not had an input session yet, so how many displays it
+    /// has is not known.
+    pub(crate) fn displays_unknown(&self) -> bool {
+        self.touchscreens.is_none()
+    }
+
+    fn learn_touchscreens(&mut self, count: usize) {
+        if self.touchscreens == Some(count) {
+            return;
+        }
+        self.touchscreens = Some(count);
+        let saved = crate::paths::ensure_private_dir(&crate::paths::state_dir())
+            .and_then(|()| std::fs::write(crate::paths::touchscreens(&self.udid), count.to_string()));
+        crate::device::ax::trace(|| format!("input: the phone has {count} touchscreens (saved: {saved:?})"));
+    }
+
+    /// The display in use, on a phone with more than one; `None` on any other.
+    /// A phone that does not say fails with `display_unknown`: nothing that
+    /// touches or captures goes on without knowing which display.
+    pub(crate) async fn active_display(&mut self) -> Res<Option<ActiveDisplay>> {
+        self.ask_display().await?.map_err(|why| unaimed(&Unaimed::Unknown(why)))
+    }
+
+    /// `active_display`, with the phone's not saying (the `Err` inside) left
+    /// to the caller: a reading goes on without it.
+    async fn ask_display(&mut self) -> Res<Result<Option<ActiveDisplay>, String>> {
+        if !self.several_displays() {
+            return Ok(Ok(None));
+        }
+        let tunnel = self.ensure_tunnel().await?;
+        let (adapter, rsd) = (tunnel.adapter.clone(), tunnel.rsd.clone());
+        let kept = self.displays.take();
+        let reused = kept.is_some();
+        let mut link = match kept {
+            Some(link) => link,
+            None => match DisplayInfo::open(&adapter, &rsd).await {
+                Ok(link) => link,
+                Err(why) => return Ok(Err(why)),
+            },
+        };
+        let display = match link.active().await {
+            Ok(display) => display,
+            Err(why) => return Ok(Err(why)),
+        };
+        self.displays = Some(link);
+        crate::device::ax::trace(|| format!("display: {} {:?}, link {}", display.unique_id, display.rotation, if reused { "kept" } else { "opened" }));
+        Ok(Ok(Some(display)))
     }
 
     /// Mark every reading taken so far as out of date.
@@ -298,6 +381,7 @@ impl Session {
         // Its video is stopped once a tunnel is up again (`reap_media`).
         drop(self.recorder.end(&format!("the connection to the phone was reset: {cause}")));
         self.ax = None;
+        self.displays = None;
     }
 
     /// The accessibility connection closed. A recording keeps the tunnel
@@ -647,20 +731,34 @@ impl Session {
         // without a size.
         for _ in 0..3 {
             let (seq, dump) = Box::pin(self.dump(fresh, full)).await?;
-            let screen = Screen::build(&dump, opts);
+            // A reading goes on without the display when the phone does not
+            // say which is in use (it may be folding): it carries the reason,
+            // and no gesture is sent on it.
+            let (display, display_unknown) = match self.ask_display().await? {
+                Ok(display) => (display, None),
+                Err(why) => {
+                    crate::device::ax::trace(|| format!("display: not told ({why}), the reading goes on without it"));
+                    (None, Some(why))
+                }
+            };
+            let mut screen = Screen::build_on(&dump, opts, display);
+            screen.display_unknown = display_unknown;
             self.ax_restart_unhelpful = false;
             self.system_in_front = crate::dnd::system_ui(&screen);
             if screen.width > 0.0 && screen.height > 0.0 {
-                self.screen_size = Some((screen.width, screen.height));
+                // The last screen that knew its display stays the one the
+                // unread paths go out on.
+                if screen.display_unknown.is_none() {
+                    self.last_screen = Some(screen.canvas(Space::Screen));
+                }
                 return Ok((seq, screen));
             }
             last = Some((seq, screen));
             fresh = Fresh::Force;
         }
         let (seq, mut screen) = last.unwrap();
-        if let Some((w, h)) = self.screen_size {
-            screen.width = w;
-            screen.height = h;
+        if let Some(last) = &self.last_screen {
+            (screen.width, screen.height) = last.size;
         }
         Ok((seq, screen))
     }
@@ -703,10 +801,14 @@ impl Session {
             for attempt in 0..2 {
                 let video = self.config.daemon.screen_video;
                 let marker = crate::paths::media_session(&self.udid);
+                let several = self.several_displays();
                 let tunnel = self.ensure_tunnel().await?;
                 let mut adapter = tunnel.adapter.clone();
-                match bounded("input session", 20, InputSession::open(&mut adapter, &mut tunnel.rsd, video, marker)).await {
+                match bounded("input session", 20, InputSession::open(&mut adapter, &mut tunnel.rsd, video, marker, several)).await {
                     Ok(s) => {
+                        if let Some(count) = s.touchscreen_count() {
+                            self.learn_touchscreens(count);
+                        }
                         self.input = Some(s);
                         break;
                     }
@@ -742,15 +844,18 @@ impl Session {
             let input = self.ensure_input().await?;
             let before = input.reports_sent();
             let sent = match &gesture {
-                Gesture::Tap { x, y, hold } => input.tap(*x, *y, *hold).await,
-                Gesture::DoubleTap { x, y } => input.double_tap(*x, *y).await,
-                Gesture::Drag { from, to, duration, motion } => input.drag(*from, *to, *duration, *motion).await,
+                Gesture::Tap { on, at, hold } => input.tap(on, *at, *hold).await,
+                Gesture::DoubleTap { on, at } => input.double_tap(on, *at).await,
+                Gesture::Drag { on, from, to, duration, motion } => input.drag(on, *from, *to, *duration, *motion).await,
                 Gesture::Button { page, usage, hold } => input.button(*page, *usage, *hold).await,
-                Gesture::Pinch(plan) => input.pinch(plan).await,
+                Gesture::Pinch { on, plan } => input.pinch(on, plan).await,
             };
             let Err(e) = sent else {
                 return Ok(());
             };
+            if let Some(why) = e.downcast_ref::<Unaimed>() {
+                return Err(unaimed(why));
+            }
             let untouched = input.reports_sent() == before;
             self.drop_input();
             if attempt == 0 && untouched {
@@ -912,8 +1017,9 @@ impl Session {
     }
 
     pub async fn screenshot_png(&mut self) -> Res<Vec<u8>> {
+        let display = self.active_display().await?;
         let mut svc: ScreenCaptureServiceClient<Box<dyn ReadWrite>> = self.rsd_client().await?;
-        bounded("screenshot", 20, svc.take_screenshot(None, ImageFormat::Png))
+        bounded("screenshot", 20, svc.take_screenshot(display.as_ref().map(|d| d.unique_id.as_str()), ImageFormat::Png))
             .await
             .map_err(|e| Fail::not_sent("screenshot_failed", e))
     }
@@ -921,7 +1027,29 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use super::{AxStall, ax_stall, plain_path};
+    use super::{AxStall, Session, Unaimed, ax_stall, plain_path, unaimed};
+
+    #[tokio::test]
+    async fn a_reading_on_a_phone_not_known_to_have_two_displays_asks_for_no_display() {
+        // No tunnel is open: asking would have to connect to a phone that
+        // does not exist, and fail.
+        let mut session = Session::new("no-such-phone-0000".into(), crate::config::Config::default());
+        for touchscreens in [None, Some(1)] {
+            session.touchscreens = touchscreens;
+            assert_eq!(session.active_display().await.unwrap(), None, "{touchscreens:?}");
+        }
+        assert!(session.tunnel.is_none());
+    }
+
+    #[test]
+    fn a_display_that_cannot_be_told_asks_to_wait_not_for_doctor() {
+        let unknown = unaimed(&Unaimed::Unknown("display info: no answer within 5 s".into()));
+        assert_eq!(unknown.code, "display_unknown");
+        assert!(!unknown.hint.as_deref().unwrap().contains("doctor"));
+        let changed = unaimed(&Unaimed::Changed { read: "951x669".into(), now: "669x951".into() });
+        assert_eq!(changed.code, "display_changed");
+        assert!(changed.hint.as_deref().unwrap().contains("iph read"));
+    }
 
     #[test]
     fn paths_compare_across_spellings() {

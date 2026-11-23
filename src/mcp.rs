@@ -209,7 +209,7 @@ fn tools() -> Vec<Value> {
             json!({
                 "action": { "type": "string", "enum": ["start", "stop", "status"] },
                 "path": { "type": "string", "description": "start: absolute path of the MP4 to write (default: in iph's state directory)." },
-                "display": { "type": "integer", "description": "start: the display to record (default: the first that shows the screen)." },
+                "display": { "type": "integer", "description": "start: the display to record (default: the one in use on a phone with two displays, else the first that shows the screen)." },
             }),
             &["action"],
         ),

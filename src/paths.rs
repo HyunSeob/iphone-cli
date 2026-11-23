@@ -54,6 +54,12 @@ pub fn media_session(udid: &str) -> PathBuf {
     state_dir().join(format!("{udid}.media"))
 }
 
+/// How many touchscreens the phone has: more than one on a phone with two
+/// displays.
+pub fn touchscreens(udid: &str) -> PathBuf {
+    state_dir().join(format!("{udid}.touchscreens"))
+}
+
 pub fn daemon_pid(udid: &str) -> PathBuf {
     state_dir().join(format!("{udid}.pid"))
 }

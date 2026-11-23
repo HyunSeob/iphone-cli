@@ -18,7 +18,8 @@ use crate::{
     },
     device::{
         ax::trace,
-        input::{Motion, normalize},
+        display::{Canvas, Space},
+        input::Motion,
         pinch,
         session::{Fresh, Gesture, Session, reuse},
     },
@@ -356,11 +357,31 @@ pub enum Target {
     Point(f64, f64),
 }
 
+/// Where to touch for one target: `at`, a point on `on`, and the element there.
+struct Spot {
+    at: (f64, f64),
+    on: Canvas,
+    element: Option<Element>,
+}
+
 /// The reading failed because the phone's accessibility daemon gave none on a
-/// phone not known to be locked (`Session::unread_size`).
+/// phone not known to be locked (`Session::unread_screen`).
 fn daemon_silent(read_failed: &Fail) -> bool {
     let locked = read_failed.extra.get("phone_locked").and_then(Value::as_bool) == Some(true);
     read_failed.code == "ax_timeout" && !locked
+}
+
+/// What a reading says when it was taken without knowing which display of the
+/// phone is in use.
+fn display_warning(why: &str) -> Value {
+    json!({
+        "code": "display_unknown",
+        "message": format!("the display in use could not be told ({why}); the screen size may be that of the other display"),
+        "hint": t(
+            "폰을 접거나 펴는 중이면 잠시 뒤 `iph read`로 다시 읽으세요. 제스처는 보내기 전에 화면을 다시 확인하며, 이 읽기의 좌표는 화면을 다시 읽기 전까지 보내지 않습니다.",
+            "If the phone is folding or unfolding, wait a moment and read again with `iph read`. Gestures check the display again before they are sent, and points from this reading are not sent until the screen is read again.",
+        ),
+    })
 }
 
 pub fn parse_target(v: &Value) -> Res<Target> {
@@ -415,12 +436,15 @@ pub fn resolve_one<'a>(sel: &Selector, screen: &'a Screen) -> Res<&'a Element> {
     }
 }
 
-/// A point inside the visible part of `el` that no other element covers.
+/// A point inside the visible part of `el` that no other element covers, in
+/// the space of `el`'s frame.
 fn tap_point(el: &Element, screen: &Screen) -> Res<(f64, f64)> {
     let frame = el.frame.ok_or_else(|| {
         Fail::not_sent("no_frame", "the element has no position on screen").with("element", brief(el))
     })?;
-    let bounds = Rect { x: 0.0, y: 0.0, w: screen.width, h: screen.height };
+    let space = screen.space_of(el);
+    let (w, h) = screen.size(space);
+    let bounds = Rect { x: 0.0, y: 0.0, w, h };
     let visible = frame.intersection(&bounds).ok_or_else(|| {
         Fail::not_sent("off_screen", "the element is outside the screen")
             .hint(t(
@@ -429,20 +453,23 @@ fn tap_point(el: &Element, screen: &Screen) -> Res<(f64, f64)> {
             ))
             .with("element", brief(el))
     })?;
+    // Frames of the system's surfaces and of apps compare on the panel.
+    let frame = screen.panel_frame(el).unwrap_or(frame);
     let covered = |x: f64, y: f64| -> Option<&Element> {
-        let hit = screen.element_at(x, y)?;
+        let hit = screen.element_in(space, x, y)?;
         if hit.id == el.id {
             return None;
         }
         // A child of the target (a label inside a row) is fine; an element
         // that merely overlaps it (a toolbar over a list) is not.
-        let inside = hit.frame.is_some_and(|h| {
+        let hit_frame = screen.panel_frame(hit);
+        let inside = hit_frame.is_some_and(|h| {
             h.x >= frame.x - 1.0
                 && h.y >= frame.y - 1.0
                 && h.x + h.w <= frame.x + frame.w + 1.0
                 && h.y + h.h <= frame.y + frame.h + 1.0
         });
-        let encloses = hit.frame.is_some_and(|h| {
+        let encloses = hit_frame.is_some_and(|h| {
             frame.x >= h.x - 1.0
                 && frame.y >= h.y - 1.0
                 && frame.x + frame.w <= h.x + h.w + 1.0
@@ -531,14 +558,18 @@ impl Session {
                 screen.apps.retain(|a| a.pid == front);
             }
         let has_ids = screen.elements.iter().any(|e| e.identifier.is_some());
-        Ok(fields! {
+        let mut out = fields! {
             "screen": {"width": screen.width, "height": screen.height},
             "apps": screen.apps,
             "count": screen.elements.len(),
             "pass": if args.full || args.raw || has_ids { "full" } else { "initial" },
             "seq": seq,
             "elements": screen.elements,
-        })
+        };
+        if let Some(why) = &screen.display_unknown {
+            out.insert("warning".into(), display_warning(why));
+        }
+        Ok(out)
     }
 
     pub async fn cmd_find(&mut self, args: FindArgs) -> Res {
@@ -639,11 +670,7 @@ impl Session {
 
     /// Read the screen and find where to tap for each target. Fails without
     /// sending anything when a target is missing, ambiguous or covered.
-    async fn locate(
-        &mut self,
-        targets: &[Target],
-        fresh: Fresh,
-    ) -> Res<(Screen, Vec<(f64, f64, Option<Element>)>)> {
+    async fn locate(&mut self, targets: &[Target], fresh: Fresh) -> Res<(Screen, Vec<Spot>)> {
         let need_ids = targets
             .iter()
             .any(|t| matches!(t, Target::Selector(s) if s.needs_identifier()));
@@ -651,26 +678,25 @@ impl Session {
         if screen.width <= 0.0 || screen.height <= 0.0 {
             return Err(Fail::not_sent("no_screen_size", "the reading has no application frame"));
         }
-        let mut points = Vec::with_capacity(targets.len());
+        let mut spots = Vec::with_capacity(targets.len());
         for target in targets {
-            points.push(match target {
+            spots.push(match target {
                 Target::Selector(sel) => {
                     let el = resolve_one(sel, &screen)?;
-                    let (x, y) = tap_point(el, &screen)?;
-                    (x, y, Some(el.clone()))
+                    let at = tap_point(el, &screen)?;
+                    Spot { at, on: screen.canvas(screen.space_of(el)), element: Some(el.clone()) }
                 }
                 Target::Point(x, y) => {
-                    if *x < 0.0 || *y < 0.0 || *x > screen.width || *y > screen.height {
-                        return Err(Fail::invalid(format!(
-                            "point {x},{y} is outside the {}x{} screen",
-                            screen.width, screen.height
-                        )));
+                    let on = screen.canvas(screen.point_space());
+                    let (w, h) = on.size;
+                    if *x < 0.0 || *y < 0.0 || *x > w || *y > h {
+                        return Err(Fail::invalid(format!("point {x},{y} is outside the {w}x{h} screen")));
                     }
-                    (*x, *y, screen.element_at(*x, *y).cloned())
+                    Spot { at: (*x, *y), on, element: screen.element_at(*x, *y).cloned() }
                 }
             });
         }
-        Ok((screen, points))
+        Ok((screen, spots))
     }
 
     /// Locate the targets on the latest reading when it is too old to reuse
@@ -679,7 +705,7 @@ impl Session {
     /// up or went away) and every target is still where it was. Each question
     /// takes tens of milliseconds; a full reading takes over a second. `None`
     /// sends the caller to a full reading.
-    async fn locate_confirmed(&mut self, targets: &[Target]) -> Option<(Screen, Vec<(f64, f64, Option<Element>)>)> {
+    async fn locate_confirmed(&mut self, targets: &[Target]) -> Option<(Screen, Vec<Spot>)> {
         let age = self.reading_age()?;
         if age <= reuse() || age > CONFIRMED_REUSE || !targets.iter().all(|t| matches!(t, Target::Selector(_))) {
             return None;
@@ -701,8 +727,8 @@ impl Session {
                 return None;
             }
         }
-        for (_, _, el) in &located.1 {
-            let el = el.as_ref()?;
+        for spot in &located.1 {
+            let el = spot.element.as_ref()?;
             let now = ax
                 .ask(el.key?, attrs::FRAME, ASK_WAIT)
                 .await?
@@ -723,7 +749,14 @@ impl Session {
     /// if getting ready took long enough for the screen to have moved on: a
     /// cold input session takes seconds to open, and a tap must never go to
     /// where something used to be.
-    async fn locate_ready(&mut self, targets: &[Target]) -> Res<(Screen, Vec<(f64, f64, Option<Element>)>)> {
+    ///
+    /// On a phone iph has not touched before, input comes first: the reading
+    /// depends on whether the phone has more than one display, and an input
+    /// session is what tells.
+    async fn locate_ready(&mut self, targets: &[Target]) -> Res<(Screen, Vec<Spot>)> {
+        if self.displays_unknown() {
+            self.ensure_input().await?;
+        }
         let located = match self.locate_confirmed(targets).await {
             Some(l) => l,
             None => self.locate(targets, Fresh::MaxAge(reuse())).await?,
@@ -746,20 +779,20 @@ impl Session {
             return Err(Fail::invalid("--long must be 1..60000 ms"));
         }
         let target = parse_target(&args.target)?;
-        let (screen, mut points) = match self.locate_ready(std::slice::from_ref(&target)).await {
+        let (screen, mut spots) = match self.locate_ready(std::slice::from_ref(&target)).await {
             Ok(located) => located,
             Err(read_failed) => return self.tap_unread(&target, &args, read_failed).await,
         };
-        let (x, y, element) = points.remove(0);
+        let Spot { at, on, element } = spots.remove(0);
+        let (x, y) = at;
         let element_json = element.as_ref().map(brief);
 
-        let (nx, ny) = (normalize(x, screen.width), normalize(y, screen.height));
         let before = screen.signature();
         let input_began = Instant::now();
         let gesture = if args.double {
-            Gesture::DoubleTap { x: nx, y: ny }
+            Gesture::DoubleTap { on, at }
         } else {
-            Gesture::Tap { x: nx, y: ny, hold: Duration::from_millis(args.long_ms.unwrap_or(50)) }
+            Gesture::Tap { on, at, hold: Duration::from_millis(args.long_ms.unwrap_or(50)) }
         };
         self.send_gesture(gesture).await?;
         let after = if args.no_wait {
@@ -806,35 +839,37 @@ impl Session {
         Ok(out)
     }
 
-    /// The last known screen size, when `read_failed` is the phone's
+    /// The screen as the last complete reading saw it (its size, and the
+    /// display in use then), when `read_failed` is the phone's
     /// accessibility daemon giving no reading on an unlocked phone. Control
     /// Center does that while a screen recording runs, until it is closed
     /// (2026-11-12, over Wi-Fi and USB alike), and closing it takes a tap, a
     /// swipe or a button: input that needs no element then goes out on this
     /// size, unverified.
-    fn unread_size(&self, read_failed: &Fail) -> Option<(f64, f64)> {
+    fn unread_screen(&self, read_failed: &Fail) -> Option<Canvas> {
         if !daemon_silent(read_failed) {
             return None;
         }
-        self.screen_size
+        self.last_screen.clone()
     }
 
-    /// A tap on a point while the screen cannot be read (`unread_size`).
+    /// A tap on a point while the screen cannot be read (`unread_screen`).
     /// Nothing is read afterwards either: that would only wait out another
     /// timeout.
     async fn tap_unread(&mut self, target: &Target, args: &TapArgs, read_failed: Fail) -> Res {
-        let (Target::Point(x, y), Some((w, h))) = (target, self.unread_size(&read_failed)) else {
+        let (Target::Point(x, y), Some(on)) = (target, self.unread_screen(&read_failed)) else {
             return Err(read_failed);
         };
         let (x, y) = (*x, *y);
+        let (w, h) = on.size;
         if x < 0.0 || y < 0.0 || x > w || y > h {
             return Err(Fail::invalid(format!("point {x},{y} is outside the {w}x{h} screen")));
         }
-        let (nx, ny) = (normalize(x, w), normalize(y, h));
+        let at = (x, y);
         let gesture = if args.double {
-            Gesture::DoubleTap { x: nx, y: ny }
+            Gesture::DoubleTap { on, at }
         } else {
-            Gesture::Tap { x: nx, y: ny, hold: Duration::from_millis(args.long_ms.unwrap_or(50)) }
+            Gesture::Tap { on, at, hold: Duration::from_millis(args.long_ms.unwrap_or(50)) }
         };
         self.send_gesture(gesture).await?;
         Ok(fields! {
@@ -856,19 +891,15 @@ impl Session {
             return Err(Fail::invalid("the tap list is empty"));
         }
         let parsed: Vec<Target> = targets.iter().map(parse_target).collect::<Res<_>>()?;
-        let (screen, points) = self.locate_ready(&parsed).await?;
+        let (screen, spots) = self.locate_ready(&parsed).await?;
         let before = screen.signature();
-        let normalized: Vec<(u16, u16)> = points
+        let tapped: Vec<Value> = spots
             .iter()
-            .map(|(x, y, _)| (normalize(*x, screen.width), normalize(*y, screen.height)))
-            .collect();
-        let tapped: Vec<Value> = points
-            .iter()
-            .map(|(_, _, el)| el.as_ref().map(brief).unwrap_or(Value::Null))
+            .map(|spot| spot.element.as_ref().map(brief).unwrap_or(Value::Null))
             .collect();
         let input_began = Instant::now();
-        for (i, (nx, ny)) in normalized.iter().enumerate() {
-            let tap = Gesture::Tap { x: *nx, y: *ny, hold: Duration::from_millis(50) };
+        for (i, spot) in spots.iter().enumerate() {
+            let tap = Gesture::Tap { on: spot.on.clone(), at: spot.at, hold: Duration::from_millis(50) };
             if let Err(mut fail) = self.send_gesture(tap).await {
                 if i > 0 {
                     // The earlier taps of the list did go out.
@@ -899,12 +930,14 @@ impl Session {
         Ok(out)
     }
 
-    /// Drag between two points given in logical points and report whether the
-    /// screen changed.
+    /// Drag between two points of `space` and report whether the screen
+    /// changed. `None`: points given by hand, in the space of the app in
+    /// front.
     pub(crate) async fn drag_points(
         &mut self,
         from: (f64, f64),
         to: (f64, f64),
+        space: Option<Space>,
         duration: Duration,
         motion: Motion,
     ) -> Res<(bool, Option<Screen>)> {
@@ -914,19 +947,16 @@ impl Session {
         if screen.width <= 0.0 || screen.height <= 0.0 {
             return Err(Fail::not_sent("no_screen_size", "the reading has no application frame"));
         }
+        let on = screen.canvas(space.unwrap_or_else(|| screen.point_space()));
+        let (w, h) = on.size;
         for (x, y) in [from, to] {
-            if x < 0.0 || y < 0.0 || x > screen.width || y > screen.height {
-                return Err(Fail::invalid(format!(
-                    "point {x},{y} is outside the {}x{} screen",
-                    screen.width, screen.height
-                )));
+            if x < 0.0 || y < 0.0 || x > w || y > h {
+                return Err(Fail::invalid(format!("point {x},{y} is outside the {w}x{h} screen")));
             }
         }
         let before = screen.signature();
-        let a = (normalize(from.0, screen.width), normalize(from.1, screen.height));
-        let b = (normalize(to.0, screen.width), normalize(to.1, screen.height));
         let input_began = Instant::now();
-        self.send_gesture(Gesture::Drag { from: a, to: b, duration, motion }).await?;
+        self.send_gesture(Gesture::Drag { on, from, to, duration, motion }).await?;
         let mut after = self.observe(input_began, AFTER_DRAG).await.map(|(_, s)| s);
         if motion == Motion::Flick {
             // The content coasts after a flick: read until two readings agree.
@@ -957,10 +987,18 @@ impl Session {
         let read = self
             .screen(Fresh::MaxAge(reuse()), false, BuildOptions::default())
             .await;
+        let mut unread = None;
         let (w, h) = match &read {
             Ok((_, screen)) => (screen.width, screen.height),
-            Err(read_failed) => self.unread_size(read_failed).ok_or_else(|| read_failed.clone())?,
+            Err(read_failed) => {
+                let on = self.unread_screen(read_failed).ok_or_else(|| read_failed.clone())?;
+                let size = on.size;
+                unread = Some(on);
+                size
+            }
         };
+        // A direction is laid out on the screen as turned, whatever is in front.
+        let space = args.direction.as_ref().map(|_| Space::Screen);
         let (from, to) = match (&args.direction, args.from, args.to) {
             (Some(dir), None, None) => {
                 // The finger moves in the named direction across the middle.
@@ -982,16 +1020,14 @@ impl Session {
         };
         let duration = Duration::from_millis(args.duration_ms.unwrap_or(250).clamp(50, 10_000));
         let motion = if args.drag { Motion::Place } else { Motion::Flick };
-        if read.is_err() {
-            // `unread_size`: drag on the last known size, read nothing after.
+        if let Some(on) = unread {
+            // `unread_screen`: drag on the last known size, read nothing after.
             for (x, y) in [from, to] {
                 if x < 0.0 || y < 0.0 || x > w || y > h {
                     return Err(Fail::invalid(format!("point {x},{y} is outside the {w}x{h} screen")));
                 }
             }
-            let a = (normalize(from.0, w), normalize(from.1, h));
-            let b = (normalize(to.0, w), normalize(to.1, h));
-            self.send_gesture(Gesture::Drag { from: a, to: b, duration, motion }).await?;
+            self.send_gesture(Gesture::Drag { on, from, to, duration, motion }).await?;
             return Ok(fields! {
                 "sent": true,
                 "verified": false,
@@ -1001,7 +1037,7 @@ impl Session {
                 "note": UNREAD_NOTE,
             });
         }
-        let (changed, after) = self.drag_points(from, to, duration, motion).await?;
+        let (changed, after) = self.drag_points(from, to, space, duration, motion).await?;
         Ok(fields! {
             "sent": true,
             "verified": after.is_some(),
@@ -1020,36 +1056,38 @@ impl Session {
         let duration = Duration::from_millis(args.duration_ms.unwrap_or(500).clamp(100, 10_000));
         let target = (!args.at.is_null()).then(|| parse_target(&args.at)).transpose()?;
         let read = match &target {
-            Some(target) => self.locate_ready(std::slice::from_ref(target)).await.map(|(screen, mut points)| {
-                let (x, y, _) = points.remove(0);
-                (screen, Some((x, y)))
+            Some(target) => self.locate_ready(std::slice::from_ref(target)).await.map(|(screen, mut spots)| {
+                let spot = spots.remove(0);
+                (screen, Some((spot.at, spot.on)))
             }),
             None => self
                 .screen(Fresh::MaxAge(reuse()), false, BuildOptions::default())
                 .await
                 .map(|(_, screen)| (screen, None)),
         };
-        let (size, at, before) = match &read {
+        let (on, at, before) = match &read {
             Ok((screen, _)) if screen.width <= 0.0 || screen.height <= 0.0 => {
                 return Err(Fail::not_sent("no_screen_size", "the reading has no application frame"));
             }
-            Ok((screen, at)) => ((screen.width, screen.height), *at, Some(screen.signature())),
+            Ok((screen, Some((at, on)))) => (on.clone(), Some(*at), Some(screen.signature())),
+            Ok((screen, None)) => (screen.canvas(Space::Screen), None, Some(screen.signature())),
             Err(read_failed) => {
-                // `unread_size`: only the middle or a point can be pinched without a reading.
-                let size = self.unread_size(read_failed).ok_or_else(|| read_failed.clone())?;
+                // `unread_screen`: only the middle or a point can be pinched without a reading.
+                let on = self.unread_screen(read_failed).ok_or_else(|| read_failed.clone())?;
                 let at = match &target {
                     None => None,
                     Some(Target::Point(x, y)) => Some((*x, *y)),
                     Some(Target::Selector(_)) => return Err(read_failed.clone()),
                 };
-                (size, at, None)
+                (on, at, None)
             }
         };
+        let size = on.size;
         let center = at.unwrap_or((size.0 / 2.0, size.1 / 2.0));
         let plan = pinch::plan(&pinch::Spec { screen: size, center, scale, rotate, duration }).map_err(Fail::invalid)?;
         let span = [(plan.span.0 * 10.0).round() / 10.0, (plan.span.1 * 10.0).round() / 10.0];
         let input_began = Instant::now();
-        self.send_gesture(Gesture::Pinch(plan)).await?;
+        self.send_gesture(Gesture::Pinch { on, plan }).await?;
         let mut out = fields! {
             "sent": true,
             "center": [(center.0 * 10.0).round() / 10.0, (center.1 * 10.0).round() / 10.0],
@@ -1082,7 +1120,7 @@ impl Session {
         };
         // A drag that slows to a stop moves the list by the finger's distance,
         // without a fling that would overshoot.
-        self.drag_points(from, to, Duration::from_millis(500), Motion::Place)
+        self.drag_points(from, to, Some(Space::Screen), Duration::from_millis(500), Motion::Place)
             .await
     }
 
@@ -1845,6 +1883,19 @@ mod type_tests {
         assert!(out["submit_sent"].is_null());
         assert_eq!(out["value_changed"], true);
         assert_eq!(out["clipboard_restored"], false);
+    }
+}
+
+#[cfg(test)]
+mod display_warning_tests {
+    use super::*;
+
+    #[test]
+    fn a_reading_that_could_not_tell_the_display_says_why_and_what_to_do() {
+        let warning = display_warning("display info: no answer within 5 s");
+        assert_eq!(warning["code"], "display_unknown");
+        assert!(warning["message"].as_str().unwrap().contains("no answer within 5 s"));
+        assert!(warning["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
     }
 }
 
