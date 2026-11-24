@@ -377,6 +377,8 @@ Tools: `iph_connect`, `iph_read`, `iph_find`, `iph_tap`, `iph_swipe`, `iph_pinch
 
 MCP Registry: `mcp-name: io.github.HyunSeob/iphone-cli`
 
+[![HyunSeob/iphone-cli MCP server](https://glama.ai/mcp/servers/HyunSeob/iphone-cli/badges/score.svg)](https://glama.ai/mcp/servers/HyunSeob/iphone-cli)
+
 ## Speed
 
 iPhone 15 Pro Max, iOS 27.0.1, Wi-Fi, with the resident process connected (2026-11-11).
